@@ -57,3 +57,7 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
 PR 标记 Ready 前，填写 `.github/PULL_REQUEST_TEMPLATE.md`，并附上实际命令与结果。必须特别说明 SQL 策略、权限隔离、超时/取消、连接归还、审计与密钥脱敏是否受影响。
 
 提交后由独立 Codex Review 审查；Claude Code 不得批准或合并自己实现的 PR。收到 P0/P1 审查意见时先复现并修复，再更新测试与 PR 证据；不能复现或不同意时提交可验证证据并升级给 Owner。
+
+## P0 前端设计基线
+
+实现 `apps/web` 或任务 `P0-06` 前，必须阅读 `frontend-design/README.md`、`frontend-design/DESIGN-SPEC.md` 和 `frontend-design/IMPLEMENTATION.md`。视觉基线为 Stitch 的 **A · Quiet Precision**；MVP 默认使用简体中文界面，并按可切换英文的结构管理文案和字体。截图和 HTML 只作视觉参考，产品行为与安全边界仍以 `AGENTS.md`、ADR 和 `webdb-design-draft.md` 为权威。
