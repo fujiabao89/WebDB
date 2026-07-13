@@ -47,3 +47,6 @@ coverage/
 # Temp files
 tmp/
 temp/
+
+# Auto-fix state (local only)
+.auto-fix/

@@ -19,8 +19,10 @@
 set -euo pipefail
 
 # ========== 配置 ==========
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="fujiabao89/WebDB"
-PROJECT_DIR="/c/Users/34026/项目开发3"
+# 优先使用环境变量，其次 git rev-parse，最后从脚本位置推导
+PROJECT_DIR="${WEBDB_PROJECT_DIR:-$(git rev-parse --show-toplevel 2>/dev/null || echo "$(cd "$SCRIPT_DIR/.." && pwd)")}"
 STATE_DIR="$PROJECT_DIR/.auto-fix"
 MAX_ROUNDS=3
 CODEX_LOGIN="chatgpt-codex-connector[bot]"
@@ -130,6 +132,16 @@ run_claude_fix() {
     local review_file=$2
     local branch
     branch=$(gh pr view "$pr" --json headRefName -q '.headRefName')
+    local STASHED=false
+
+    # 退出时恢复 stash（如有）
+    cleanup_stash() {
+        if $STASHED; then
+            echo "📦 恢复之前保存的工作区变更..."
+            git stash pop 2>/dev/null || echo "⚠️  无法恢复 stash（可能有冲突，请手动 git stash list 查看）"
+        fi
+    }
+    trap cleanup_stash RETURN
 
     echo ""
     echo "┌──────────────────────────────────────────────┐"
@@ -141,7 +153,7 @@ run_claude_fix() {
     # 保存当前工作区（如有未提交变更）
     if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
         echo "📦 保存当前工作区变更..."
-        git stash push -m "auto-fix: 切换分支前自动保存" 2>/dev/null || true
+        git stash push -m "auto-fix: 切换分支前自动保存" 2>/dev/null && STASHED=true
     fi
 
     # 检出 PR 分支
@@ -156,17 +168,16 @@ run_claude_fix() {
     # 通过 stdin 传入 prompt（claude -p 从 stdin 读取）
     # 注意: claude 命令在项目目录执行以读取 CLAUDE.md 上下文
     local claude_output
-    claude_output=$(echo "$review_content" | claude -p "你是 WebDB 项目的自动修复 Agent。阅读以下 Codex 审查意见，仅修复 P1(HIGH) 和 P2(MEDIUM) 问题。禁止: 改架构/API/Schema、动密钥凭证、改 CI/CD 配置、无关重构。修复后 commit 并 push 到 $branch。" --dangerously-skip-permissions --max-turns 15 --output-format text 2>&1) || true
+    claude_output=$(echo "$review_content" | claude -p "你是 WebDB 项目的自动修复 Agent。阅读以下 Codex 审查意见，仅修复 P1(HIGH) 和 P2(MEDIUM) 问题。禁止: 改架构/API/Schema、动密钥凭证、改 CI/CD 配置、无关重构。修复完成后不要提交或推送，脚本会自动处理后续步骤。" --dangerously-skip-permissions --max-turns 15 --output-format text 2>&1) || true
 
     echo "$claude_output"
 
     # 检查是否有变更
-    if ! git diff --quiet -- . ':(exclude).auto-fix' 2>/dev/null; then
+    if ! git diff --quiet -- . ':(exclude).auto-fix' 2>/dev/null || ! git diff --cached --quiet -- . ':(exclude).auto-fix' 2>/dev/null; then
         echo ""
         echo "📦 检测到代码变更，提交并推送..."
-        # git add -u: 只暂存已跟踪文件的修改/删除，不添加未跟踪文件
-        # 避免把 .auto-fix/ .codex/ frontend-design/ 等元数据目录误提交
-        git add -u
+        # 暂存所有变更（含新文件），排除元数据目录
+        git add --all -- . ':!'.auto-fix' ':!'.codex' ':!'frontend-design'
         git commit -m "fix: 根据 Codex 审查意见自动修复 (PR #$pr)
 
 Claude Code 根据 chatgpt-codex-connector 的审查意见修复了 P1/P2 级别问题。
@@ -305,11 +316,11 @@ Claude Code 已完成最后一轮自动修复。请进行人工审查。
 
                 echo "📢 触发 Codex 重新审查..."
                 gh pr comment "$pr" --body "@codex review"
-            else
-                echo "⚠️  修复未产生代码变更"
-            fi
 
-            mark_review_processed "$pr" "$review_id"
+                mark_review_processed "$pr" "$review_id"
+            else
+                echo "⚠️  修复未产生代码变更，保留审查状态供下次重试"
+            fi
             ;;
 
         NONE)
