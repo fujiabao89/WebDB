@@ -30,7 +30,7 @@ trap 'echo ""; echo "👋 监视已停止"; exit 0' INT TERM
 
 while true; do
     echo "━━━━━━━━━━━━━━━━━━━━ $(date '+%H:%M:%S') ━━━━━━━━━━━━━━━━━━━━"
-    bash "$AUTO_FIX"
+    bash "$AUTO_FIX" || echo "⚠️  本轮检查失败（将继续监视）"
     echo ""
     echo "下次检查: ${INTERVAL}秒后"
     sleep "$INTERVAL"

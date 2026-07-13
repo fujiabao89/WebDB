@@ -52,6 +52,9 @@ export function pick(obj, keys) {
  * @returns 解析后的对象，失败返回空对象
  */
 export function safeJsonParse(jsonStr) {
-  const result = JSON.parse(jsonStr);
-  return result;
+  try {
+    return JSON.parse(jsonStr);
+  } catch {
+    return {};
+  }
 }
