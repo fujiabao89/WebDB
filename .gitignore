@@ -14,6 +14,7 @@ out/
 .env.local
 .env.*.local
 *.env
+!.env.example
 
 # IDE
 .vscode/
@@ -43,6 +44,13 @@ docker-compose.override.yml
 # Test coverage
 coverage/
 .nyc_output/
+
+# Go
+*.exe
+*.test
+*.out
+*.prof
+/apps/api/bin/
 
 # Temp files
 tmp/
