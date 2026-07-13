@@ -1,0 +1,5 @@
+[mcp_servers.stitch]
+url = "https://stitch.googleapis.com/mcp"
+enabled = true
+default_tools_approval_mode = "writes"
+env_http_headers = { "X-Goog-Api-Key" = "STITCH_API_KEY" }
