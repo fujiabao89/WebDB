@@ -1,4 +1,5 @@
-# 初始 Owner：仓库所属账号。团队建立后应替换为 GitHub Teams，例如 @org/webdb-api。
+# 单人维护阶段：本文件用于路径责任归属和未来团队扩展；main 的 ruleset 不要求 Code Owner 审批。
+# 团队建立后，将 @fujiabao89 替换/补充为 GitHub Teams，并在 ruleset 中重新启用 Code Owner 审批。
 * @fujiabao89
 
 # 协作与仓库治理
