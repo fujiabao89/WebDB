@@ -1,0 +1,14 @@
+# 初始 Owner：仓库所属账号。团队建立后应替换为 GitHub Teams，例如 @org/webdb-api。
+* @fujiabao89
+
+# 协作与仓库治理
+/AGENTS.md @fujiabao89
+/CLAUDE.md @fujiabao89
+/.github/ @fujiabao89
+/docs/ @fujiabao89
+/webdb-design-draft.md @fujiabao89
+
+# WebDB 高风险区域（代码落地后生效）
+/apps/api/ @fujiabao89
+/packages/contracts/ @fujiabao89
+/deploy/ @fujiabao89
