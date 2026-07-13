@@ -15,14 +15,15 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -ldflags="-s -w" -o /bin/api ./cmd/server
 
 # ---- 运行阶段 ----
-FROM gcr.io/distroless/static-debian12
+FROM alpine:3.21
 
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+RUN apk add --no-cache ca-certificates tzdata && \
+    adduser -D -H -s /sbin/nologin webdb
+
 COPY --from=builder /bin/api /bin/api
 
 EXPOSE 8080
 
-USER nonroot:nonroot
+USER webdb
 
 ENTRYPOINT ["/bin/api"]
