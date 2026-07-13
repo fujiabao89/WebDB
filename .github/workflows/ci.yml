@@ -9,6 +9,28 @@ permissions:
   contents: read
 
 jobs:
+  detect-projects:
+    name: Detect project checks
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.detect.outputs.web }}
+      api: ${{ steps.detect.outputs.api }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        name: Detect Web and API projects
+        run: |
+          if test -f apps/web/package.json; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
+          fi
+          if test -f apps/api/go.mod; then
+            echo "api=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "api=false" >> "$GITHUB_OUTPUT"
+          fi
+
   repository-safety:
     name: Repository safety
     runs-on: ubuntu-latest
@@ -31,7 +53,8 @@ jobs:
   web:
     name: Web checks
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('apps/web/package.json') != '' }}
+    needs: detect-projects
+    if: needs.detect-projects.outputs.web == 'true'
     defaults:
       run:
         working-directory: apps/web
@@ -56,7 +79,8 @@ jobs:
   api:
     name: API checks
     runs-on: ubuntu-latest
-    if: ${{ hashFiles('apps/api/go.mod') != '' }}
+    needs: detect-projects
+    if: needs.detect-projects.outputs.api == 'true'
     defaults:
       run:
         working-directory: apps/api
