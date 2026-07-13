@@ -164,7 +164,9 @@ run_claude_fix() {
     if ! git diff --quiet -- . ':(exclude).auto-fix' 2>/dev/null; then
         echo ""
         echo "📦 检测到代码变更，提交并推送..."
-        git add .
+        # git add -u: 只暂存已跟踪文件的修改/删除，不添加未跟踪文件
+        # 避免把 .auto-fix/ .codex/ frontend-design/ 等元数据目录误提交
+        git add -u
         git commit -m "fix: 根据 Codex 审查意见自动修复 (PR #$pr)
 
 Claude Code 根据 chatgpt-codex-connector 的审查意见修复了 P1/P2 级别问题。
