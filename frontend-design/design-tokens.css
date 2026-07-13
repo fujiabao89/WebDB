@@ -1,0 +1,49 @@
+:root {
+  color-scheme: light;
+
+  --webdb-color-primary: #00685f;
+  --webdb-color-primary-hover: #008378;
+  --webdb-color-on-primary: #ffffff;
+  --webdb-color-text: #131b2e;
+  --webdb-color-text-muted: #3d4947;
+  --webdb-color-surface: #faf8ff;
+  --webdb-color-surface-raised: #ffffff;
+  --webdb-color-surface-low: #f2f3ff;
+  --webdb-color-surface-mid: #eaedff;
+  --webdb-color-border: #bcc9c6;
+  --webdb-color-danger: #ba1a1a;
+  --webdb-color-danger-surface: #ffdad6;
+  --webdb-color-warning: #924628;
+  --webdb-color-success: #065f46;
+  --webdb-color-success-surface: #d1fae5;
+
+  --webdb-font-ui: Inter, "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", "Noto Sans SC", system-ui, sans-serif;
+  --webdb-font-mono: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", "Noto Sans Mono CJK SC", "Microsoft YaHei UI", monospace;
+
+  --webdb-text-xs: 0.6875rem;
+  --webdb-text-sm: 0.8125rem;
+  --webdb-text-md: 0.875rem;
+  --webdb-code-sm: 0.75rem;
+  --webdb-code-md: 0.8125rem;
+  --webdb-leading-zh-body: 1.375rem;
+  --webdb-leading-zh-compact: 1.125rem;
+  --webdb-leading-code: 1.25rem;
+
+  --webdb-space-1: 0.25rem;
+  --webdb-space-2: 0.5rem;
+  --webdb-space-3: 0.75rem;
+  --webdb-space-4: 1rem;
+  --webdb-space-6: 1.5rem;
+
+  --webdb-radius-sm: 0.125rem;
+  --webdb-radius-md: 0.25rem;
+  --webdb-radius-pill: 0.5rem;
+  --webdb-border: 1px solid var(--webdb-color-border);
+  --webdb-focus-ring: 0 0 0 2px var(--webdb-color-primary);
+
+  --webdb-topbar-height: 3rem;
+  --webdb-footer-height: 2rem;
+  --webdb-left-rail-width: 15rem;
+  --webdb-right-rail-width: 17.5rem;
+  --webdb-control-min-height: 1.75rem;
+}
