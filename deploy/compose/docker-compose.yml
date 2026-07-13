@@ -7,7 +7,7 @@
 #   demo-pg       演示 PostgreSQL + 合成数据       → 127.0.0.1:5433
 #   demo-mysql    演示 MySQL 8.4 + 合成数据        → 127.0.0.1:3306
 #   api           Go API / 执行服务                → 127.0.0.1:8080
-#   web           React 前端 (nginx 静态服务)      → 127.0.0.1:3000
+#   web           React 前端 (Vite 开发服务器)       → 127.0.0.1:3000
 
 name: webdb-p0
 
@@ -61,9 +61,10 @@ services:
 
   # ============================================================
   # 演示 MySQL 8.4 LTS — 含合成数据与只读账号
+  # digest: sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
   # ============================================================
   demo-mysql:
-    image: mysql:8.4
+    image: mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
     environment:
       MYSQL_ROOT_PASSWORD: ${DEMO_MYSQL_ROOT_PASSWORD:-change_me}
       MYSQL_DATABASE: webdb_demo
@@ -86,11 +87,13 @@ services:
 
   # ============================================================
   # API 服务 — 唯一可连接目标数据库的组件
+  # dev target: golang:1.26-bookworm（含 shell）
   # ============================================================
   api:
     build:
       context: ../../apps/api
       dockerfile: Dockerfile
+      target: dev
     environment:
       API_PORT: "8080"
       META_DB_HOST: webdb-meta
@@ -129,17 +132,24 @@ services:
     restart: unless-stopped
 
   # ============================================================
-  # Web 前端 — 仅静态文件，不含密钥
+  # Web 前端 — Vite 开发服务器 (dev target)，容器内监听 0.0.0.0:5173
   # ============================================================
   web:
     build:
       context: ../../apps/web
       dockerfile: Dockerfile
+      target: dev
     ports:
-      - "127.0.0.1:3000:80"
+      - "127.0.0.1:3000:5173"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5173/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     networks:
       - webdb-net
     restart: unless-stopped
