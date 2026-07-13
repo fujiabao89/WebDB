@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  detect-projects:
+    name: Detect project checks
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.detect.outputs.web }}
+      api: ${{ steps.detect.outputs.api }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: detect
+        name: Detect Web and API projects
+        run: |
+          if test -f apps/web/package.json; then
+            echo "web=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "web=false" >> "$GITHUB_OUTPUT"
+          fi
+          if test -f apps/api/go.mod; then
+            echo "api=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "api=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  repository-safety:
+    name: Repository safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject tracked environment files
+        run: |
+          set -euo pipefail
+          if git ls-files | grep -E '(^|/)(\.env|.*\.env|\.env\..+)$'; then
+            echo "环境文件不得被提交。"
+            exit 1
+          fi
+      - name: Require AI collaboration rules
+        run: |
+          set -euo pipefail
+          test -s AGENTS.md
+          test -s .github/PULL_REQUEST_TEMPLATE.md
+          test -s .github/CODEOWNERS
+
+  web:
+    name: Web checks
+    runs-on: ubuntu-latest
+    needs: detect-projects
+    if: needs.detect-projects.outputs.web == 'true'
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Lint
+        run: npm run lint --if-present
+      - name: Type check
+        run: npm run typecheck --if-present
+      - name: Test
+        run: npm test --if-present
+      - name: Build
+        run: npm run build --if-present
+
+  api:
+    name: API checks
+    runs-on: ubuntu-latest
+    needs: detect-projects
+    if: needs.detect-projects.outputs.api == 'true'
+    defaults:
+      run:
+        working-directory: apps/api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: apps/api/go.mod
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./...
