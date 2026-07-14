@@ -66,6 +66,7 @@ function Write-Log($Event, $Data = @{}) {
     event = $Event
     data  = $Data
   } | ConvertTo-Json -Compress -Depth 10
+  if (-not $entry) { return }
   $entry | Tee-Object $LogFile -Append | Write-Host
 }
 
@@ -103,13 +104,13 @@ function Test-HighRisk($Body) {
 # 3. Load or initialize state
 # ------------------------------------------------------------------
 $State = if (Test-Path $StateFile) {
-  Get-Content $StateFile -Raw | ConvertFrom-Json
+  try { Get-Content $StateFile -Raw | ConvertFrom-Json } catch { [pscustomobject]@{ prs = [pscustomobject]@{} } }
 } else {
-  [pscustomobject]@{ prs = @{} }
+  [pscustomobject]@{ prs = [pscustomobject]@{} }
 }
 
-if (-not $State.prs) {
-  $State | Add-Member -NotePropertyName 'prs' -NotePropertyValue ([pscustomobject]@{}) -Force
+if (-not ($State.prs -is [PSCustomObject])) {
+  $State.prs = [pscustomobject]@{}
 }
 
 # ------------------------------------------------------------------
@@ -171,10 +172,11 @@ foreach ($pr in $PrIds) {
 
     # --- 7b. Initialize per-PR state ---
     if (-not $State.prs.$pr) {
-      $entry = [pscustomobject]@{ rounds = @{}; processed = @{}; fails = 0 }
-      $State.prs | Add-Member -NotePropertyName "$pr" -NotePropertyValue $entry -Force
+      $entry = [pscustomobject]@{ rounds = [pscustomobject]@{}; processed = [pscustomobject]@{}; fails = 0 }
+      $State.prs | Add-Member -NotePropertyName "$pr" -NotePropertyValue $entry -Force -ErrorAction SilentlyContinue
     }
     $PrState = $State.prs.$pr
+    if (-not $PrState) { throw "failed to initialize state for PR #$pr" }
 
     # Guard: round cap
     $Round = if ($PrState.rounds.$Sha) { [int]$PrState.rounds.$Sha } else { 0 }
@@ -211,7 +213,7 @@ foreach ($pr in $PrIds) {
     $Comments = Invoke-Gh @('api', "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments") | ConvertFrom-Json
     if (-not $Comments) {
       Write-Log 'no-comments' @{ pr = $pr; review_id = $ReviewId }
-      $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force
+      if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
       continue
     }
 
@@ -220,8 +222,8 @@ foreach ($pr in $PrIds) {
     # --- 7e. Severity classification ---
     if (Test-HighRisk $Body) {
       Set-Label $pr 'needs-human-review'
-      $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force
-      $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile
+      if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
+      if (-not $DryRun -and $State) { $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile }
       Write-Log 'escalated-human' @{ pr = $pr; review_id = $ReviewId; reason = 'high-risk keywords detected' }
       continue
     }
@@ -236,7 +238,6 @@ foreach ($pr in $PrIds) {
         action    = 'would invoke claude, test, commit, push'
         comments  = $Comments.Count
       }
-      $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force
       continue
     }
 
@@ -262,7 +263,7 @@ foreach ($pr in $PrIds) {
     $Changes = git status --porcelain
     if (-not $Changes) {
       Write-Log 'no-changes' @{ pr = $pr; review_id = $ReviewId }
-      $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force
+      if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
       continue
     }
 
@@ -284,9 +285,9 @@ foreach ($pr in $PrIds) {
 
     # --- 7j. Update state ---
     $PrState.rounds.$Sha = $Round + 1
-    $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force
+    if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
     $PrState.fails = 0
-    $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile
+    if ($State) { $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile }
 
     Set-Label $pr "auto-fix-round-$($Round + 1)"
 
@@ -298,9 +299,9 @@ foreach ($pr in $PrIds) {
     Write-Log 'fix-done' @{ pr = $pr; sha = $Sha; round = $Round + 1; review_id = $ReviewId }
 
   } catch {
-    if ($State.prs.$pr) {
+    if (-not $DryRun -and $State.prs.$pr) {
       $State.prs.$pr.fails = [int]$State.prs.$pr.fails + 1
-      $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile
+      if ($State) { $State | ConvertTo-Json -Depth 10 | Set-Content $StateFile }
     }
     Write-Log 'error' @{ pr = $pr; message = $_.Exception.Message }
     Write-Host "ERROR [PR #$pr]: $($_.Exception.Message)" -ForegroundColor Red
