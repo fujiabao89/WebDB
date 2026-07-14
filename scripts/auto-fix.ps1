@@ -135,13 +135,11 @@ if ($dirty) {
 # ------------------------------------------------------------------
 # 6. Resolve PR list
 # ------------------------------------------------------------------
-$PrIds = [int[]](
-  if ($PullRequest) {
-    $PullRequest
-  } else {
-    (Invoke-Gh @('pr', 'list', '--repo', $Repo, '--state', 'open', '--json', 'number', '--jq', '.[].number')) -split "`n" | Where-Object { $_ }
-  }
-)
+$PrIds = if ($PullRequest) {
+  [int[]]@($PullRequest)
+} else {
+  [int[]]((Invoke-Gh @('pr', 'list', '--repo', $Repo, '--state', 'open', '--json', 'number', '--jq', '.[].number')) -split "`n" | Where-Object { $_ })
+}
 
 Write-Log 'start' @{ prs = $PrIds; dryrun = $DryRun.IsPresent }
 
