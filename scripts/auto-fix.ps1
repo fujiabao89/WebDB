@@ -150,7 +150,13 @@ Write-Log 'start' @{ prs = $PrIds; dryrun = $DryRun.IsPresent }
 foreach ($pr in $PrIds) {
   try {
     # --- 7a. Fetch PR metadata ---
-    $Meta = Invoke-Gh @('pr', 'view', "$pr", '--repo', $Repo, '--json', 'state,headRefName,headRefOid,headRepositoryOwner') | ConvertFrom-Json
+    $MetaRaw = Invoke-Gh @('pr', 'view', "$pr", '--repo', $Repo, '--json', 'state,headRefName,headRefOid,headRepositoryOwner')
+    try {
+      $Meta = $MetaRaw | ConvertFrom-Json
+    } catch {
+      Write-Log 'json-parse-error' @{ pr = $pr; raw = ($MetaRaw.Substring(0, [Math]::Min(200, $MetaRaw.Length))) }
+      throw
+    }
 
     if ($Meta.state -ne 'OPEN') {
       Write-Log 'skip-closed' @{ pr = $pr }
