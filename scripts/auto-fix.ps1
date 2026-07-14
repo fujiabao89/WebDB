@@ -63,9 +63,35 @@ function Set-Label($Pr, $Label) {
   }
 }
 
-function Test-HighRisk($Body) {
-  $keywords = @('P0', 'critical', 'permission', 'secret', 'credential', 'production', 'architecture', 'ruleset', 'merge', 'security')
-  foreach ($k in $keywords) { if ($Body -match "(?i)\b$k\b") { return $true } }
+function Get-CommentTitle($Body) {
+  $clean = $Body -replace '!\[.*?\]\(.*?\)', ''
+  $clean = $clean -replace '<[^>]*>', ''
+  $clean = $clean -replace '\*\*', ''
+  $clean = $clean -replace 'https?://\S+', ''
+  $clean = $clean -replace '\s+', ' '
+  $lines = @($clean -split "`n" | Where-Object { $_ -match '\S' })
+  if ($lines.Count -gt 0) { return $lines[0].Trim() }
+  return $clean.Trim()
+}
+
+function Test-HighRisk($Comments) {
+  foreach ($c in $Comments) {
+    $title = Get-CommentTitle $c.body
+    # Only match explicit compound patterns — never standalone keywords
+    if ($title -match '(?i)\bP0\b') { return $true }
+    if ($title -match '(?i)\bCRITICAL\b') { return $true }
+    if ($title -match '(?i)(secret|token|password|credential|key)\s+(exposed|leaked|committed|hardcoded|visible|logged|stored)') { return $true }
+    if ($title -match '(?i)(privilege|permission)\s+escalation') { return $true }
+    if ($title -match '(?i)unauthorized\s+(access|modification|change)') { return $true }
+    if ($title -match '(?i)(production|prod)\s+(data|database|deploy|environment)\s+(read|write|access|modify|expose)') { return $true }
+    if ($title -match '(?i)ruleset\s+(changed|modified|altered|broken|bypass)') { return $true }
+    if ($title -match '(?i)\bmerge\s+(performed|executed|done|completed|auto)') { return $true }
+    if ($title -match '(?i)(architecture|schema)\s+(decision|change|redesign|overhaul|break)') { return $true }
+    if ($title -match '(?i)data\s+(loss|corruption|breach)') { return $true }
+    if ($title -match '(?i)(security|auth)\s+(vulnerability|bypass|flaw|hole)') { return $true }
+    if ($title -match '(?i)arbitrary\s+(code|command)\s+execution') { return $true }
+    if ($title -match '(?i)(bypass|disable)\s+(security|auth|permission|rate.limit)') { return $true }
+  }
   return $false
 }
 
@@ -221,9 +247,8 @@ try {
         continue
       }
 
-      # --- Severity classification ---
-      $Body = ($Comments | ForEach-Object { "$($_.path): $($_.body)" }) -join "`n"
-      if (Test-HighRisk $Body) {
+      # --- High-risk check (per-comment title, never standalone keywords) ---
+      if (Test-HighRisk $Comments) {
         Set-Label $pr 'needs-human-review'
         if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
         Save-State
