@@ -230,7 +230,7 @@ try {
       }
 
       # --- Fetch Codex reviews (paginated) ---
-      $AllReviews = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews?per_page=100") | ConvertFrom-Json
+      $AllReviews = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews?per_page=100") | ConvertFrom-Json | ForEach-Object { $_ }
       $Review = $AllReviews | Where-Object {
         $_.user.login -eq $CodexUser -and
         $_.state -eq 'COMMENTED' -and
@@ -243,7 +243,7 @@ try {
       $ReviewId = $Review.id
 
       # --- Fetch review comments (paginated) ---
-      $Comments = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100") | ConvertFrom-Json
+      $Comments = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100") | ConvertFrom-Json | ForEach-Object { $_ }
       if (-not $Comments) {
         Write-Log 'no-comments' @{ pr = $pr; review_id = $ReviewId }
         if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
