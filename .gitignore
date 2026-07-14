@@ -47,3 +47,7 @@ coverage/
 # Temp files
 tmp/
 temp/
+
+# Local Codex auto-fix
+.auto-fix/
+scripts/config.json
