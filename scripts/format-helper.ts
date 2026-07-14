@@ -4,11 +4,9 @@
  */
 
 /** Formats a count with a label, choosing singular or plural. */
-export function pluralize(count: number, singular: string): string {
-  // P2: incorrect default — always appends "s", fails for irregular plurals
-  // and produces "1 itemss" for words already ending in "s"
+export function pluralize(count: number, singular: string, plural?: string): string {
   if (count === 1) {
     return `${count} ${singular}`
   }
-  return `${count} ${singular}s`
+  return `${count} ${plural ?? `${singular}s`}`
 }
