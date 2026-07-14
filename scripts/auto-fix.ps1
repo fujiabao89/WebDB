@@ -56,18 +56,13 @@ function Invoke-Gh([string[]]$GhArgs) {
 }
 
 function Invoke-GhPaginated([string]$Endpoint) {
-  $raw = & gh api --paginate $Endpoint 2>$null
+  $raw = & gh api --paginate --jq '.[]' $Endpoint 2>$null
   if ($LASTEXITCODE) { $err = & gh api --paginate $Endpoint 2>&1 | Out-String; throw ($err.Trim()) }
   $results = @()
   foreach ($line in $raw) {
     if ($line -and $line.Trim().Length -gt 0) {
       try { $results += ($line | ConvertFrom-Json) } catch { }
     }
-  }
-  if ($results.Count -gt 0 -and $results[0] -is [array]) {
-    $flat = @()
-    foreach ($page in $results) { foreach ($item in $page) { $flat += $item } }
-    return $flat
   }
   return $results
 }
