@@ -70,11 +70,12 @@ function Write-Log($Event, $Data = @{}) {
 }
 
 function Invoke-Gh([string[]]$Args) {
-  $all = & gh @Args 2>&1
-  if ($LASTEXITCODE) { throw (($all | Out-String).Trim()) }
-  # Discard ErrorRecord objects (stderr warnings) — keep only stdout strings
-  $stdout = $all | Where-Object { $_ -is [string] }
-  return ($stdout -join "`n")
+  $out = & gh @Args 2>$null
+  if ($LASTEXITCODE) {
+    $err = & gh @Args 2>&1 | Out-String
+    throw ($err.Trim())
+  }
+  return ($out -join "`n")
 }
 
 function Set-Label($Pr, $Label) {
