@@ -64,14 +64,17 @@ function Set-Label($Pr, $Label) {
 }
 
 function Get-CommentTitle($Body) {
-  $clean = $Body -replace '!\[.*?\]\(.*?\)', ''
-  $clean = $clean -replace '<[^>]*>', ''
-  $clean = $clean -replace '\*\*', ''
-  $clean = $clean -replace 'https?://\S+', ''
-  $clean = $clean -replace '\s+', ' '
-  $lines = @($clean -split "`n" | Where-Object { $_ -match '\S' })
-  if ($lines.Count -gt 0) { return $lines[0].Trim() }
-  return $clean.Trim()
+  $rawLines = $Body -split "`n"
+  $cleaned = foreach ($line in $rawLines) {
+    $c = $line -replace '!\[.*?\]\(.*?\)', ''
+    $c = $c -replace '<[^>]*>', ''
+    $c = $c -replace '\*\*', ''
+    $c = $c -replace 'https?://\S+', ''
+    $c = $c.Trim()
+    if ($c) { $c }
+  }
+  if ($cleaned.Count -gt 0) { return ($cleaned[0] -replace '\s+', ' ') }
+  return ''
 }
 
 function Test-HighRisk($Comments) {
@@ -133,7 +136,9 @@ function Build-Prompt($Selected, $Pr) {
   $i = 1
   foreach ($c in $Selected) {
     $sev = Get-Severity $c.body
-    $desc = ($c.body -replace '\n', ' ' -replace '\s+', ' ').Substring(0, [Math]::Min(500, $c.body.Length))
+    $normalized = $c.body -replace '\n', ' ' -replace '\s+', ' '
+    $limit = [Math]::Min(500, $normalized.Length)
+    $desc = $normalized.Substring(0, $limit)
     $lines += "$i. [FILE: $($c.path)] [SEVERITY: $sev] [LINE: $($c.line)]"
     $lines += "   $desc"
     $lines += ''
@@ -193,7 +198,6 @@ try {
   Write-Log 'start' @{ prs = $PrIds; dryrun = $DryRun.IsPresent }
 
   foreach ($pr in $PrIds) {
-    $CleanupWorktree = $false
     try {
       # --- Fetch PR metadata ---
       $Meta = Invoke-Gh @('pr', 'view', "$pr", '--repo', $Repo, '--json', 'state,headRefName,headRefOid,headRepositoryOwner') | ConvertFrom-Json
@@ -226,7 +230,7 @@ try {
       }
 
       # --- Fetch Codex reviews (paginated) ---
-      $AllReviews = Invoke-Gh @('api', "--paginate", "repos/$Repo/pulls/$pr/reviews?per_page=100") | ConvertFrom-Json
+      $AllReviews = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews?per_page=100") | ConvertFrom-Json
       $Review = $AllReviews | Where-Object {
         $_.user.login -eq $CodexUser -and
         $_.state -eq 'COMMENTED' -and
@@ -239,7 +243,7 @@ try {
       $ReviewId = $Review.id
 
       # --- Fetch review comments (paginated) ---
-      $Comments = Invoke-Gh @('api', "--paginate", "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100") | ConvertFrom-Json
+      $Comments = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100") | ConvertFrom-Json
       if (-not $Comments) {
         Write-Log 'no-comments' @{ pr = $pr; review_id = $ReviewId }
         if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
@@ -285,7 +289,6 @@ try {
 
       git fetch origin "$Branch" 2>$null
       git switch --force-create "$Branch" "$Sha" | Out-Null
-      $CleanupWorktree = $true
       Write-Log 'checkout' @{ branch = $Branch; sha = $Sha }
 
       $Prompt = Build-Prompt $FixList $pr
@@ -335,10 +338,6 @@ try {
       if (-not $DryRun -and $State.prs.$pr) {
         $State.prs.$pr.fails = [int]$State.prs.$pr.fails + 1
         Save-State
-      }
-      if ($CleanupWorktree) {
-        git checkout -- . 2>$null
-        git clean -fd 2>$null
       }
       Write-Log 'error' @{ pr = $pr; message = $_.Exception.Message }
       Write-Host "ERROR [PR #$pr]: $($_.Exception.Message)" -ForegroundColor Red
