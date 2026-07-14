@@ -55,6 +55,23 @@ function Invoke-Gh([string[]]$GhArgs) {
   return ($out -join "`n")
 }
 
+function Invoke-GhPaginated([string]$Endpoint) {
+  $raw = & gh api --paginate $Endpoint 2>$null
+  if ($LASTEXITCODE) { $err = & gh api --paginate $Endpoint 2>&1 | Out-String; throw ($err.Trim()) }
+  $results = @()
+  foreach ($line in $raw) {
+    if ($line -and $line.Trim().Length -gt 0) {
+      try { $results += ($line | ConvertFrom-Json) } catch { }
+    }
+  }
+  if ($results.Count -gt 0 -and $results[0] -is [array]) {
+    $flat = @()
+    foreach ($page in $results) { foreach ($item in $page) { $flat += $item } }
+    return $flat
+  }
+  return $results
+}
+
 function Set-Label($Pr, $Label) {
   $labels = (Invoke-Gh @('pr', 'view', "$Pr", '--repo', $Repo, '--json', 'labels', '--jq', '.labels[].name')) -split "`n"
   if ($labels -notcontains $Label) {
@@ -230,7 +247,7 @@ try {
       }
 
       # --- Fetch Codex reviews (paginated) ---
-      $AllReviews = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews?per_page=100") | ConvertFrom-Json | ForEach-Object { $_ }
+      $AllReviews = Invoke-GhPaginated "repos/$Repo/pulls/$pr/reviews?per_page=100"
       $Review = $AllReviews | Where-Object {
         $_.user.login -eq $CodexUser -and
         $_.state -eq 'COMMENTED' -and
@@ -243,7 +260,7 @@ try {
       $ReviewId = $Review.id
 
       # --- Fetch review comments (paginated) ---
-      $Comments = Invoke-Gh @('api', "--paginate", "--slurp", "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100") | ConvertFrom-Json | ForEach-Object { $_ }
+      $Comments = Invoke-GhPaginated "repos/$Repo/pulls/$pr/reviews/$ReviewId/comments?per_page=100"
       if (-not $Comments) {
         Write-Log 'no-comments' @{ pr = $pr; review_id = $ReviewId }
         if ($PrState.processed) { $PrState.processed | Add-Member -NotePropertyName ([string]$ReviewId) -NotePropertyValue $true -Force -ErrorAction SilentlyContinue }
