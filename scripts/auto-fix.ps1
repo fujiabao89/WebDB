@@ -69,10 +69,10 @@ function Write-Log($Event, $Data = @{}) {
   $entry | Tee-Object $LogFile -Append | Write-Host
 }
 
-function Invoke-Gh([string[]]$Args) {
-  $out = & gh @Args 2>$null
+function Invoke-Gh([string[]]$GhArgs) {
+  $out = & gh @GhArgs 2>$null
   if ($LASTEXITCODE) {
-    $err = & gh @Args 2>&1 | Out-String
+    $err = & gh @GhArgs 2>&1 | Out-String
     throw ($err.Trim())
   }
   return ($out -join "`n")
@@ -150,13 +150,7 @@ Write-Log 'start' @{ prs = $PrIds; dryrun = $DryRun.IsPresent }
 foreach ($pr in $PrIds) {
   try {
     # --- 7a. Fetch PR metadata ---
-    $MetaRaw = Invoke-Gh @('pr', 'view', "$pr", '--repo', $Repo, '--json', 'state,headRefName,headRefOid,headRepositoryOwner')
-    try {
-      $Meta = $MetaRaw | ConvertFrom-Json
-    } catch {
-      Write-Log 'json-parse-error' @{ pr = $pr; raw = ($MetaRaw.Substring(0, [Math]::Min(200, $MetaRaw.Length))) }
-      throw
-    }
+    $Meta = Invoke-Gh @('pr', 'view', "$pr", '--repo', $Repo, '--json', 'state,headRefName,headRefOid,headRepositoryOwner') | ConvertFrom-Json
 
     if ($Meta.state -ne 'OPEN') {
       Write-Log 'skip-closed' @{ pr = $pr }
