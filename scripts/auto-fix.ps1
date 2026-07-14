@@ -70,9 +70,11 @@ function Write-Log($Event, $Data = @{}) {
 }
 
 function Invoke-Gh([string[]]$Args) {
-  $out = & gh @Args 2>&1
-  if ($LASTEXITCODE) { throw ($out -join "`n") }
-  return ($out -join "`n")
+  $all = & gh @Args 2>&1
+  if ($LASTEXITCODE) { throw (($all | Out-String).Trim()) }
+  # Discard ErrorRecord objects (stderr warnings) — keep only stdout strings
+  $stdout = $all | Where-Object { $_ -is [string] }
+  return ($stdout -join "`n")
 }
 
 function Set-Label($Pr, $Label) {
@@ -133,11 +135,13 @@ if ($dirty) {
 # ------------------------------------------------------------------
 # 6. Resolve PR list
 # ------------------------------------------------------------------
-$PrIds = if ($PullRequest) {
-  @($PullRequest)
-} else {
-  @((Invoke-Gh @('pr', 'list', '--repo', $Repo, '--state', 'open', '--json', 'number', '--jq', '.[].number')) -split "`n" | Where-Object { $_ })
-}
+$PrIds = [int[]](
+  if ($PullRequest) {
+    $PullRequest
+  } else {
+    (Invoke-Gh @('pr', 'list', '--repo', $Repo, '--state', 'open', '--json', 'number', '--jq', '.[].number')) -split "`n" | Where-Object { $_ }
+  }
+)
 
 Write-Log 'start' @{ prs = $PrIds; dryrun = $DryRun.IsPresent }
 
