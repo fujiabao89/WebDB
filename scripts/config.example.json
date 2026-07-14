@@ -1,0 +1,11 @@
+{
+  "repo": "fujiabao89/WebDB",
+  "owner": "fujiabao89",
+  "codex_login": "chatgpt-codex-connector[bot]",
+  "allowed_prs": [],
+  "max_rounds": 3,
+  "poll_seconds": 300,
+  "state_dir": ".auto-fix",
+  "log_dir": ".auto-fix/logs",
+  "test_commands": ["npm test"]
+}
