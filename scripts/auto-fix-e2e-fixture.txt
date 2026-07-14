@@ -1,0 +1,5 @@
+AUTO_FIX_E2E_FIXTURE
+This file is intentionally created for testing the local Codex auto-fix loop.
+Created: 2026-07-14
+Purpose: E2E validation of Codex Review → Local Poller → Claude Code Fix → Test → Commit → Push → Re-review loop.
+DO NOT MERGE. This is test-only content. Safe to delete after E2E testing completes.
