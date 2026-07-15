@@ -1,6 +1,6 @@
 # P0-01：工程骨架与 Docker Compose
 
-> 状态：Ready｜风险：Medium｜依赖：无｜建议实现者：Claude Code
+> 状态：Done｜风险：Low｜依赖：无｜实现者：Claude Code
 
 ## 目标与范围
 

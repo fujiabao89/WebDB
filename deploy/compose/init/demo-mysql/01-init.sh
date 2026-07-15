@@ -1,8 +1,20 @@
--- 演示 MySQL 8.4 初始化：合成数据与只读账号
--- 所有数据均为合成数据，不含真实 PII
+#!/bin/bash
+# 演示 MySQL 8.4 初始化：合成数据与只读账号
+# 所有数据均为合成数据，不含真实 PII
+# 只读账号由 MYSQL_USER/MYSQL_PASSWORD 环境变量在容器启动时创建
+# 本脚本仅授予只读权限
+set -e
 
--- 授予只读权限（账号已由 MYSQL_USER/MYSQL_PASSWORD 环境变量创建）
-GRANT SELECT ON webdb_demo.* TO 'demo_reader'@'%';
+READER_USER="${MYSQL_USER:-demo_reader}"
+MYSQL_DB="${MYSQL_DATABASE:-webdb_demo}"
+
+mysql -u root -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}" <<EOSQL
+-- 撤销 MySQL 镜像自动授予的全部权限，仅保留 SELECT
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${READER_USER}'@'%';
+FLUSH PRIVILEGES;
+
+-- 授予只读权限
+GRANT SELECT ON ${MYSQL_DB}.* TO '${READER_USER}'@'%';
 FLUSH PRIVILEGES;
 
 -- 示例部门表
@@ -41,3 +53,4 @@ INSERT IGNORE INTO employees (first_name, last_name, email, department_id, hire_
     ('Henry',  'Sun',     'henry.sun@example.local',     1, '2024-08-15', 95000.00),
     ('Iris',   'Xu',      'iris.xu@example.local',       3, '2024-09-01', 72000.00),
     ('Jack',   'Huang',   'jack.huang@example.local',    4, '2024-10-01', 68000.00);
+EOSQL

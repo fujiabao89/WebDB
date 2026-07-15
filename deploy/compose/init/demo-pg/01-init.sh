@@ -1,14 +1,20 @@
--- 演示 PostgreSQL 初始化：合成数据与只读账号
--- 所有数据均为合成数据，不含真实 PII
+#!/bin/bash
+# 演示 PostgreSQL 初始化：合成数据与只读账号
+# 所有数据均为合成数据，不含真实 PII
+# 只读账号密码通过 DEMO_PG_READER_PASSWORD 环境变量传入
+set -e
 
+READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
+
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL
 -- 创建只读账号
-DO $$
+DO \$\$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'demo_reader') THEN
-    CREATE ROLE demo_reader WITH LOGIN PASSWORD 'change_me';
+    CREATE ROLE demo_reader WITH LOGIN PASSWORD '${READER_PASSWORD}';
   END IF;
 END
-$$;
+\$\$;
 
 -- 授予连接权限
 GRANT CONNECT ON DATABASE webdb_demo TO demo_reader;
@@ -54,3 +60,4 @@ INSERT INTO employees (first_name, last_name, email, department_id, hire_date, s
 -- 授予只读权限
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO demo_reader;
+EOSQL

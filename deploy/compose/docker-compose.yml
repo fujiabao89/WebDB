@@ -44,6 +44,7 @@ services:
       POSTGRES_USER: ${DEMO_PG_USER:-demo_admin}
       POSTGRES_PASSWORD: ${DEMO_PG_PASSWORD:-change_me}
       POSTGRES_DB: webdb_demo
+      DEMO_PG_READER_PASSWORD: ${DEMO_PG_READER_PASSWORD:-change_me}
     ports:
       - "127.0.0.1:5433:5432"
     volumes:
