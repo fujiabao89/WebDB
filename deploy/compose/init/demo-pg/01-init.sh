@@ -2,19 +2,24 @@
 # 演示 PostgreSQL 初始化：合成数据与只读账号
 # 所有数据均为合成数据，不含真实 PII
 # 只读账号密码通过 DEMO_PG_READER_PASSWORD 环境变量传入
+# 使用 psql :'var' 语法安全传递密码，避免 SQL 注入和特殊字符问题
 set -e
 
 READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
 
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<EOSQL
--- 创建只读账号
-DO \$\$
+psql -v ON_ERROR_STOP=1 \
+  -v reader_pw="$READER_PASSWORD" \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" \
+<<'EOSQL'
+-- 创建只读账号（密码通过 psql -v 安全传入，单引号等特殊字符被正确处理）
+DO $$
 BEGIN
   IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'demo_reader') THEN
-    CREATE ROLE demo_reader WITH LOGIN PASSWORD '${READER_PASSWORD}';
+    CREATE ROLE demo_reader WITH LOGIN PASSWORD :'reader_pw';
   END IF;
 END
-\$\$;
+$$;
 
 -- 授予连接权限
 GRANT CONNECT ON DATABASE webdb_demo TO demo_reader;

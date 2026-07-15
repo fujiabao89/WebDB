@@ -2,19 +2,30 @@
 # 演示 MySQL 8.4 初始化：合成数据与只读账号
 # 所有数据均为合成数据，不含真实 PII
 # 只读账号由 MYSQL_USER/MYSQL_PASSWORD 环境变量在容器启动时创建
-# 本脚本仅授予只读权限
-set -e
+# 本脚本撤销镜像自动授予的全部权限，仅保留 SELECT
+# MYSQL_USER / MYSQL_DATABASE 经正则校验，防止 SQL 注入
+set -euo pipefail
 
 READER_USER="${MYSQL_USER:-demo_reader}"
 MYSQL_DB="${MYSQL_DATABASE:-webdb_demo}"
 
-mysql -u root -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}" <<EOSQL
+# 校验只允许安全的数据库标识符字符（字母、数字、下划线、连字符）
+if ! [[ "$READER_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "错误：MYSQL_USER 包含不安全字符：$READER_USER" >&2
+  exit 1
+fi
+if ! [[ "$MYSQL_DB" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+  echo "错误：MYSQL_DATABASE 包含不安全字符：$MYSQL_DB" >&2
+  exit 1
+fi
+
+mysql -u root -p"${MYSQL_ROOT_PASSWORD}" <<EOSQL
 -- 撤销 MySQL 镜像自动授予的全部权限，仅保留 SELECT
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${READER_USER}'@'%';
 FLUSH PRIVILEGES;
 
--- 授予只读权限
-GRANT SELECT ON ${MYSQL_DB}.* TO '${READER_USER}'@'%';
+-- 仅授予 SELECT 权限（数据库名使用反引号防止保留字冲突）
+GRANT SELECT ON \`${MYSQL_DB}\`.* TO '${READER_USER}'@'%';
 FLUSH PRIVILEGES;
 
 -- 示例部门表

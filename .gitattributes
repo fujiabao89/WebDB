@@ -1,0 +1,9 @@
+# Go 源码强制 LF 换行，确保 gofmt -l . 在 Windows/Linux/macOS 均输出为空
+apps/api/*.go text eol=lf
+*.go text eol=lf
+
+# Shell 脚本强制 LF
+*.sh text eol=lf
+
+# Dockerfile 强制 LF
+Dockerfile text eol=lf
