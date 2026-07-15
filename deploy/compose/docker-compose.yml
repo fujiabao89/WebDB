@@ -70,7 +70,8 @@ services:
       MYSQL_ROOT_PASSWORD: ${DEMO_MYSQL_ROOT_PASSWORD:-change_me}
       MYSQL_DATABASE: webdb_demo
       MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
-      MYSQL_PASSWORD: ${DEMO_MYSQL_PASSWORD:-change_me}
+      # 只读账号密码通过 init 脚本安全设置，绕过 MySQL 入口点对特殊字符的限制
+      DEMO_MYSQL_READER_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
     ports:
       - "127.0.0.1:3306:3306"
     volumes:
@@ -110,7 +111,7 @@ services:
       DEMO_MYSQL_HOST: demo-mysql
       DEMO_MYSQL_PORT: "3306"
       DEMO_MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
-      DEMO_MYSQL_PASSWORD: ${DEMO_MYSQL_PASSWORD:-change_me}
+      DEMO_MYSQL_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
       DEMO_MYSQL_NAME: webdb_demo
       WEBDB_KEK: ${WEBDB_KEK:-change_me}
     ports:

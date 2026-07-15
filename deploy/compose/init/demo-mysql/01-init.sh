@@ -1,15 +1,15 @@
 #!/bin/bash
 # 演示 MySQL 8.4 初始化：合成数据与只读账号
 # 所有数据均为合成数据，不含真实 PII
-# 只读账号由 MYSQL_USER/MYSQL_PASSWORD 创建；特殊字符密码通过 ALTER USER 安全设置
-# MYSQL_USER / MYSQL_DATABASE 经正则校验，防止 SQL 注入
+# 只读账号通过 DEMO_MYSQL_READER_PASSWORD 在 init 脚本中安全创建
+# 绕过 MySQL Docker 入口点对特殊字符的限制，支持单引号、双引号等
 set -euo pipefail
 
 READER_USER="${MYSQL_USER:-demo_reader}"
-READER_PASSWORD="${MYSQL_PASSWORD:-change_me}"
+READER_PASSWORD="${DEMO_MYSQL_READER_PASSWORD:-change_me}"
 MYSQL_DB="${MYSQL_DATABASE:-webdb_demo}"
 
-# 校验只允许安全的数据库标识符字符
+# 校验标识符只允许安全字符
 if ! [[ "$READER_USER" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   echo "错误：MYSQL_USER 包含不安全字符：$READER_USER" >&2
   exit 1
@@ -19,17 +19,16 @@ if ! [[ "$MYSQL_DB" =~ ^[a-zA-Z0-9_-]+$ ]]; then
   exit 1
 fi
 
-# MySQL 字符串转义：反斜杠和单引号加倍
+# MySQL 字符串转义：反斜杠和单引号分别加倍
 READER_PW_SQL="${READER_PASSWORD//\\/\\\\}"
 READER_PW_SQL="${READER_PW_SQL//\'/\'\'}"
 
 mysql -u root -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}" <<EOSQL
--- 创建或修改只读账号（使用转义后的密码，支持特殊字符）
--- MySQL 镜像的自动用户创建不支持特殊字符密码，因此在此手动处理
+-- 创建只读账号并设置密码（支持单引号、双引号、空格、反斜杠等特殊字符）
 CREATE USER IF NOT EXISTS '${READER_USER}'@'%' IDENTIFIED BY '${READER_PW_SQL}';
 ALTER USER '${READER_USER}'@'%' IDENTIFIED BY '${READER_PW_SQL}';
 
--- 撤销所有权限，仅保留 SELECT
+-- 仅授予 SELECT 权限
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${READER_USER}'@'%';
 GRANT SELECT ON \`${MYSQL_DB}\`.* TO '${READER_USER}'@'%';
 FLUSH PRIVILEGES;

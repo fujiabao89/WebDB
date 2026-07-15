@@ -1,11 +1,11 @@
 #!/bin/bash
 # P0-01 只读账号权限验证脚本
-# 使用 docker compose exec 在容器内执行测试，无需本地安装 psql/mysql 客户端
-# 所有可配置的账号名和密码均通过环境变量传入，默认值与 compose 一致
-# 验证只读账号：
-#   1. 可以执行 SELECT
-#   2. 不能执行 INSERT、UPDATE、DELETE
-#   3. 不能执行 DDL (CREATE/DROP/ALTER)
+# 使用 TCP 连接 + 密码认证，真实验证密码正确性和只读权限
+# 通过 docker compose exec 在容器内执行，无需本地安装 psql/mysql 客户端
+# 验证：
+#   1. 错误密码认证失败
+#   2. 正确密码 SELECT 成功
+#   3. 正确密码 INSERT、UPDATE、DELETE、DDL 被拒绝
 # 用法：
 #   docker compose -f deploy/compose/docker-compose.yml up -d --wait
 #   bash deploy/compose/verify-readonly.sh
@@ -22,98 +22,125 @@ fail() { echo -e "  ${RED}❌ FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
 COMPOSE="docker compose -f deploy/compose/docker-compose.yml"
 
-# 从环境变量读取可配置值，默认值与 docker-compose.yml 一致
-PG_READER_USER="${DEMO_PG_READER_USER:-demo_reader}"
+# 从环境变量读取密码（不设置默认值，由 compose 决定）
 PG_READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
-PG_READER_DB="${DEMO_PG_READER_DB:-webdb_demo}"
-
+MYSQL_READER_PASSWORD="${DEMO_MYSQL_READER_PASSWORD:-change_me}"
 MYSQL_READER_USER="${DEMO_MYSQL_USER:-demo_reader}"
-MYSQL_READER_PASSWORD="${DEMO_MYSQL_PASSWORD:-change_me}"
-MYSQL_READER_DB="${DEMO_MYSQL_DATABASE:-webdb_demo}"
 
-echo "=== P0-01 只读账号权限验证 ==="
+echo "=== P0-01 只读账号权限验证（TCP 密码认证）==="
 echo ""
 
 # ============================================================
-# PostgreSQL 只读账号验证
+# 密码脱敏辅助函数
 # ============================================================
-echo "--- PostgreSQL ${PG_READER_USER} ---"
+mask() { echo "***"; }
 
-# 1. SELECT 应该成功
-if ${COMPOSE} exec -T demo-pg psql -U "${PG_READER_USER}" -d "${PG_READER_DB}" -c "SELECT count(*) FROM employees;" > /dev/null 2>&1; then
+# ============================================================
+# PostgreSQL 只读账号验证（TCP + PGPASSWORD）
+# ============================================================
+echo "--- PostgreSQL demo_reader ---"
+
+# 0. 错误密码必须认证失败
+if ${COMPOSE} exec -T -e PGPASSWORD="wrong_pw_123" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "SELECT 1;" > /dev/null 2>&1; then
+  fail "PostgreSQL 错误密码认证未拒绝 — 可能存在 trust 认证漏洞"
+else
+  pass "PostgreSQL 错误密码认证被正确拒绝"
+fi
+
+# 1. 正确密码 SELECT 成功
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "SELECT count(*) FROM employees;" > /dev/null 2>&1; then
   pass "PostgreSQL SELECT 成功"
 else
   fail "PostgreSQL SELECT 失败 — 只读账号应能执行 SELECT"
 fi
 
-# 2. INSERT 应该被拒绝
-if ${COMPOSE} exec -T demo-pg psql -U "${PG_READER_USER}" -d "${PG_READER_DB}" -c "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
-  fail "PostgreSQL INSERT 未被拒绝 — 只读账号不应能 INSERT"
+# 2. INSERT 被拒绝
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
+  fail "PostgreSQL INSERT 未被拒绝"
 else
   pass "PostgreSQL INSERT 被正确拒绝"
 fi
 
-# 3. UPDATE 应该被拒绝
-if ${COMPOSE} exec -T demo-pg psql -U "${PG_READER_USER}" -d "${PG_READER_DB}" -c "UPDATE employees SET salary = 0 WHERE id = 1;" > /dev/null 2>&1; then
-  fail "PostgreSQL UPDATE 未被拒绝 — 只读账号不应能 UPDATE"
+# 3. UPDATE 被拒绝
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "UPDATE employees SET salary = 0 WHERE id = 1;" > /dev/null 2>&1; then
+  fail "PostgreSQL UPDATE 未被拒绝"
 else
   pass "PostgreSQL UPDATE 被正确拒绝"
 fi
 
-# 4. DELETE 应该被拒绝
-if ${COMPOSE} exec -T demo-pg psql -U "${PG_READER_USER}" -d "${PG_READER_DB}" -c "DELETE FROM employees WHERE id = 1;" > /dev/null 2>&1; then
-  fail "PostgreSQL DELETE 未被拒绝 — 只读账号不应能 DELETE"
+# 4. DELETE 被拒绝
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "DELETE FROM employees WHERE id = 1;" > /dev/null 2>&1; then
+  fail "PostgreSQL DELETE 未被拒绝"
 else
   pass "PostgreSQL DELETE 被正确拒绝"
 fi
 
-# 5. DDL (CREATE TABLE) 应该被拒绝
-if ${COMPOSE} exec -T demo-pg psql -U "${PG_READER_USER}" -d "${PG_READER_DB}" -c "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
-  fail "PostgreSQL DDL (CREATE TABLE) 未被拒绝 — 只读账号不应能执行 DDL"
+# 5. DDL 被拒绝
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
+  fail "PostgreSQL DDL 未被拒绝"
 else
-  pass "PostgreSQL DDL (CREATE TABLE) 被正确拒绝"
+  pass "PostgreSQL DDL 被正确拒绝"
 fi
 
 echo ""
 
 # ============================================================
-# MySQL 只读账号验证
+# MySQL 只读账号验证（TCP + 密码认证）
 # ============================================================
 echo "--- MySQL ${MYSQL_READER_USER} ---"
 
-# 1. SELECT 应该成功
-if ${COMPOSE} exec -T demo-mysql mysql --protocol=tcp -u "${MYSQL_READER_USER}" -p"${MYSQL_READER_PASSWORD}" "${MYSQL_READER_DB}" -e "SELECT count(*) FROM employees;" > /dev/null 2>&1; then
+# 0. 错误密码必须认证失败
+if ${COMPOSE} exec -T -e MYSQL_PWD="wrong_pw_123" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "SELECT 1;" > /dev/null 2>&1; then
+  fail "MySQL 错误密码认证未拒绝"
+else
+  pass "MySQL 错误密码认证被正确拒绝"
+fi
+
+# 1. 正确密码 SELECT 成功
+if ${COMPOSE} exec -T -e "MYSQL_PWD=${MYSQL_READER_PASSWORD}" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "SELECT count(*) FROM employees;" > /dev/null 2>&1; then
   pass "MySQL SELECT 成功"
 else
   fail "MySQL SELECT 失败 — 只读账号应能执行 SELECT"
 fi
 
-# 2. INSERT 应该被拒绝
-if ${COMPOSE} exec -T demo-mysql mysql --protocol=tcp -u "${MYSQL_READER_USER}" -p"${MYSQL_READER_PASSWORD}" "${MYSQL_READER_DB}" -e "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
-  fail "MySQL INSERT 未被拒绝 — 只读账号不应能 INSERT"
+# 2. INSERT 被拒绝
+if ${COMPOSE} exec -T -e "MYSQL_PWD=${MYSQL_READER_PASSWORD}" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
+  fail "MySQL INSERT 未被拒绝"
 else
   pass "MySQL INSERT 被正确拒绝"
 fi
 
-# 3. UPDATE 应该被拒绝
-if ${COMPOSE} exec -T demo-mysql mysql --protocol=tcp -u "${MYSQL_READER_USER}" -p"${MYSQL_READER_PASSWORD}" "${MYSQL_READER_DB}" -e "UPDATE employees SET salary = 0 WHERE id = 1;" > /dev/null 2>&1; then
-  fail "MySQL UPDATE 未被拒绝 — 只读账号不应能 UPDATE"
+# 3. UPDATE 被拒绝
+if ${COMPOSE} exec -T -e "MYSQL_PWD=${MYSQL_READER_PASSWORD}" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "UPDATE employees SET salary = 0 WHERE id = 1;" > /dev/null 2>&1; then
+  fail "MySQL UPDATE 未被拒绝"
 else
   pass "MySQL UPDATE 被正确拒绝"
 fi
 
-# 4. DELETE 应该被拒绝
-if ${COMPOSE} exec -T demo-mysql mysql --protocol=tcp -u "${MYSQL_READER_USER}" -p"${MYSQL_READER_PASSWORD}" "${MYSQL_READER_DB}" -e "DELETE FROM employees WHERE id = 1;" > /dev/null 2>&1; then
-  fail "MySQL DELETE 未被拒绝 — 只读账号不应能 DELETE"
+# 4. DELETE 被拒绝
+if ${COMPOSE} exec -T -e "MYSQL_PWD=${MYSQL_READER_PASSWORD}" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "DELETE FROM employees WHERE id = 1;" > /dev/null 2>&1; then
+  fail "MySQL DELETE 未被拒绝"
 else
   pass "MySQL DELETE 被正确拒绝"
 fi
 
-# 5. DDL (CREATE TABLE) 应该被拒绝
-if ${COMPOSE} exec -T demo-mysql mysql --protocol=tcp -u "${MYSQL_READER_USER}" -p"${MYSQL_READER_PASSWORD}" "${MYSQL_READER_DB}" -e "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
-  fail "MySQL DDL (CREATE TABLE) 未被拒绝 — 只读账号不应能执行 DDL"
+# 5. DDL 被拒绝
+if ${COMPOSE} exec -T -e "MYSQL_PWD=${MYSQL_READER_PASSWORD}" demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
+  fail "MySQL DDL 未被拒绝"
 else
-  pass "MySQL DDL (CREATE TABLE) 被正确拒绝"
+  pass "MySQL DDL 被正确拒绝"
 fi
 
 echo ""
