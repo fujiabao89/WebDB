@@ -2,7 +2,8 @@
 # 演示 PostgreSQL 初始化：合成数据与只读账号
 # 所有数据均为合成数据，不含真实 PII
 # 只读账号密码通过 DEMO_PG_READER_PASSWORD 环境变量传入
-# 使用 PL/pgSQL format() %L 安全引用，正确处理单引号、反斜杠等特殊字符
+# 使用 psql \getenv 读取环境变量 + format() %L 安全引用，
+# 不做 shell 插值、不使用 dollar-quote 分隔符，任意特殊字符（含 $tag$ 序列）均安全
 set -e
 
 # 拒绝管理员与只读角色重名：若 POSTGRES_USER 被设为 demo_reader，
@@ -14,22 +15,20 @@ if [ "$POSTGRES_USER" = "demo_reader" ]; then
 fi
 
 READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
-# SQL 字符串转义：加倍单引号
-READER_PW_SAFE="${READER_PASSWORD//\'/\'\'}"
+# 通过环境变量传递给 psql（\getenv 读取），密码不进 argv、不做 shell 插值
+export READER_PASSWORD
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
-# 第一步：创建只读角色（使用 format() %L 安全处理密码中的所有特殊字符）
-psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<EOSQL
-DO \$webdb_init\$
-DECLARE
-  pw text := '${READER_PW_SAFE}';
-BEGIN
-  IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'demo_reader') THEN
-    EXECUTE format('CREATE ROLE demo_reader WITH LOGIN PASSWORD %L', pw);
-  END IF;
-END
-\$webdb_init\$;
+# 第一步：创建只读角色
+# heredoc 使用引号包裹（不做 shell 插值）；psql \getenv 从环境变量读入密码，
+# :'reader_password' 由 psql 安全引用，format() %L 再次安全引用后经 \gexec 执行。
+# 全程不使用 dollar-quote 分隔符，密码包含任意 $tag$ 序列也不会破坏 SQL 结构。
+psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
+\getenv reader_password READER_PASSWORD
+SELECT format('CREATE ROLE demo_reader WITH LOGIN PASSWORD %L', :'reader_password')
+WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'demo_reader')
+\gexec
 EOSQL
 
 # 第二步：DDL、DML 和权限授予（无需变量替换）

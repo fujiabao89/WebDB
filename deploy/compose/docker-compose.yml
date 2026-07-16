@@ -52,7 +52,9 @@ services:
       - ./init/demo-pg:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # 验证初始化完成：检查 employees sentinel 表存在
-      test: ["CMD-SHELL", "psql -U ${DEMO_PG_USER:-demo_admin} -d webdb_demo -t -c \"SELECT 1 FROM employees LIMIT 1;\" | grep -q 1"]
+      # 强制 --host=127.0.0.1 走 TCP：初始化期间的临时服务器仅监听 Unix socket，
+      # 避免最终 TCP 监听尚未就绪时被误判为 healthy（密码经环境变量传入，不进 argv）
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql --host=127.0.0.1 -U ${DEMO_PG_USER:-demo_admin} -d webdb_demo -t -c \"SELECT 1 FROM employees LIMIT 1;\" | grep -q 1"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -80,7 +82,9 @@ services:
       - ./init/demo-mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # 验证初始化完成：检查 employees sentinel 表存在
-      test: ['CMD-SHELL', 'mysql -u root -p"$${MYSQL_ROOT_PASSWORD}" webdb_demo -e "SELECT 1 FROM employees LIMIT 1;" 2>/dev/null | grep -q 1']
+      # 强制 --protocol=tcp 连 127.0.0.1：初始化期间的临时服务器仅监听 Unix socket，
+      # 避免最终 TCP 监听尚未就绪时被误判为 healthy
+      test: ['CMD-SHELL', 'mysql --protocol=tcp --host=127.0.0.1 -u root -p"$${MYSQL_ROOT_PASSWORD}" webdb_demo -e "SELECT 1 FROM employees LIMIT 1;" 2>/dev/null | grep -q 1']
       interval: 5s
       timeout: 3s
       retries: 10
