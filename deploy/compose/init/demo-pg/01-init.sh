@@ -13,7 +13,7 @@ export PGPASSWORD="$POSTGRES_PASSWORD"
 
 # 第一步：创建只读角色（使用 format() %L 安全处理密码中的所有特殊字符）
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<EOSQL
-DO \$\$
+DO \$webdb_init\$
 DECLARE
   pw text := '${READER_PW_SAFE}';
 BEGIN
@@ -21,7 +21,7 @@ BEGIN
     EXECUTE format('CREATE ROLE demo_reader WITH LOGIN PASSWORD %L', pw);
   END IF;
 END
-\$\$;
+\$webdb_init\$;
 EOSQL
 
 # 第二步：DDL、DML 和权限授予（无需变量替换）

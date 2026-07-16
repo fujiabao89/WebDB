@@ -4,7 +4,10 @@ export function App() {
   const [apiStatus, setApiStatus] = useState("检查中…");
 
   useEffect(() => {
-    fetch("/api/health")
+    // VITE_API_URL 存在时直达 API（非代理场景），否则走 Vite proxy /api
+    const baseUrl = import.meta.env.VITE_API_URL || "";
+    const healthUrl = baseUrl ? `${baseUrl}/health` : "/api/health";
+    fetch(healthUrl)
       .then((r) => r.json())
       .then((d) => {
         setApiStatus(d.status === "ok" ? `✅ ${d.version}` : "❌");
