@@ -1,0 +1,183 @@
+# P0 最小本地部署定义
+# 一条命令启动：docker compose -f deploy/compose/docker-compose.yml up -d --wait
+# 不含真实凭证、生产连接信息或暴露到外网的端口。
+#
+# 服务说明：
+#   webdb-meta    WebDB 元数据库 (PostgreSQL)     → 127.0.0.1:5432
+#   demo-pg       演示 PostgreSQL + 合成数据       → 127.0.0.1:5433
+#   demo-mysql    演示 MySQL 8.4 + 合成数据        → 127.0.0.1:3306
+#   api           Go API / 执行服务                → 127.0.0.1:8080
+#   web           React 前端 (Vite 开发服务器)       → 127.0.0.1:3000
+
+name: webdb-p0
+
+services:
+  # ============================================================
+  # WebDB 元数据库 — 存储用户、工作区、连接配置、审计等
+  # ============================================================
+  webdb-meta:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: webdb
+      POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      POSTGRES_DB: webdb_meta
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - webdb-meta-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U webdb -d webdb_meta"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - webdb-backend
+    restart: unless-stopped
+
+  # ============================================================
+  # 演示 PostgreSQL — 含合成数据与只读账号
+  # ============================================================
+  demo-pg:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DEMO_PG_USER:-demo_admin}
+      POSTGRES_PASSWORD: ${DEMO_PG_PASSWORD:-change_me}
+      POSTGRES_DB: webdb_demo
+      DEMO_PG_READER_PASSWORD: ${DEMO_PG_READER_PASSWORD:-change_me}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - demo-pg-data:/var/lib/postgresql/data
+      - ./init/demo-pg:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 验证初始化完成：检查 employees sentinel 表存在
+      # 强制 --host=127.0.0.1 走 TCP：初始化期间的临时服务器仅监听 Unix socket，
+      # 避免最终 TCP 监听尚未就绪时被误判为 healthy（密码经环境变量传入，不进 argv）
+      test: ["CMD-SHELL", "PGPASSWORD=\"$$POSTGRES_PASSWORD\" psql --host=127.0.0.1 -U ${DEMO_PG_USER:-demo_admin} -d webdb_demo -t -c \"SELECT 1 FROM employees LIMIT 1;\" | grep -q 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+    networks:
+      - webdb-backend
+    restart: unless-stopped
+
+  # ============================================================
+  # 演示 MySQL 8.4 LTS — 含合成数据与只读账号
+  # digest: sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+  # ============================================================
+  demo-mysql:
+    image: mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DEMO_MYSQL_ROOT_PASSWORD:-change_me}
+      MYSQL_DATABASE: webdb_demo
+      MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
+      # 只读账号密码通过 init 脚本安全设置，绕过 MySQL 入口点对特殊字符的限制
+      DEMO_MYSQL_READER_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
+    ports:
+      - "127.0.0.1:3306:3306"
+    volumes:
+      - demo-mysql-data:/var/lib/mysql
+      - ./init/demo-mysql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # 验证初始化完成：检查 employees sentinel 表存在
+      # 强制 --protocol=tcp 连 127.0.0.1：初始化期间的临时服务器仅监听 Unix socket，
+      # 避免最终 TCP 监听尚未就绪时被误判为 healthy
+      test: ['CMD-SHELL', 'mysql --protocol=tcp --host=127.0.0.1 -u root -p"$${MYSQL_ROOT_PASSWORD}" webdb_demo -e "SELECT 1 FROM employees LIMIT 1;" 2>/dev/null | grep -q 1']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+    networks:
+      - webdb-backend
+    restart: unless-stopped
+
+  # ============================================================
+  # API 服务 — 唯一可连接目标数据库的组件
+  # dev target: golang:1.26-bookworm（含 shell）
+  # ============================================================
+  api:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+      target: dev
+    environment:
+      API_PORT: "8080"
+      META_DB_HOST: webdb-meta
+      META_DB_PORT: "5432"
+      META_DB_USER: webdb
+      META_DB_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      META_DB_NAME: webdb_meta
+      DEMO_PG_HOST: demo-pg
+      DEMO_PG_PORT: "5432"
+      DEMO_PG_USER: demo_reader
+      DEMO_PG_PASSWORD: ${DEMO_PG_READER_PASSWORD:-change_me}
+      DEMO_PG_NAME: webdb_demo
+      DEMO_MYSQL_HOST: demo-mysql
+      DEMO_MYSQL_PORT: "3306"
+      DEMO_MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
+      DEMO_MYSQL_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
+      DEMO_MYSQL_NAME: webdb_demo
+      WEBDB_KEK: ${WEBDB_KEK:-change_me}
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      webdb-meta:
+        condition: service_healthy
+      demo-pg:
+        condition: service_healthy
+      demo-mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    networks:
+      - webdb-frontend
+      - webdb-backend
+    restart: unless-stopped
+
+  # ============================================================
+  # Web 前端 — Vite 开发服务器 (dev target)，容器内监听 0.0.0.0:5173
+  # ============================================================
+  web:
+    build:
+      context: ../../apps/web
+      dockerfile: Dockerfile
+      target: dev
+    ports:
+      - "127.0.0.1:3000:5173"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    networks:
+      - webdb-frontend
+    restart: unless-stopped
+
+# ==============================================================
+# 持久化卷
+# ==============================================================
+volumes:
+  webdb-meta-data:
+  demo-pg-data:
+  demo-mysql-data:
+
+# ==============================================================
+# 隔离网络
+#   webdb-frontend  仅 web ↔ api；前端容器无法直连任何数据库
+#   webdb-backend   仅 api ↔ 数据库；API 是唯一可达数据库的组件
+# ==============================================================
+networks:
+  webdb-frontend:
+    driver: bridge
+  webdb-backend:
+    driver: bridge

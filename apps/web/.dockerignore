@@ -1,0 +1,33 @@
+# 排除本地环境变量文件
+.env
+.env.*
+*.env
+.npmrc
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# 排除 Git 元数据
+.git
+.gitignore
+.gitattributes
+
+# 排除宿主 node_modules（跨平台原生模块冲突）
+node_modules
+
+# 排除构建输出
+/dist
+
+# 排除 IDE 文件
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 排除文档
+*.md
+LICENSE
+NOTICE

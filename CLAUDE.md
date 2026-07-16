@@ -54,6 +54,111 @@ API：gofmt -l .、go vet ./...、go test ./...
 Compose：docker compose config；相关服务健康检查与演示数据库集成测试
 ```
 
-PR 标记 Ready 前，填写 `.github/PULL_REQUEST_TEMPLATE.md`，并附上实际命令与结果。必须特别说明 SQL 策略、权限隔离、超时/取消、连接归还、审计与密钥脱敏是否受影响。
+创建 Draft PR 时就必须完整使用 `.github/PULL_REQUEST_TEMPLATE.md`，并附上实际命令与结果；不得等到标记 Ready 时才补模板。必须特别说明 SQL 策略、权限隔离、超时/取消、连接归还、审计与密钥脱敏是否受影响。
 
 提交后由独立 Codex Review 审查；Claude Code 不得批准或合并自己实现的 PR。收到 P0/P1 审查意见时先复现并修复，再更新测试与 PR 证据；不能复现或不同意时提交可验证证据并升级给 Owner。
+
+## Codex-Claude 自动审查闭环（强制）
+
+本机使用单 PR 轮询器 `C:\Users\34026\codex-claude-loop\agent-loop.ps1` 和 Windows 计划任务 `CodexClaudeAutoFixLoop`。每个开发任务都必须完成以下初始化；不得继续沿用上一个 PR 的配置或状态。
+
+### 任务开始与旧任务隔离
+
+1. 开始新任务时先检查计划任务：
+
+   ```powershell
+   $task = Get-ScheduledTask -TaskName "CodexClaudeAutoFixLoop" -ErrorAction SilentlyContinue
+   if ($task -and $task.State -eq 'Running') {
+     throw 'CodexClaudeAutoFixLoop 正在处理旧任务；等待它结束后再初始化新任务。'
+   }
+   if ($task) { Disable-ScheduledTask -TaskName "CodexClaudeAutoFixLoop" | Out-Null }
+   ```
+
+2. 检查仓库、分支和工作区。不得覆盖、stash、reset、restore 或删除用户已有的未提交改动；工作区不干净时停止并报告。
+3. 一个分支只完成一个任务。完成首个可验证提交后创建 Draft PR；Claude Code 永远不得批准、关闭或合并自己的 PR。
+
+### PR 模板与政策检查（强制）
+
+1. 执行 `gh pr create` 前必须读取仓库当前的 `.github/PULL_REQUEST_TEMPLATE.md`，以该文件作为唯一模板来源。不得自行缩写 PR body，也不得只提供摘要。
+2. 创建 Draft PR 时，PR body 必须保留并填写以下精确章节标题：
+
+   ```markdown
+   ## 任务
+   ## 改动与风险
+   ## 验证证据
+   ## WebDB 安全核对
+   ## AI 协作与交接
+   ```
+
+   `## 任务` 不得缺失，必须至少填写 Task/Issue、目标和非目标。没有任务卡时明确写明原因，不得删除该章节。
+3. 使用 `--body-file` 从完整模板文件创建 PR，避免 PowerShell/Git Bash 引号或换行导致章节丢失。模板中的验证命令只能填写实际执行过的结果，不得伪造。
+4. PR 创建后立即读取 GitHub 上的实际 body 并逐项检查上述五个标题；不能只检查本地文件：
+
+   ```powershell
+   $body = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json body --jq '.body'
+   $required = @('## 任务','## 改动与风险','## 验证证据','## WebDB 安全核对','## AI 协作与交接')
+   $missing = @($required | Where-Object { $body -notmatch [regex]::Escape($_) })
+   if ($missing.Count -gt 0) { throw "PR 模板缺少章节: $($missing -join ', ')" }
+   ```
+
+5. 如果 PR 政策检查报告“缺少 PR 模板章节”，只修正 PR body 并重新验证政策检查；不要通过修改 workflow、ruleset 或删除检查来绕过。模板校验通过前，不得启用自动轮询器，也不得触发 `@codex review`。
+
+### Draft PR 创建后的闭环初始化
+
+PR 编号在 PR 创建前不存在。因此，以下步骤必须在 Draft PR 创建后立即执行，并且必须早于首次 `@codex review`：
+
+1. 获取并验证新 PR 的编号、head 分支和 head SHA，确认仓库是 `fujiabao89/WebDB`、PR 为 OPEN/DRAFT、head owner 为 `fujiabao89`。
+2. 写入 `C:\Users\34026\codex-claude-loop\config.json`。必须保留以下字段，并将 `pr` 替换为新 PR 编号：
+
+   ```json
+   {
+     "repo": "fujiabao89/WebDB",
+     "pr": 0,
+     "codex_login": "chatgpt-codex-connector[bot]",
+     "max_rounds": 3,
+     "project_root": "C:\\Users\\34026\\项目开发3",
+     "test_commands": []
+   }
+   ```
+
+   `test_commands` 必须填写该任务实际存在、已先手工验证可运行的测试、类型检查或构建命令；不得写入不存在的 `npm test`，也不得为了绕过验证而留空。`git diff --check` 只能作为附加检查，不能替代真实项目测试。
+
+3. 原子化重建 `C:\Users\34026\codex-claude-loop\state.json`，不得继承旧 PR 的 review、轮次或失败记录。将 `pr` 替换为新 PR 编号：
+
+   ```json
+   {
+     "pr": 0,
+     "round": 0,
+     "processed_reviews": [],
+     "fails": 0,
+     "processed_completion_comments": [],
+     "review_requested_shas": []
+   }
+   ```
+
+   写入临时文件、解析验证 JSON 后再替换正式文件，避免计划任务读取半写入状态。
+
+4. 验证配置和状态中的 PR 编号一致，并确认 `agent-loop.ps1 -DryRun` 只读取新 PR、不会调用 Claude、不会提交或推送。
+5. 启用计划任务：
+
+   ```powershell
+   Enable-ScheduledTask -TaskName "CodexClaudeAutoFixLoop" | Out-Null
+   ```
+
+6. 对新 PR 当前 head SHA 只触发一次首次审查：
+
+   ```powershell
+   gh pr comment <PR-NUMBER> --repo fujiabao89/WebDB --body "@codex review"
+   ```
+
+   记录已请求审查的 SHA，禁止对同一个 SHA 重复评论。首次触发后由计划任务每 5 分钟轮询；不要手工反复运行真实模式。
+
+### 自动循环与停止条件
+
+- 只接受 `chatgpt-codex-connector[bot]` 针对当前 head SHA 的正式 Review/inline comment。
+- 每次成功 push 后，由轮询器对新 SHA 触发一次 `@codex review`；没有新 Review 时只等待。
+- Claude 只修复列出的 P1/P2，并运行 `config.json` 中的真实验证；验证通过后才允许 commit 和 push。
+- P0、权限、密钥、生产数据、架构或规则变更、连续失败两次、达到三轮时停止自动修复并等待人工审查。
+- Codex bot 针对当前 SHA 返回 `Didn't find any major issues` 时，记录完成评论并等待人工审查。
+- 永远不得自动合并、批准、关闭 PR，或修改 branch protection/ruleset。最终是否通过和合并只能由用户决定。
+- 每次任务交接必须报告：PR 编号、分支、当前 SHA、轮次、验证命令与结果、计划任务状态，以及当前是等待 Codex 还是等待人工审查。
