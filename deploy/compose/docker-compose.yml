@@ -80,7 +80,7 @@ services:
       - ./init/demo-mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # 验证初始化完成：检查 employees sentinel 表存在
-      test: ["CMD-SHELL", "mysql -u root -p$${MYSQL_ROOT_PASSWORD} webdb_demo -e \"SELECT 1 FROM employees LIMIT 1;\" 2>/dev/null | grep -q 1"]
+      test: ['CMD-SHELL', 'mysql -u root -p"$${MYSQL_ROOT_PASSWORD}" webdb_demo -e "SELECT 1 FROM employees LIMIT 1;" 2>/dev/null | grep -q 1']
       interval: 5s
       timeout: 3s
       retries: 10

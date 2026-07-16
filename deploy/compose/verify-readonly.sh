@@ -4,6 +4,7 @@
 # 从容器运行时环境变量读取凭证，与 Compose 实际传给容器的值一致
 # 密码通过 export 注入环境变量，docker compose exec 只传变量名，
 # 不在宿主进程参数（/proc/*/cmdline）中暴露密码值。
+# 测试对象名使用 $$_$RANDOM 后缀，确保多次运行幂等。
 # 验证：
 #   1. 错误密码认证失败
 #   2. 正确密码 SELECT 成功
@@ -41,6 +42,9 @@ fi
 export PGPASSWORD="$PG_READER_PASSWORD"
 export MYSQL_PWD="$MYSQL_READER_PASSWORD"
 
+# 每轮生成唯一后缀，防止测试数据残留导致误判（如 UNIQUE 约束冲突被错当权限拒绝）
+TEST_TAG="vrfy_$$_$RANDOM"
+
 echo "=== P0-01 只读账号权限验证（TCP 密码认证）==="
 echo ""
 
@@ -65,9 +69,9 @@ else
   fail "PostgreSQL SELECT 失败 — 只读账号应能执行 SELECT"
 fi
 
-# 2. INSERT 被拒绝
+# 2. INSERT 被拒绝（使用唯一值防止残留数据干扰）
 if ${COMPOSE} exec -T -e PGPASSWORD demo-pg \
-    psql --host=demo-pg -U demo_reader -d webdb_demo -c "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "INSERT INTO departments(name) VALUES ('test_insert_${TEST_TAG}');" > /dev/null 2>&1; then
   fail "PostgreSQL INSERT 未被拒绝"
 else
   pass "PostgreSQL INSERT 被正确拒绝"
@@ -91,7 +95,7 @@ fi
 
 # 5. 永久 DDL 被拒绝
 if ${COMPOSE} exec -T -e PGPASSWORD demo-pg \
-    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TABLE test_ddl_${TEST_TAG} (id INT);" > /dev/null 2>&1; then
   fail "PostgreSQL 永久 DDL 未被拒绝"
 else
   pass "PostgreSQL 永久 DDL 被正确拒绝"
@@ -99,7 +103,7 @@ fi
 
 # 6. 临时表 DDL 被拒绝
 if ${COMPOSE} exec -T -e PGPASSWORD demo-pg \
-    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TEMP TABLE test_temp (id INT);" > /dev/null 2>&1; then
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TEMP TABLE test_temp_${TEST_TAG} (id INT);" > /dev/null 2>&1; then
   fail "PostgreSQL CREATE TEMP TABLE 未被拒绝"
 else
   pass "PostgreSQL CREATE TEMP TABLE 被正确拒绝"
@@ -128,9 +132,9 @@ else
   fail "MySQL SELECT 失败 — 只读账号应能执行 SELECT"
 fi
 
-# 2. INSERT 被拒绝
+# 2. INSERT 被拒绝（使用唯一值防止残留数据干扰）
 if ${COMPOSE} exec -T -e MYSQL_PWD demo-mysql \
-    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "INSERT INTO departments(name) VALUES ('test_insert');" > /dev/null 2>&1; then
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "INSERT INTO departments(name) VALUES ('test_insert_${TEST_TAG}');" > /dev/null 2>&1; then
   fail "MySQL INSERT 未被拒绝"
 else
   pass "MySQL INSERT 被正确拒绝"
@@ -152,12 +156,20 @@ else
   pass "MySQL DELETE 被正确拒绝"
 fi
 
-# 5. DDL 被拒绝
+# 5. 永久 DDL 被拒绝
 if ${COMPOSE} exec -T -e MYSQL_PWD demo-mysql \
-    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "CREATE TABLE test_ddl_${TEST_TAG} (id INT);" > /dev/null 2>&1; then
   fail "MySQL DDL 未被拒绝"
 else
   pass "MySQL DDL 被正确拒绝"
+fi
+
+# 6. 临时表 DDL 被拒绝
+if ${COMPOSE} exec -T -e MYSQL_PWD demo-mysql \
+    mysql --protocol=tcp -u "${MYSQL_READER_USER}" webdb_demo -e "CREATE TEMPORARY TABLE test_temp_${TEST_TAG} (id INT);" > /dev/null 2>&1; then
+  fail "MySQL CREATE TEMPORARY TABLE 未被拒绝"
+else
+  pass "MySQL CREATE TEMPORARY TABLE 被正确拒绝"
 fi
 
 echo ""
