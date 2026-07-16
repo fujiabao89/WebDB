@@ -51,7 +51,8 @@ services:
       - demo-pg-data:/var/lib/postgresql/data
       - ./init/demo-pg:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DEMO_PG_USER:-demo_admin} -d webdb_demo"]
+      # 验证初始化完成：检查 employees sentinel 表存在
+      test: ["CMD-SHELL", "psql -U ${DEMO_PG_USER:-demo_admin} -d webdb_demo -t -c \"SELECT 1 FROM employees LIMIT 1;\" | grep -q 1"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -78,7 +79,8 @@ services:
       - demo-mysql-data:/var/lib/mysql
       - ./init/demo-mysql:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD}"]
+      # 验证初始化完成：检查 employees sentinel 表存在
+      test: ["CMD-SHELL", "mysql -u root -p$${MYSQL_ROOT_PASSWORD} webdb_demo -e \"SELECT 1 FROM employees LIMIT 1;\" 2>/dev/null | grep -q 1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -105,8 +107,8 @@ services:
       META_DB_NAME: webdb_meta
       DEMO_PG_HOST: demo-pg
       DEMO_PG_PORT: "5432"
-      DEMO_PG_USER: ${DEMO_PG_USER:-demo_admin}
-      DEMO_PG_PASSWORD: ${DEMO_PG_PASSWORD:-change_me}
+      DEMO_PG_USER: demo_reader
+      DEMO_PG_PASSWORD: ${DEMO_PG_READER_PASSWORD:-change_me}
       DEMO_PG_NAME: webdb_demo
       DEMO_MYSQL_HOST: demo-mysql
       DEMO_MYSQL_PORT: "3306"

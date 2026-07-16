@@ -28,6 +28,8 @@ EOSQL
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 GRANT CONNECT ON DATABASE webdb_demo TO demo_reader;
 GRANT USAGE ON SCHEMA public TO demo_reader;
+-- 撤销 PUBLIC 默认的 TEMPORARY 权限，确保 demo_reader 不能创建临时表
+REVOKE TEMPORARY ON DATABASE webdb_demo FROM PUBLIC;
 
 CREATE TABLE IF NOT EXISTS departments (
     id   SERIAL PRIMARY KEY,

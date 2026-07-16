@@ -15,10 +15,11 @@ jobs:
     outputs:
       web: ${{ steps.detect.outputs.web }}
       api: ${{ steps.detect.outputs.api }}
+      contracts: ${{ steps.detect.outputs.contracts }}
     steps:
       - uses: actions/checkout@v4
       - id: detect
-        name: Detect Web and API projects
+        name: Detect Web, API and Contracts projects
         run: |
           if test -f apps/web/package.json; then
             echo "web=true" >> "$GITHUB_OUTPUT"
@@ -29,6 +30,11 @@ jobs:
             echo "api=true" >> "$GITHUB_OUTPUT"
           else
             echo "api=false" >> "$GITHUB_OUTPUT"
+          fi
+          if test -f packages/contracts/package.json; then
+            echo "contracts=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "contracts=false" >> "$GITHUB_OUTPUT"
           fi
 
   repository-safety:
@@ -95,3 +101,25 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+
+  contracts:
+    name: Contracts checks
+    runs-on: ubuntu-latest
+    needs: detect-projects
+    if: needs.detect-projects.outputs.contracts == 'true'
+    defaults:
+      run:
+        working-directory: packages/contracts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: packages/contracts/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Type check
+        run: npm run typecheck
+      - name: Test
+        run: npm test

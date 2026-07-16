@@ -3,6 +3,9 @@
 # 所有数据均为合成数据，不含真实 PII
 # 只读账号通过 DEMO_MYSQL_READER_PASSWORD 在 init 脚本中安全创建
 # 绕过 MySQL Docker 入口点对特殊字符的限制，支持单引号、双引号等
+# 主体放入显式子 shell：MySQL 官方入口点 source 非可执行 .sh，
+# 子 shell 可防止 set -euo pipefail 污染父入口点的 shell 状态。
+(
 set -euo pipefail
 
 READER_USER="${MYSQL_USER:-demo_reader}"
@@ -23,6 +26,9 @@ fi
 READER_PW_SQL="${READER_PASSWORD//\\/\\\\}"
 READER_PW_SQL="${READER_PW_SQL//\'/\'\'}"
 
+# 对数据库名中的 _ 进行转义，防止 MySQL GRANT 将其视为单字符通配符
+MYSQL_DB_GRANT="${MYSQL_DB//_/\\_}"
+
 mysql -u root -p"${MYSQL_ROOT_PASSWORD}" "${MYSQL_DB}" <<EOSQL
 -- 创建只读账号并设置密码（支持单引号、双引号、空格、反斜杠等特殊字符）
 CREATE USER IF NOT EXISTS '${READER_USER}'@'%' IDENTIFIED BY '${READER_PW_SQL}';
@@ -30,7 +36,7 @@ ALTER USER '${READER_USER}'@'%' IDENTIFIED BY '${READER_PW_SQL}';
 
 -- 仅授予 SELECT 权限
 REVOKE ALL PRIVILEGES, GRANT OPTION FROM '${READER_USER}'@'%';
-GRANT SELECT ON \`${MYSQL_DB}\`.* TO '${READER_USER}'@'%';
+GRANT SELECT ON \`${MYSQL_DB_GRANT}\`.* TO '${READER_USER}'@'%';
 FLUSH PRIVILEGES;
 
 -- 示例部门表
@@ -70,3 +76,4 @@ INSERT IGNORE INTO employees (first_name, last_name, email, department_id, hire_
     ('Iris',   'Xu',      'iris.xu@example.local',       3, '2024-09-01', 72000.00),
     ('Jack',   'Huang',   'jack.huang@example.local',    4, '2024-10-01', 68000.00);
 EOSQL
+) || exit $?

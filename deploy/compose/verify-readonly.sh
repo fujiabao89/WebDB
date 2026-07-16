@@ -1,11 +1,11 @@
 #!/bin/bash
 # P0-01 只读账号权限验证脚本
 # 使用 TCP 连接 + 密码认证，真实验证密码正确性和只读权限
-# 通过 docker compose exec 在容器内执行，无需本地安装 psql/mysql 客户端
+# 从容器运行时环境变量读取凭证，与 Compose 实际传给容器的值一致
 # 验证：
 #   1. 错误密码认证失败
 #   2. 正确密码 SELECT 成功
-#   3. 正确密码 INSERT、UPDATE、DELETE、DDL 被拒绝
+#   3. INSERT、UPDATE、DELETE、永久 DDL、临时表 DDL 被拒绝
 # 用法：
 #   docker compose -f deploy/compose/docker-compose.yml up -d --wait
 #   bash deploy/compose/verify-readonly.sh
@@ -22,18 +22,21 @@ fail() { echo -e "  ${RED}❌ FAIL${NC}: $1"; FAIL=$((FAIL + 1)); }
 
 COMPOSE="docker compose -f deploy/compose/docker-compose.yml"
 
-# 从环境变量读取密码（不设置默认值，由 compose 决定）
-PG_READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
-MYSQL_READER_PASSWORD="${DEMO_MYSQL_READER_PASSWORD:-change_me}"
-MYSQL_READER_USER="${DEMO_MYSQL_USER:-demo_reader}"
+# 从容器运行时读取凭证，与 Compose 传值一致
+# 密码通过 -e 注入到命令进程，不在宿主进程参数中暴露
+PG_READER_PASSWORD=$(${COMPOSE} exec -T demo-pg printenv DEMO_PG_READER_PASSWORD 2>/dev/null || echo "")
+MYSQL_READER_PASSWORD=$(${COMPOSE} exec -T demo-mysql printenv DEMO_MYSQL_READER_PASSWORD 2>/dev/null || echo "")
+MYSQL_READER_USER=$(${COMPOSE} exec -T demo-mysql printenv MYSQL_USER 2>/dev/null || echo "demo_reader")
+
+if [ -z "$PG_READER_PASSWORD" ]; then
+  fail "无法从 demo-pg 容器读取 DEMO_PG_READER_PASSWORD"
+fi
+if [ -z "$MYSQL_READER_PASSWORD" ]; then
+  fail "无法从 demo-mysql 容器读取 DEMO_MYSQL_READER_PASSWORD"
+fi
 
 echo "=== P0-01 只读账号权限验证（TCP 密码认证）==="
 echo ""
-
-# ============================================================
-# 密码脱敏辅助函数
-# ============================================================
-mask() { echo "***"; }
 
 # ============================================================
 # PostgreSQL 只读账号验证（TCP + PGPASSWORD）
@@ -80,12 +83,20 @@ else
   pass "PostgreSQL DELETE 被正确拒绝"
 fi
 
-# 5. DDL 被拒绝
+# 5. 永久 DDL 被拒绝
 if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
     psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TABLE test_ddl (id INT);" > /dev/null 2>&1; then
-  fail "PostgreSQL DDL 未被拒绝"
+  fail "PostgreSQL 永久 DDL 未被拒绝"
 else
-  pass "PostgreSQL DDL 被正确拒绝"
+  pass "PostgreSQL 永久 DDL 被正确拒绝"
+fi
+
+# 6. 临时表 DDL 被拒绝
+if ${COMPOSE} exec -T -e "PGPASSWORD=${PG_READER_PASSWORD}" demo-pg \
+    psql --host=demo-pg -U demo_reader -d webdb_demo -c "CREATE TEMP TABLE test_temp (id INT);" > /dev/null 2>&1; then
+  fail "PostgreSQL CREATE TEMP TABLE 未被拒绝"
+else
+  pass "PostgreSQL CREATE TEMP TABLE 被正确拒绝"
 fi
 
 echo ""

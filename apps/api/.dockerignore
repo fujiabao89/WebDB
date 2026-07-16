@@ -1,0 +1,36 @@
+# 排除本地环境变量文件与密钥
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# 排除 Git 元数据
+.git
+.gitignore
+.gitattributes
+
+# 排除构建输出与缓存
+/tmp
+/bin
+/dist
+__debug_bin*
+
+# 排除 IDE 与编辑器文件
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# 排除测试缓存
+go.test*
+*.test
+*.out
+
+# 排除文档（不需要复制进镜像）
+*.md
+LICENSE
+NOTICE
