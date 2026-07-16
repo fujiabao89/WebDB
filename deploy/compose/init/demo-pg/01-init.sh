@@ -5,6 +5,14 @@
 # 使用 PL/pgSQL format() %L 安全引用，正确处理单引号、反斜杠等特殊字符
 set -e
 
+# 拒绝管理员与只读角色重名：若 POSTGRES_USER 被设为 demo_reader，
+# 入口点会先以超级用户身份创建该角色，下方 IF NOT EXISTS 将跳过受限角色创建，
+# API 连接的 demo_reader 会持有管理员权限，破坏 P0 只读边界。
+if [ "$POSTGRES_USER" = "demo_reader" ]; then
+  echo "错误: POSTGRES_USER 不能使用保留的只读角色名 demo_reader，请改用其他管理员用户名（如 demo_admin）" >&2
+  exit 1
+fi
+
 READER_PASSWORD="${DEMO_PG_READER_PASSWORD:-change_me}"
 # SQL 字符串转义：加倍单引号
 READER_PW_SAFE="${READER_PASSWORD//\'/\'\'}"

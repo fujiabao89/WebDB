@@ -5,6 +5,9 @@
 .npmrc
 *.pem
 *.key
+*.crt
+*.p12
+*.pfx
 
 # 排除 Git 元数据
 .git

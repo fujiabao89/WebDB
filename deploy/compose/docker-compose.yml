@@ -32,7 +32,7 @@ services:
       retries: 5
       start_period: 10s
     networks:
-      - webdb-net
+      - webdb-backend
     restart: unless-stopped
 
   # ============================================================
@@ -58,7 +58,7 @@ services:
       retries: 5
       start_period: 15s
     networks:
-      - webdb-net
+      - webdb-backend
     restart: unless-stopped
 
   # ============================================================
@@ -86,7 +86,7 @@ services:
       retries: 10
       start_period: 30s
     networks:
-      - webdb-net
+      - webdb-backend
     restart: unless-stopped
 
   # ============================================================
@@ -132,7 +132,8 @@ services:
       retries: 3
       start_period: 5s
     networks:
-      - webdb-net
+      - webdb-frontend
+      - webdb-backend
     restart: unless-stopped
 
   # ============================================================
@@ -155,7 +156,7 @@ services:
       retries: 3
       start_period: 15s
     networks:
-      - webdb-net
+      - webdb-frontend
     restart: unless-stopped
 
 # ==============================================================
@@ -168,7 +169,11 @@ volumes:
 
 # ==============================================================
 # 隔离网络
+#   webdb-frontend  仅 web ↔ api；前端容器无法直连任何数据库
+#   webdb-backend   仅 api ↔ 数据库；API 是唯一可达数据库的组件
 # ==============================================================
 networks:
-  webdb-net:
+  webdb-frontend:
+    driver: bridge
+  webdb-backend:
     driver: bridge
