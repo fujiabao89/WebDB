@@ -27,12 +27,12 @@ P0 初始 migration 只建立下列表，不提前创建查询文档、审批、
 | `workspaces` | UUID 主键；`name`；对象型 `settings` JSONB；时间戳 |
 | `workspace_members` | `workspace_id`、`user_id`、`role`；复合主键；角色限制为 Owner/Admin/Editor/Viewer |
 | `credential_envelopes` | `workspace_id`、`secret_ref`、`version` 复合唯一；密文、nonce、wrapped DEK、wrap nonce、版本化 `envelope_suite`、`kek_version`、创建/退役时间 |
-| `connections` | UUID 主键；`workspace_id`；工作区内唯一 `name`；引擎、主机、端口、数据库、环境；`secret_ref` + `secret_version`；创建者与时间戳 |
+| `connections` | UUID 主键；`workspace_id`；`UNIQUE (workspace_id, id)` 复合外键目标；工作区内唯一 `name`；引擎、主机、端口、数据库、环境；`secret_ref` + `secret_version`；创建者与时间戳 |
 | `connection_policies` | `workspace_id` + `connection_id`；读/写/导出开关；语句超时与行数上限；P0 默认只读、禁止写入和导出 |
 | `executions` | UUID 主键；`workspace_id` + `connection_id`；actor、statement hash、状态、trace ID、开始/结束时间、耗时、行数、脱敏错误码、结果引用与过期时间；非空结果引用必须有过期时间 |
 | `audit_events` | UUID 主键；工作区与可空 system actor/connection；action、resource type/id、outcome、对象型脱敏 metadata、trace/execution ID、`occurred_at`；不含 `updated_at` |
 
-所有工作区子资源使用包含 `workspace_id` 的复合外键，数据库层拒绝跨工作区引用；`audit_events.connection_id` 使用 `(workspace_id, connection_id)` 可空复合外键且禁止级联删除，并建立 `(workspace_id, connection_id, occurred_at)` 索引。`executions` 提供 `(workspace_id, connection_id, id)` 唯一键；`audit_events.execution_id` 非空时 `connection_id` 必须同时非空，并通过 `(workspace_id, connection_id, execution_id)` 复合外键引用 execution，从而拒绝同一工作区内错误的 connection/execution 组合。
+所有工作区子资源使用包含 `workspace_id` 的复合外键，数据库层拒绝跨工作区引用；`connections` 必须提供 `UNIQUE (workspace_id, id)` 作为 connection policy、execution 与 audit 的复合外键目标。`audit_events.connection_id` 使用 `(workspace_id, connection_id)` 可空复合外键且禁止级联删除，并建立 `(workspace_id, connection_id, occurred_at)` 索引。`executions` 提供 `UNIQUE (workspace_id, connection_id, id)`；`audit_events.execution_id` 非空时 `connection_id` 必须同时非空，并通过 `(workspace_id, connection_id, execution_id)` 复合外键引用 execution，从而拒绝同一工作区内错误的 connection/execution 组合。
 
 P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新增值必须通过前向 migration 扩展 `CHECK`：
 

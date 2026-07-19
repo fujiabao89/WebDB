@@ -262,7 +262,7 @@ P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、
 | `workspaces` | `id`, `name`, `settings` | 团队租户与默认策略边界 |
 | `workspace_members` | `workspace_id`, `user_id`, `role` | 成员与角色 |
 | `credential_envelopes` | `workspace_id`, `secret_ref`, `version`, `ciphertext`, `data_nonce`, `wrapped_dek`, `wrap_nonce`, `envelope_suite`, `kek_version`, `retired_at` | 密文与轮换版本隔离保存；版本化 suite 描述两层加密与格式；不保存 KEK 或明文凭证 |
-| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref`, `secret_version` | 仅引用凭证信封；不保存明文密钥；连接参数可分级脱敏 |
+| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref`, `secret_version` | `UNIQUE(workspace_id, id)` 作为租户复合外键目标；仅引用凭证信封；不保存明文密钥 |
 | `connection_policies` | `connection_id`, `allow_read`, `allow_write`, `allow_export`, `statement_timeout_ms` | 连接级安全策略 |
 | `query_documents` | `id`, `workspace_id`, `title`, `owner_id`, `tags`, `search_vector`, `yjs_state_ref` | 协作 SQL 文档及其快照引用；`search_vector` 用 PostgreSQL `tsvector` 支持全文检索 |
 | `query_versions` | `id`, `document_id`, `content`, `created_by` | 可读版本快照；不把临时 Presence 写入其中 |
@@ -271,7 +271,7 @@ P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、
 | `audit_events` | `id`, `workspace_id`, `actor_id`, `connection_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | 追加式审计；连接使用租户复合外键；数据库拒绝 update/delete/truncate，元数据必须脱敏 |
 | `export_jobs` | `id`, `execution_id`, `status`, `object_ref`, `expires_at` | 异步导出与自动清理 |
 
-建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源使用包含 `workspace_id` 的复合外键；审计的 connection/execution 使用三列复合外键保证关联一致。P0 状态、角色、引擎、环境和审计结果的允许值、默认值及非空语义由 ADR-013 固定。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
+建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、`connections(workspace_id, id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源使用包含 `workspace_id` 的复合外键；审计的 connection/execution 使用三列复合外键保证关联一致。P0 状态、角色、引擎、环境和审计结果的允许值、默认值及非空语义由 ADR-013 固定。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
 
 ---
 

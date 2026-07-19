@@ -22,6 +22,7 @@
 | --- | --- |
 | 迁移可在空库 up/down，重复执行安全 | 自动化迁移测试 |
 | 工作区成员、连接名称等唯一约束与外键可阻止越权/重复数据 | 集成测试 |
+| `connections(workspace_id, id)` 唯一键可作为所有租户连接复合外键目标 | 空库 migration 与外键集成测试 |
 | 连接只保存 `secret_ref`/密文元数据，不保存明文密码 | Schema 与日志测试 |
 | `audit_events` 无普通更新/删除路径，元数据脱敏 | 仓储/API 与测试审查 |
 | 审计连接关联不能跨工作区，且可按工作区/连接/时间检索 | 复合外键与索引集成测试 |
@@ -51,5 +52,6 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 - 已通过 ADR-013 固定迁移工具、P0 表边界、追加式审计和凭证字段方案；任务依赖 P0-01 已完成，状态改为 Ready。
 - PR #9 第 1 轮独立审查：修复审计缺少租户约束连接关联、结果引用未强制过期、信封算法标识语义不足及设计稿 ADR 索引遗漏。
 - PR #9 第 2 轮独立审查：修复同工作区 connection/execution 审计关联不一致风险，并固定 P0 枚举允许值、默认值和非空语义。
+- PR #9 第 3 轮独立审查：补齐 PostgreSQL 创建租户连接复合外键所需的 `connections(workspace_id, id)` 唯一键。
 - 实现时先提交会失败的 migration/约束集成测试，再添加最小 SQL migration 与访问层；新增依赖须更新许可证清单。
 - 未决项：AEAD/KDF、凭证 payload 编码、KEK 轮换与审计保留/归档策略留给 P0-05，不阻塞 P0-02。
