@@ -26,19 +26,19 @@ P0 初始 migration 只建立下列表，不提前创建查询文档、审批、
 | `users` | UUID 主键；`email`；`password_hash`；`status`；预留 `identity_provider`、`external_subject`、`external_tenant`；时间戳；`lower(email)` 唯一 |
 | `workspaces` | UUID 主键；`name`；对象型 `settings` JSONB；时间戳 |
 | `workspace_members` | `workspace_id`、`user_id`、`role`；复合主键；角色限制为 Owner/Admin/Editor/Viewer |
-| `credential_envelopes` | `workspace_id`、`secret_ref`、`version` 复合唯一；密文、nonce、wrapped DEK、wrap nonce、算法标识、`kek_version`、创建/退役时间 |
+| `credential_envelopes` | `workspace_id`、`secret_ref`、`version` 复合唯一；密文、nonce、wrapped DEK、wrap nonce、版本化 `envelope_suite`、`kek_version`、创建/退役时间 |
 | `connections` | UUID 主键；`workspace_id`；工作区内唯一 `name`；引擎、主机、端口、数据库、环境；`secret_ref` + `secret_version`；创建者与时间戳 |
 | `connection_policies` | `workspace_id` + `connection_id`；读/写/导出开关；语句超时与行数上限；P0 默认只读、禁止写入和导出 |
-| `executions` | UUID 主键；`workspace_id` + `connection_id`；actor、statement hash、状态、trace ID、开始/结束时间、耗时、行数、脱敏错误码、结果引用与过期时间 |
-| `audit_events` | UUID 主键；工作区与可空 system actor；action、resource type/id、outcome、对象型脱敏 metadata、trace/execution ID、`occurred_at`；不含 `updated_at` |
+| `executions` | UUID 主键；`workspace_id` + `connection_id`；actor、statement hash、状态、trace ID、开始/结束时间、耗时、行数、脱敏错误码、结果引用与过期时间；非空结果引用必须有过期时间 |
+| `audit_events` | UUID 主键；工作区与可空 system actor/connection；action、resource type/id、outcome、对象型脱敏 metadata、trace/execution ID、`occurred_at`；不含 `updated_at` |
 
-所有工作区子资源使用包含 `workspace_id` 的复合外键，数据库层拒绝跨工作区引用；外键不对 `audit_events` 使用级联删除。端口、状态、角色、引擎、环境、超时和行数上限使用 `CHECK` 约束；时间使用 UTC `timestamptz`。
+所有工作区子资源使用包含 `workspace_id` 的复合外键，数据库层拒绝跨工作区引用；`audit_events.connection_id` 使用 `(workspace_id, connection_id)` 可空复合外键且禁止级联删除，并建立 `(workspace_id, connection_id, occurred_at)` 索引。端口、状态、角色、引擎、环境、超时和行数上限使用 `CHECK` 约束；`executions` 使用 `CHECK (result_ref IS NULL OR result_expires_at IS NOT NULL)`，访问层为持久化结果写入默认 7 天过期时间；时间使用 UTC `timestamptz`。
 
 ### 追加式审计
 
 - 普通应用仓储仅提供 `Append` 与查询能力，不提供 update/delete 方法。
 - 数据库对 `audit_events` 的 `UPDATE`、`DELETE`、`TRUNCATE` 安装拒绝触发器；未来拆分数据库角色后，运行时角色只授予 `SELECT` / `INSERT`。
-- 审计写入必须携带 workspace、action、resource、outcome、trace ID，并在适用时携带 actor、connection 和 execution 关联。
+- 审计写入必须携带 workspace、action、resource、outcome、trace ID，并在适用时携带 actor、受租户外键约束的 connection 和 execution 关联。
 - `metadata` 仅接受 JSON object；应用层使用允许列表生成脱敏摘要，禁止 SQL 正文、凭证、KEK、目标库结果和原始错误进入审计正文。
 - 审计事件不随查询结果过期而删除；保留期或归档策略仍是后续独立决策。
 
@@ -46,7 +46,7 @@ P0 初始 migration 只建立下列表，不提前创建查询文档、审批、
 
 - `connections` 仅保存不透明 `secret_ref` 和明确的 `secret_version`，不保存用户名、密码、密文、DEK、KEK 或 nonce。
 - 本地信封记录隔离在 `credential_envelopes`；以 `(workspace_id, secret_ref, version)` 作为引用边界。轮换时先追加新版本，再原子更新连接引用；旧版本只标记退役，不覆盖密文。
-- `credential_envelopes` 只保存 `ciphertext`、`data_nonce`、`wrapped_dek`、`wrap_nonce`、`cipher_algorithm`、`kek_version` 和生命周期元数据。KEK 本体继续只由部署环境注入。
+- `credential_envelopes` 只保存 `ciphertext`、`data_nonce`、`wrapped_dek`、`wrap_nonce`、`envelope_suite`、`kek_version` 和生命周期元数据。`envelope_suite` 是版本化格式标识，必须足以确定数据加密、DEK wrapping、AAD 与 payload 格式；KEK 本体继续只由部署环境注入。
 - 具体 AEAD/KDF、payload 编码、KEK 轮换流程及外部 KMS 适配由 P0-05 单独决策和测试；P0-02 不自行固定加密算法。
 
 ## 候选方案与取舍
@@ -65,7 +65,7 @@ P0 初始 migration 只建立下列表，不提前创建查询文档、审批、
 
 ## 验证与回滚/替代条件
 
-- 集成测试验证空 PostgreSQL 16 数据库的 `up -> down -> up -> up`、约束、跨工作区拒绝、审计 update/delete/truncate 拒绝，以及 Schema 中不存在明文凭证字段。
+- 集成测试验证空 PostgreSQL 16 数据库的 `up -> down -> up -> up`、约束、跨工作区拒绝（含审计连接关联）、无过期时间的非空 `result_ref` 拒绝、审计 update/delete/truncate 拒绝，以及 Schema 中不存在明文凭证字段。
 - migration 工具不可维护、许可证不兼容或不能可靠支持事务/嵌入执行时，以新 ADR 替代 Goose。
 - Schema 尚未进入共享环境时可通过回退本 ADR 与任务卡恢复 Backlog；进入共享环境后只允许新增前向 migration 修正。
 
