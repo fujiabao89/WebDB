@@ -260,18 +260,18 @@ P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、
 |---|---|---|
 | `users` | `id`, `email`, `password_hash`, `status` | 本地用户 email 非空且大小写不敏感唯一；密码只保存强哈希 |
 | `workspaces` | `id`, `name`, `settings` | 团队租户与默认策略边界 |
-| `workspace_members` | `workspace_id`, `user_id`, `role` | 成员与角色 |
+| `workspace_members` | `workspace_id`, `user_id`, `role` | 复合主键；分别外键引用真实 workspace/user |
 | `credential_envelopes` | `workspace_id`, `secret_ref`, `version`, `ciphertext`, `data_nonce`, `wrapped_dek`, `wrap_nonce`, `envelope_suite`, `kek_version`, `retired_at` | `(workspace_id, secret_ref, version)` 唯一；版本化 suite 描述两层加密与格式；不保存 KEK 或明文凭证 |
-| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref`, `secret_version`, `created_by` | 租户复合外键引用准确凭证版本；创建者必须是工作区成员；不保存明文密钥 |
-| `connection_policies` | `workspace_id`, `connection_id`, `allow_read`, `allow_write`, `allow_export`, `statement_timeout_ms` | `(workspace_id, connection_id)` 为主键，每个连接仅一条策略 |
+| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref`, `secret_version`, `created_by` | 非空租户复合外键引用准确凭证版本；创建者必须是工作区成员；不保存明文密钥 |
+| `connection_policies` | `workspace_id`, `connection_id`, `allow_read`, `allow_write`, `allow_export`, `statement_timeout_ms`, `max_rows` | `(workspace_id, connection_id)` 为主键；超时和行数上限为正数 |
 | `query_documents` | `id`, `workspace_id`, `title`, `owner_id`, `tags`, `search_vector`, `yjs_state_ref` | 协作 SQL 文档及其快照引用；`search_vector` 用 PostgreSQL `tsvector` 支持全文检索 |
 | `query_versions` | `id`, `document_id`, `content`, `created_by` | 可读版本快照；不把临时 Presence 写入其中 |
 | `executions` | `id`, `workspace_id`, `connection_id`, `actor_id`, `document_id`, `query_version_id`, `statement_hash`, `status`, `trace_id`, `started_at`, `duration_ms`, `row_count`, `result_ref`, `result_expires_at` | actor 必须是工作区成员；非空结果引用必须有过期时间，默认 7 天后删除 |
 | `change_requests` | `id`, `execution_id`, `risk_level`, `status`, `approved_by` | 受控写入 / 审批流程 |
-| `audit_events` | `id`, `workspace_id`, `actor_id`, `connection_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | 非 system actor 必须是工作区成员；trace 非空、metadata 仅对象；数据库拒绝 update/delete/truncate |
+| `audit_events` | `id`, `workspace_id`, `actor_type`, `actor_id`, `connection_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | actor 判别器约束 user/system 空值语义；trace 非空、metadata 仅对象；数据库拒绝 update/delete/truncate |
 | `export_jobs` | `id`, `execution_id`, `status`, `object_ref`, `expires_at` | 异步导出与自动清理 |
 
-建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、`connections(workspace_id, id)`、`credential_envelopes(workspace_id, secret_ref, version)`、`connection_policies(workspace_id, connection_id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源、凭证和非空用户引用均使用包含 `workspace_id` 的复合外键；审计的 connection/execution 使用三列复合外键保证关联一致。P0 状态、角色、引擎、环境和审计结果的允许值、默认值及非空语义由 ADR-013 固定。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
+建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、`connections(workspace_id, id)`、`credential_envelopes(workspace_id, secret_ref, version)`、`connection_policies(workspace_id, connection_id)`、同一工作区的连接名称、邀请 token 的哈希。workspace member 必须引用真实 workspace/user；工作区子资源、非空凭证和非空用户引用均使用包含 `workspace_id` 的复合外键；审计的 connection/execution 使用三列复合外键保证关联一致。P0 状态、角色、引擎、环境、actor 类型和审计结果的允许值、默认值及非空语义由 ADR-013 固定。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
 
 ---
 

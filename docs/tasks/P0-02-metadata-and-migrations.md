@@ -23,12 +23,13 @@
 | 迁移可在空库 up/down，重复执行安全 | 自动化迁移测试 |
 | 工作区成员、连接名称等唯一约束与外键可阻止越权/重复数据 | 集成测试 |
 | `connections(workspace_id, id)` 唯一键可作为所有租户连接复合外键目标 | 空库 migration 与外键集成测试 |
-| 本地用户 email 非空，所有非空创建者/actor 必须是对应工作区成员 | 非空、复合外键与错误工作区集成测试 |
+| 本地用户 email 非空；成员引用真实 user/workspace；所有非空创建者/actor 必须是对应工作区成员 | 非空、复合外键、孤儿成员与错误工作区测试 |
 | 连接只保存 `secret_ref`/密文元数据，不保存明文密码 | Schema 与日志测试 |
-| 连接凭证引用必须指向同工作区存在的准确信封版本 | 三列复合外键及缺失/错误版本测试 |
-| 每个连接只能有一条策略，重复策略被数据库拒绝 | 复合主键集成测试 |
+| 连接凭证引用非空，且必须指向同工作区存在的准确信封版本 | 非空、三列复合外键及缺失/错误版本测试 |
+| 每个连接只能有一条策略，`max_rows` 为正数，重复/非法策略被拒绝 | 复合主键与 `CHECK` 集成测试 |
 | `audit_events` 无普通更新/删除路径，元数据脱敏 | 仓储/API 与测试审查 |
 | 审计 trace ID 非空，metadata 只能是 JSON object | 非空与 `jsonb_typeof` 约束测试 |
+| 审计 `actor_type=user/system` 与 actor 空值语义一致 | actor 判别器 `CHECK` 集成测试 |
 | 审计连接关联不能跨工作区，且可按工作区/连接/时间检索 | 复合外键与索引集成测试 |
 | 审计 connection/execution 必须属于同一工作区的同一连接 | 三列复合外键集成测试 |
 | 非空 `result_ref` 必须有过期时间，默认 7 天 | Schema 约束与访问层集成测试 |
@@ -44,7 +45,7 @@ go -C apps/api vet ./...
 go -C apps/api test -tags=integration ./internal/metadata/...
 ```
 
-集成测试必须覆盖空库 `up -> down -> up -> up`、空用户 email 与非法枚举值拒绝、重复 connection policy 拒绝、凭证信封缺失/错误版本/跨工作区引用拒绝、非成员或跨工作区 actor 拒绝、同工作区不同连接的 execution 关联拒绝、无过期时间的非空 `result_ref` 拒绝、审计缺失 trace ID 与非对象 metadata 拒绝、审计 update/delete/truncate 拒绝，以及 Schema/日志中不存在明文凭证字段。
+集成测试必须覆盖空库 `up -> down -> up -> up`、空用户 email 与非法枚举值拒绝、孤儿 workspace member 拒绝、重复 connection policy 与非正 `max_rows` 拒绝、空/缺失/错误版本/跨工作区凭证信封引用拒绝、非成员或跨工作区 actor 拒绝、user/system actor 组合不一致拒绝、同工作区不同连接的 execution 关联拒绝、无过期时间的非空 `result_ref` 拒绝、审计缺失 trace ID 与非对象 metadata 拒绝、审计 update/delete/truncate 拒绝，以及 Schema/日志中不存在明文凭证字段。
 
 ## 升级条件
 
@@ -58,5 +59,6 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 - PR #9 第 2 轮独立审查：修复同工作区 connection/execution 审计关联不一致风险，并固定 P0 枚举允许值、默认值和非空语义。
 - PR #9 第 3 轮独立审查：补齐 PostgreSQL 创建租户连接复合外键所需的 `connections(workspace_id, id)` 唯一键。
 - PR #9 GitHub Codex 自动审查：修复连接策略唯一性、凭证信封复合外键、审计 trace/metadata 约束、租户成员 actor 外键及本地用户 email 非空共 6 个 P2。
+- PR #9 GitHub Codex 复审：补齐 audit actor 判别器、凭证引用非空、workspace member 两端外键和策略 `max_rows` 字段共 4 个 P2。
 - 实现时先提交会失败的 migration/约束集成测试，再添加最小 SQL migration 与访问层；新增依赖须更新许可证清单。
 - 未决项：AEAD/KDF、凭证 payload 编码、KEK 轮换与审计保留/归档策略留给 P0-05，不阻塞 P0-02。
