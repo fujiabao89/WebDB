@@ -271,7 +271,7 @@ P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、
 | `audit_events` | `id`, `workspace_id`, `actor_id`, `connection_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | 追加式审计；连接使用租户复合外键；数据库拒绝 update/delete/truncate，元数据必须脱敏 |
 | `export_jobs` | `id`, `execution_id`, `status`, `object_ref`, `expires_at` | 异步导出与自动清理 |
 
-建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源使用包含 `workspace_id` 的复合外键。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
+建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源使用包含 `workspace_id` 的复合外键；审计的 connection/execution 使用三列复合外键保证关联一致。P0 状态、角色、引擎、环境和审计结果的允许值、默认值及非空语义由 ADR-013 固定。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
 
 ---
 
