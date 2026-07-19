@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 一条命令启动最小本地环境 | `docker compose -f deploy/compose/docker-compose.yml up -d --build --wait`，5/5 服务健康 | 通过 |
 | 各服务有明确端口、依赖、健康检查和不含真实密钥的示例配置 | `docker compose config` 通过；所有宿主端口仅绑定 `127.0.0.1` | 通过 |
-| 演示 PG/MySQL 使用合成数据与受限账号 | `verify-readonly.sh`：TCP 密码认证及 PG/MySQL SELECT、DML、DDL 权限验证 13/13 通过 | 通过 |
+| 演示 PG/MySQL 使用合成数据与受限账号 | `verify-readonly.sh`：TCP 密码认证及 PG/MySQL SELECT、DML、DDL 权限验证 14/14 通过 | 通过 |
 | 前端、后端和契约目录有最小构建与测试入口 | GitHub Actions 的 Web、API、Contracts、Detect、PR contract、Repository safety 共 6 项检查通过 | 通过 |
 | API 与 Web 健康端点可用 | API `/health` 返回 200；Web `/` 及 `/api/health` 返回 200 | 通过 |
 | 停止、重启和日志安全满足要求 | 重启后 5/5 服务健康且合成数据保留；日志未发现密码或 KEK 泄露 | 通过 |

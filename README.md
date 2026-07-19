@@ -55,22 +55,19 @@ docker compose -f deploy/compose/docker-compose.yml down
 
 ```bash
 # API
-cd apps/api
-go test ./...
-go vet ./...
+go -C apps/api test ./...
+go -C apps/api vet ./...
 
 # Web
-cd apps/web
-npm ci
-npm run typecheck
-npm test
-npm run build
+npm --prefix apps/web ci
+npm --prefix apps/web run typecheck
+npm --prefix apps/web test
+npm --prefix apps/web run build
 
 # Contracts
-cd packages/contracts
-npm ci
-npm run typecheck
-npm test
+npm --prefix packages/contracts ci
+npm --prefix packages/contracts run typecheck
+npm --prefix packages/contracts test
 ```
 
 CI 还会执行格式检查、仓库安全检查和 PR 契约检查。不要通过删除或跳过测试使 CI 通过。
