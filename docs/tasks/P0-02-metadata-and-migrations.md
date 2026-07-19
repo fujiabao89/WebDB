@@ -23,12 +23,12 @@
 | 迁移可在空库 up/down，重复执行安全 | 自动化迁移测试 |
 | 工作区成员、连接名称等唯一约束与外键可阻止越权/重复数据；所有必选租户外键分量非空 | 集成测试与空分量负向测试 |
 | `connections(workspace_id, id)` 唯一键可作为所有租户连接复合外键目标 | 空库 migration 与外键集成测试 |
-| 本地用户 email 非空；成员引用真实 user/workspace；所有非空创建者/actor 必须是对应工作区成员 | 非空、复合外键、孤儿成员与错误工作区测试 |
+| 本地用户 email 非空且无首尾空白、大小写不敏感唯一，password hash 非空；成员引用真实 user/workspace；所有非空创建者/actor 必须是对应工作区成员 | 用户规范化/非空、复合外键、孤儿成员与错误工作区测试 |
 | 连接只保存 `secret_ref`/密文元数据，不保存明文密码 | Schema 与日志测试 |
-| 凭证信封密文、两类 nonce、wrapped DEK、suite 与 KEK 版本结构完整；连接引用必须指向同工作区存在的准确版本 | 信封非空/非空值约束、三列复合外键及缺失/错误版本测试 |
+| 凭证信封直接引用真实 workspace，且密文、两类 nonce、wrapped DEK、suite 与 KEK 版本结构完整；连接引用必须指向同工作区存在的准确版本 | workspace 外键、信封非空/非空值约束、三列复合外键及缺失/错误版本测试 |
 | 每个连接至多一条策略，`max_rows` 为正数；重复/非法策略被拒绝，缺失策略默认拒绝全部操作 | 复合主键、`CHECK` 与访问层默认拒绝集成测试 |
 | `audit_events` 无普通更新/删除路径，元数据脱敏 | 仓储/API 与测试审查 |
-| 审计 action、resource type/id、trace ID 非空非空白，事件时间非空；metadata 只能是 JSON object | 非空/非空白与 `jsonb_typeof` 约束测试 |
+| 审计直接引用真实 workspace；action、resource type/id、trace ID 非空非空白，事件时间非空；metadata 只能是 JSON object | workspace 外键、非空/非空白与 `jsonb_typeof` 约束测试 |
 | 审计 `actor_type=user/system` 与 actor 空值语义一致 | actor 判别器 `CHECK` 集成测试 |
 | 审计连接关联不能跨工作区，且可按工作区/连接/时间检索 | 复合外键与索引集成测试 |
 | 审计 connection/execution 必须属于同一工作区的同一连接 | 三列复合外键集成测试 |
@@ -45,7 +45,7 @@ go -C apps/api vet ./...
 go -C apps/api test -tags=integration ./internal/metadata/...
 ```
 
-集成测试必须覆盖空库 `up -> down -> up -> up`、空用户 email、非法枚举及缺失连接环境拒绝、所有必选租户外键分量空值拒绝、孤儿 workspace member 拒绝、重复 connection policy、非正 `max_rows` 及缺失策略时访问层默认拒绝、空/不完整/缺失/错误版本/跨工作区凭证信封引用拒绝、非成员或跨工作区 actor 拒绝、user/system actor 组合不一致拒绝、同工作区不同连接的 execution 关联拒绝、无过期时间的非空 `result_ref` 拒绝、审计缺失或空白 action/resource/time/trace ID 与非对象 metadata 拒绝、审计 update/delete/truncate 拒绝，以及 Schema/日志中不存在明文凭证字段。
+集成测试必须覆盖空库 `up -> down -> up -> up`、空/首尾空白/规范化重复 email 与空 password hash 拒绝、非法枚举及缺失连接环境拒绝、所有必选租户外键分量空值拒绝、孤儿 workspace member/credential envelope/system audit 拒绝、重复 connection policy、非正 `max_rows` 及缺失策略时访问层默认拒绝、空/不完整/缺失/错误版本/跨工作区凭证信封引用拒绝、非成员或跨工作区 actor 拒绝、user/system actor 组合不一致拒绝、同工作区不同连接的 execution 关联拒绝、无过期时间的非空 `result_ref` 拒绝、审计缺失或空白 action/resource/time/trace ID 与非对象 metadata 拒绝、审计 update/delete/truncate 拒绝，以及 Schema/日志中不存在明文凭证字段。
 
 ## 升级条件
 
@@ -61,5 +61,6 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 - PR #9 GitHub Codex 自动审查：修复连接策略唯一性、凭证信封复合外键、审计 trace/metadata 约束、租户成员 actor 外键及本地用户 email 非空共 6 个 P2。
 - PR #9 GitHub Codex 复审：补齐 audit actor 判别器、凭证引用非空、workspace member 两端外键和策略 `max_rows` 字段共 4 个 P2。
 - PR #9 GitHub Codex 再审：补齐必选租户外键分量非空、完整信封字段、缺失策略默认拒绝、显式连接环境及审计 action/resource/time 约束，共修复 1 个 P1、4 个 P2。
+- PR #9 GitHub Codex 第 4 次审查：补齐 audit/credential envelope 的直接 workspace 外键、email 空白规范化边界及本地用户 password hash 非空，共修复 4 个 P2。
 - 实现时先提交会失败的 migration/约束集成测试，再添加最小 SQL migration 与访问层；新增依赖须更新许可证清单。
 - 未决项：AEAD/KDF、凭证 payload 编码、KEK 轮换与审计保留/归档策略留给 P0-05，不阻塞 P0-02。
