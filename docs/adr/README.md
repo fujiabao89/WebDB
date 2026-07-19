@@ -16,3 +16,4 @@
 | [010](ADR-010-query-result-retention.md) | 查询结果保留 7 天 | 已接受 |
 | [011](ADR-011-local-auth-then-oidc.md) | 本地账号优先，后续 OIDC/SSO | 已接受 |
 | [012](ADR-012-apache-2-license.md) | Apache License 2.0 | 已接受 |
+| [013](ADR-013-p0-metadata-migrations-schema.md) | P0 元数据库迁移与 Schema 基线 | 已接受 |

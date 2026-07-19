@@ -202,7 +202,7 @@ flowchart TB
 | 表格 | AG Grid Community 或 TanStack Table + 虚拟列表 | AG Grid Community 采用 MIT 许可证；需要先确认社区版功能是否覆盖筛选与编辑需求，避免隐式依赖企业功能。[许可证](https://www.ag-grid.com/eula/AG-Grid-Community-License.html) |
 | 后端 | Go + `pgx` / MySQL 驱动 | 直接使用数据库驱动与连接池；不把“数据库协议代理”纳入 MVP |
 | 协作 | Yjs + 有持久化、鉴权能力的 WebSocket provider | 对 SQL 文本做协作 POC，验证断线恢复、房间隔离、快照与负载 |
-| 元数据 | PostgreSQL | 事务、JSONB、全文搜索与审计查询均适配 |
+| 元数据 | PostgreSQL + `pressly/goose/v3` SQL migration | 事务、JSONB、全文搜索与审计查询均适配；P0 使用显式、可回滚、可嵌入的顺序 migration，API 启动不自动迁移（ADR-013） |
 | 认证 | MVP 使用本地账号 + Cookie 会话或短时 access token / refresh token；完整版本接入 OIDC / SSO | 不把“JWT”当作完整安全方案；必须包含撤销、轮换、CSRF 策略与身份映射 |
 | 部署 | Docker Compose；生产提供反向代理示例 | 将镜像体积列为优化指标而非功能承诺 |
 
@@ -254,21 +254,24 @@ sequenceDiagram
 
 以下为逻辑模型；字段类型、索引与迁移在实现设计中细化。
 
+P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、连接、连接策略、执行与审计；查询文档、审批、导出和协作相关表留给对应后续任务。物理字段与约束以 ADR-013 为准。
+
 | 实体 | 关键字段 | 说明 |
 |---|---|---|
 | `users` | `id`, `email`, `password_hash`, `status` | 用户身份；密码只保存强哈希 |
 | `workspaces` | `id`, `name`, `settings` | 团队租户与默认策略边界 |
 | `workspace_members` | `workspace_id`, `user_id`, `role` | 成员与角色 |
-| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref` | 不保存明文密钥；连接参数可分级脱敏 |
+| `credential_envelopes` | `workspace_id`, `secret_ref`, `version`, `ciphertext`, `data_nonce`, `wrapped_dek`, `wrap_nonce`, `cipher_algorithm`, `kek_version`, `retired_at` | 密文与轮换版本隔离保存；不保存 KEK 或明文凭证 |
+| `connections` | `id`, `workspace_id`, `engine`, `host`, `port`, `database`, `environment`, `secret_ref`, `secret_version` | 仅引用凭证信封；不保存明文密钥；连接参数可分级脱敏 |
 | `connection_policies` | `connection_id`, `allow_read`, `allow_write`, `allow_export`, `statement_timeout_ms` | 连接级安全策略 |
 | `query_documents` | `id`, `workspace_id`, `title`, `owner_id`, `tags`, `search_vector`, `yjs_state_ref` | 协作 SQL 文档及其快照引用；`search_vector` 用 PostgreSQL `tsvector` 支持全文检索 |
 | `query_versions` | `id`, `document_id`, `content`, `created_by` | 可读版本快照；不把临时 Presence 写入其中 |
-| `executions` | `id`, `connection_id`, `document_id`, `query_version_id`, `statement_hash`, `status`, `started_at`, `duration_ms`, `row_count`, `result_ref`, `result_expires_at` | 一次运行的元信息与结果摘要，可回链到文档及其执行时版本；持久化结果默认 7 天后删除 |
+| `executions` | `id`, `workspace_id`, `connection_id`, `actor_id`, `document_id`, `query_version_id`, `statement_hash`, `status`, `trace_id`, `started_at`, `duration_ms`, `row_count`, `result_ref`, `result_expires_at` | 一次运行的元信息与结果摘要，可回链到文档及其执行时版本；持久化结果默认 7 天后删除 |
 | `change_requests` | `id`, `execution_id`, `risk_level`, `status`, `approved_by` | 受控写入 / 审批流程 |
-| `audit_events` | `id`, `workspace_id`, `actor_id`, `action`, `resource`, `metadata`, `occurred_at` | 追加式审计；元数据必须脱敏 |
+| `audit_events` | `id`, `workspace_id`, `actor_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | 追加式审计；数据库拒绝 update/delete/truncate，元数据必须脱敏 |
 | `export_jobs` | `id`, `execution_id`, `status`, `object_ref`, `expires_at` | 异步导出与自动清理 |
 
-建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、同一工作区的连接名称、邀请 token 的哈希。`audit_events` 不提供普通业务 API 的更新 / 删除能力。
+建议的强制唯一约束包括：`workspace_members(workspace_id, user_id)`、同一工作区的连接名称、邀请 token 的哈希。工作区子资源使用包含 `workspace_id` 的复合外键。`audit_events` 不提供普通业务 API 的更新 / 删除能力，并在数据库层拒绝 update/delete/truncate（ADR-013）。
 
 ---
 
