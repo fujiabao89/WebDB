@@ -13,7 +13,7 @@
 | 验收项 | 最终证据 | 结果 |
 | --- | --- | --- |
 | 一条命令启动最小本地环境 | `docker compose -f deploy/compose/docker-compose.yml up -d --build --wait`，5/5 服务健康 | 通过 |
-| 各服务有明确端口、依赖、健康检查和不含真实密钥的示例配置 | `docker compose config` 通过；所有宿主端口仅绑定 `127.0.0.1` | 通过 |
+| 各服务有明确端口、依赖、健康检查和不含真实密钥的示例配置 | `docker compose config --quiet` 通过；所有宿主端口仅绑定 `127.0.0.1` | 通过 |
 | 演示 PG/MySQL 使用合成数据与受限账号 | `verify-readonly.sh`：TCP 密码认证及 PG/MySQL SELECT、DML、DDL 权限验证 14/14 通过 | 通过 |
 | 前端、后端和契约目录有最小构建与测试入口 | GitHub Actions 的 Web、API、Contracts、Detect、PR contract、Repository safety 共 6 项检查通过 | 通过 |
 | API 与 Web 健康端点可用 | API `/health` 返回 200；Web `/` 及 `/api/health` 返回 200 | 通过 |
@@ -45,7 +45,7 @@ P0-01 已于 2026-07-16 通过 PR #2 合并。
 ### 最终验证命令
 
 ```bash
-docker compose -f deploy/compose/docker-compose.yml config
+docker compose -f deploy/compose/docker-compose.yml config --quiet
 docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 bash deploy/compose/verify-readonly.sh
 curl http://127.0.0.1:8080/health

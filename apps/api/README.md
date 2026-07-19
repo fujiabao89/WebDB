@@ -8,22 +8,27 @@
 - 默认监听 `API_PORT`，未设置时为 `8080`。
 - Docker `dev` target 使用 `golang:1.26-bookworm`，保留 shell；`prod` target 使用 distroless nonroot，不含 shell。
 
-## 本地运行与验证
+## 本地运行
+
+从仓库根目录在单独终端启动 API；该命令会持续前台运行，停止时按 `Ctrl+C`：
 
 ```bash
-cd apps/api
-go run ./cmd/server
-go test ./...
-go vet ./...
+go -C apps/api run ./cmd/server
 ```
 
-启动后可访问 `http://127.0.0.1:8080/health`。格式检查与 CI 一致：
+启动后可访问 `http://127.0.0.1:8080/health`。
+
+## 本地验证
+
+以下命令均从仓库根目录执行，不依赖前台服务器：
 
 ```bash
-test -z "$(gofmt -l .)"
+go -C apps/api test ./...
+go -C apps/api vet ./...
+test -z "$(gofmt -l apps/api)"
 ```
 
-Docker 镜像验证：
+Docker 镜像验证同样从仓库根目录执行：
 
 ```bash
 docker build --target dev -t webdb-api:dev apps/api

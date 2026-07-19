@@ -17,6 +17,16 @@ docs/tasks/         P0 任务卡与交接状态
 
 需要 Docker Engine 与 Docker Compose v2。先复制本地环境模板；模板仅含 `change_me` 占位值，实际 `.env` 不得提交。
 
+Linux / macOS：
+
+```bash
+cp deploy/compose/env.example deploy/compose/.env
+docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+docker compose -f deploy/compose/docker-compose.yml ps
+```
+
+Windows PowerShell：
+
 ```powershell
 Copy-Item deploy/compose/env.example deploy/compose/.env
 docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
