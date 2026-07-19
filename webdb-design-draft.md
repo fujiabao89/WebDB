@@ -356,7 +356,7 @@ P0 结束前必须有两项硬门槛：
 
 ## 11. P0 实施清单
 
-- [ ] 建立 monorepo：`apps/web`、`apps/api`、`packages/contracts`、`deploy/compose`、`docs/adr`。
+- [x] 建立 monorepo：`apps/web`、`apps/api`、`packages/contracts`、`deploy/compose`、`docs/adr`。（P0-01，PR #2）
 - [ ] 添加 Apache License 2.0 的 `LICENSE`、`NOTICE` 与第三方依赖许可证清单。
 - [ ] 为 PostgreSQL 和 MySQL 编写统一 adapter 接口：连接测试、列出 Schema、只读执行、取消、分页。
 - [ ] 创建元数据库迁移：用户、工作区、成员、连接、策略、执行、审计。
@@ -364,7 +364,7 @@ P0 结束前必须有两项硬门槛：
 - [ ] 实现只读 SQL 策略：单语句、按 PostgreSQL / MySQL 方言分别进行 AST 分类、超时、最大行数、取消；无法可靠判定的语句默认拒绝。
 - [ ] 实现目标连接池与执行准入：上限、获取超时、429、取消、指标和压力测试。
 - [ ] 制作最小 React 页面：连接列表、Schema 树、Monaco、结果表格。
-- [ ] 用 Docker Compose 启动 WebDB 元数据库、演示 PG、演示 MySQL 和应用。
+- [x] 用 Docker Compose 启动 WebDB 元数据库、演示 PG、演示 MySQL 和应用。（P0-01，PR #2）
 - [ ] 写出 P0 验收脚本和威胁模型；通过后再启动协作功能。
 
 ---
