@@ -12,7 +12,7 @@
 | `api` | Go API/执行服务（唯一可连接 DB 的组件） | 本地构建 `apps/api`（dev target） | `8080:8080` | webdb-meta, demo-pg, demo-mysql |
 | `web` | React 前端 Vite 开发服务器 | 本地构建 `apps/web`（dev target） | `3000:5173` | api |
 
-所有服务加入隔离网络 `webdb-net`（bridge）。健康检查见各服务定义的 `healthcheck`。
+Web 与 API 通过 `webdb-frontend` 通信；只有 API 和数据库服务加入 `webdb-backend`。API 是两个网络之间的唯一应用边界，浏览器和 Web 容器不能通过 Compose 后端网络直连数据库。健康检查见各服务定义的 `healthcheck`。
 
 ## 安全约束
 

@@ -1,6 +1,6 @@
 # P0-01-followup：依赖许可证清单
 
-> 状态：Ready｜风险：Low｜依赖：P0-01｜实现者：待分配｜来源：PR #2 Codex Review #3572601443
+> 状态：Ready｜风险：Low｜依赖：P0-01｜Owner：fujiabao89｜建议实现者：管理员｜来源：PR #2 Codex Review #3572601443
 
 ## 目标
 
