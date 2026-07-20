@@ -17,7 +17,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE TABLE users (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     email           TEXT NOT NULL
-                    CHECK (email = btrim(email) AND email <> ''),
+                    CHECK (email !~ '^\s' AND email !~ '\s$' AND email <> ''),
     password_hash   TEXT NOT NULL
                     CHECK (btrim(password_hash) <> ''),
     status          TEXT NOT NULL DEFAULT 'active'

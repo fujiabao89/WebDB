@@ -68,17 +68,21 @@ func runServe() error {
 // ---- migrate --------------------------------------------------------------
 
 func metaDSN() string {
+	user := envOr("META_DB_USER", "webdb")
+	password := envOr("META_DB_PASSWORD", "change_me")
 	host := envOr("META_DB_HOST", "webdb-meta")
 	port := envOr("META_DB_PORT", "5432")
-	user := url.QueryEscape(envOr("META_DB_USER", "webdb"))
-	password := url.QueryEscape(envOr("META_DB_PASSWORD", "change_me"))
-	dbname := url.QueryEscape(envOr("META_DB_NAME", "webdb_meta"))
+	dbname := envOr("META_DB_NAME", "webdb_meta")
 	sslmode := envOr("META_DB_SSLMODE", "disable")
 
-	return fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-		host, port, user, password, dbname, sslmode,
-	)
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     fmt.Sprintf("%s:%s", host, port),
+		Path:     dbname,
+		RawQuery: fmt.Sprintf("sslmode=%s", sslmode),
+	}
+	return u.String()
 }
 
 func envOr(key, def string) string {

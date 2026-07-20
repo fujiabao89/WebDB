@@ -355,9 +355,9 @@ func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
 			 statement_timeout_ms, max_rows)
 		VALUES ($1, $2, COALESCE($3, true), COALESCE($4, false), COALESCE($5, false), $6, $7)
 		ON CONFLICT (workspace_id, connection_id) DO UPDATE SET
-			allow_read = COALESCE(EXCLUDED.allow_read, connection_policies.allow_read),
-			allow_write = COALESCE(EXCLUDED.allow_write, connection_policies.allow_write),
-			allow_export = COALESCE(EXCLUDED.allow_export, connection_policies.allow_export),
+			allow_read = CASE WHEN $3::bool IS NULL THEN connection_policies.allow_read ELSE COALESCE($3, true) END,
+			allow_write = CASE WHEN $4::bool IS NULL THEN connection_policies.allow_write ELSE COALESCE($4, false) END,
+			allow_export = CASE WHEN $5::bool IS NULL THEN connection_policies.allow_export ELSE COALESCE($5, false) END,
 			statement_timeout_ms = EXCLUDED.statement_timeout_ms,
 			max_rows = EXCLUDED.max_rows,
 			updated_at = now()
@@ -554,6 +554,9 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 func (s *PGStore) QueryAudit(ctx context.Context, q AuditQuery) ([]AuditEvent, error) {
 	if q.Limit <= 0 {
 		q.Limit = 50
+		if q.Limit > 1000 {
+			q.Limit = 1000
+		}
 	}
 	query := `SELECT id, workspace_id, actor_type, actor_id, connection_id,
 		action, resource_type, resource_id, outcome,
