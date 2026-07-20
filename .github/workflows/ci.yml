@@ -90,6 +90,20 @@ jobs:
     defaults:
       run:
         working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: webdb
+          POSTGRES_PASSWORD: change_me
+          POSTGRES_DB: webdb_meta
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -101,6 +115,14 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
+      - name: Integration test
+        run: go test -tags=integration ./internal/metadata/...
+        env:
+          META_DB_HOST: localhost
+          META_DB_PORT: "5432"
+          META_DB_USER: webdb
+          META_DB_PASSWORD: change_me
+          META_DB_NAME: webdb_meta
 
   contracts:
     name: Contracts checks

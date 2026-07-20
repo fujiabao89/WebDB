@@ -4,6 +4,7 @@
 package migrate
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -49,16 +50,21 @@ func Validate() error {
 	}
 	fmt.Printf("已发现 %d 个 migration\n", len(entries))
 
-	// 额外解析每个 SQL 文件以捕获语法层面的错误
+	// 额外解析每个 SQL 文件：验证 goose 指令完整性
 	for _, e := range entries {
-		// goose 已解析过文件，CollectMigrations 成功意味着文件存在且命名正确；
-		// 进一步用 goose.Open 尝试完整解析 SQL 内容
 		src, err := fs.ReadFile(migrations, e.Source)
 		if err != nil {
 			return fmt.Errorf("migration %s: 读取失败: %w", e.Source, err)
 		}
 		if len(src) == 0 {
 			return fmt.Errorf("migration %s: 文件为空", e.Source)
+		}
+		// 验证必须包含 -- +goose Up 和 -- +goose Down 指令
+		if !bytes.Contains(src, []byte("-- +goose Up")) {
+			return fmt.Errorf("migration %s: 缺少 -- +goose Up 指令", e.Source)
+		}
+		if !bytes.Contains(src, []byte("-- +goose Down")) {
+			return fmt.Errorf("migration %s: 缺少 -- +goose Down 指令", e.Source)
 		}
 		fmt.Printf("  ✓ %s (%d bytes)\n", e.Source, len(src))
 	}

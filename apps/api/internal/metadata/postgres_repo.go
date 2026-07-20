@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -683,15 +684,12 @@ var (
 	_ AuditEventStore         = (*PGStore)(nil)
 )
 
+// sqlKeywordRE 匹配 SQL DML/DDL 关键词（忽略大小写，后跟空白、注释或换行）
+var sqlKeywordRE = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC(UTE)?)\b[\s/*\n\t]`)
+
 // looksLikeSQL 检测字符串是否包含 SQL 语句特征（P0 审计脱敏辅助）。
 func looksLikeSQL(s string) bool {
-	upper := strings.ToUpper(s)
-	for _, kw := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "TRUNCATE", "EXEC ", "EXECUTE "} {
-		if strings.Contains(upper, kw) {
-			return true
-		}
-	}
-	return false
+	return sqlKeywordRE.MatchString(s)
 }
 
 // looksLikeCredential 检测字符串是否包含凭证模式（P0 审计脱敏辅助）。
