@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -518,12 +519,18 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 		row_count=$4, result_ref=$5, result_expires_at=$6,
 		error_code=$7
 		WHERE id=$8 AND workspace_id=$9`
-	_, err := s.DB.ExecContext(ctx, q,
+	res, err := s.DB.ExecContext(ctx, q,
 		string(e.Status), e.FinishedAt, e.DurationMs, e.RowCount,
 		e.ResultRef, expiry, e.ErrorCode,
 		e.ID, wsID,
 	)
-	return err
+	if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return fmt.Errorf("execution %s not found in workspace", e.ID)
+		}
+		return nil
 }
 
 // ---- AuditEventStore ------------------------------------------------------
@@ -559,7 +566,11 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 			if len(val) > 500 {
 				val = val[:500]
 			}
-			filtered[k] = val
+			if looksLikeSQL(val) || looksLikeCredential(val) {
+				filtered[k] = "[redacted: sensitive content]"
+			} else {
+				filtered[k] = val
+			}
 		case float64, bool:
 			filtered[k] = val
 		}
@@ -671,3 +682,24 @@ var (
 	_ ExecutionStore          = (*PGStore)(nil)
 	_ AuditEventStore         = (*PGStore)(nil)
 )
+
+// looksLikeSQL 检测字符串是否包含 SQL 语句特征（P0 审计脱敏辅助）。
+func looksLikeSQL(s string) bool {
+	upper := strings.ToUpper(s)
+	for _, kw := range []string{"SELECT ", "INSERT ", "UPDATE ", "DELETE ", "DROP ", "ALTER ", "CREATE ", "TRUNCATE", "EXEC ", "EXECUTE "} {
+		if strings.Contains(upper, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// looksLikeCredential 检测字符串是否包含凭证模式（P0 审计脱敏辅助）。
+func looksLikeCredential(s string) bool {
+	for _, pattern := range []string{"password", "secret", "token", "key=", "pass="} {
+		if strings.Contains(strings.ToLower(s), pattern) {
+			return true
+		}
+	}
+	return false
+}
