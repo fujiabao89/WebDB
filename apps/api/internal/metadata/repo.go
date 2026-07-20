@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -74,6 +75,8 @@ type AuditQuery struct {
 	ConnectionID *uuid.UUID
 	Action       *string
 	ResourceType *string
+	From         *time.Time
+	To           *time.Time
 	Limit        int
 	Offset       int
 }

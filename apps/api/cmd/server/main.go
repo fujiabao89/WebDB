@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"time"
 
@@ -69,9 +70,9 @@ func runServe() error {
 func metaDSN() string {
 	host := envOr("META_DB_HOST", "webdb-meta")
 	port := envOr("META_DB_PORT", "5432")
-	user := envOr("META_DB_USER", "webdb")
-	password := envOr("META_DB_PASSWORD", "change_me")
-	dbname := envOr("META_DB_NAME", "webdb_meta")
+	user := url.QueryEscape(envOr("META_DB_USER", "webdb"))
+	password := url.QueryEscape(envOr("META_DB_PASSWORD", "change_me"))
+	dbname := url.QueryEscape(envOr("META_DB_NAME", "webdb_meta"))
 	sslmode := envOr("META_DB_SSLMODE", "disable")
 
 	return fmt.Sprintf(
@@ -98,13 +99,16 @@ func runMigrate(dir string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if dir == "status" {
+	switch dir {
+	case "up", "down":
+		return migrate.Run(ctx, db, dir)
+	case "status":
 		return migrate.Status(ctx, db)
-	}
-	if dir == "validate" {
+	case "validate":
 		return migrate.Validate()
+	default:
+		return fmt.Errorf("migrate: 不支持的方向 %q（仅支持 up、down、status、validate）", dir)
 	}
-	return migrate.Run(ctx, db, dir)
 }
 
 // ---- main ----------------------------------------------------------------

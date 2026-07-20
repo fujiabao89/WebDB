@@ -37,7 +37,8 @@ CREATE UNIQUE INDEX uq_users_lower_email ON users (lower(email));
 CREATE TABLE workspaces (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            TEXT NOT NULL,
-    settings        JSONB NOT NULL DEFAULT '{}'::jsonb,
+    settings        JSONB NOT NULL DEFAULT '{}'::jsonb
+                    CHECK (jsonb_typeof(settings) = 'object'),
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );

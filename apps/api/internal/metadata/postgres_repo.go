@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -408,10 +409,14 @@ func (s *PGStore) CreateExecution(ctx context.Context, e *Execution) error {
 			 statement_hash, status, trace_id, result_ref, result_expires_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
 		RETURNING id, started_at, created_at`
+	st := string(e.Status)
+	if st == "" {
+		st = string(ExecStatusPending)
+	}
 	return s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, e.ConnectionID, e.ActorID,
 		e.DocumentID, e.QueryVersionID,
-		e.StatementHash, string(e.Status), e.TraceID,
+		e.StatementHash, st, e.TraceID,
 		e.ResultRef, e.ResultExpiresAt,
 	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt)
 }
@@ -465,13 +470,19 @@ func (s *PGStore) ExecutionByTraceID(ctx context.Context, wsID uuid.UUID, traceI
 }
 
 func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execution) error {
+	// ADR-010: result_ref 非空且无过期时间时，默认 7 天后过期
+	expiry := e.ResultExpiresAt
+	if e.ResultRef != nil && *e.ResultRef != "" && expiry == nil {
+		t := time.Now().UTC().Add(7 * 24 * time.Hour)
+		expiry = &t
+	}
 	const q = `UPDATE executions SET status=$1, finished_at=$2, duration_ms=$3,
 		row_count=$4, result_ref=$5, result_expires_at=$6,
 		error_code=$7, error_message=$8
 		WHERE id=$9 AND workspace_id=$10`
 	_, err := s.DB.ExecContext(ctx, q,
 		string(e.Status), e.FinishedAt, e.DurationMs, e.RowCount,
-		e.ResultRef, e.ResultExpiresAt, e.ErrorCode, e.ErrorMessage,
+		e.ResultRef, expiry, e.ErrorCode, e.ErrorMessage,
 		e.ID, wsID,
 	)
 	return err
@@ -486,13 +497,13 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage("{}")
 	}
 
+	// 拒绝 JSON null 和非对象类型（交由 DB CHECK 约束拒绝）
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
-		// 非 JSON 对象无法按允许列表脱敏，原样返回交由 DB 约束拒绝（ADR-013）
+	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
 		return raw
 	}
 
-	// P0 允许列表：仅保留明确安全的键
+	// P0 允许列表：仅保留明确安全的键，且值必须为 string/float64/bool
 	allowed := map[string]bool{
 		"summary":       true,
 		"rows_affected": true,
@@ -501,7 +512,12 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 
 	filtered := make(map[string]any, len(m))
 	for k, v := range m {
-		if allowed[k] {
+		if !allowed[k] {
+			continue
+		}
+		// 仅允许安全的标量类型（string、float64、bool）
+		switch v.(type) {
+		case string, float64, bool:
 			filtered[k] = v
 		}
 	}
@@ -514,8 +530,11 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 }
 
 // AppendAudit 追加一条审计事件。数据库触发器阻止 UPDATE/DELETE/TRUNCATE。
-// 写入前按允许列表脱敏 metadata（ADR-013）。
+// 写入前按允许列表脱敏 metadata（ADR-013），并拒绝零值时间戳。
 func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
+	if e.OccurredAt.IsZero() {
+		return fmt.Errorf("audit: occurred_at 不得为零值")
+	}
 	const q = `
 		INSERT INTO audit_events
 			(workspace_id, actor_type, actor_id, connection_id,
@@ -556,6 +575,16 @@ func (s *PGStore) QueryAudit(ctx context.Context, q AuditQuery) ([]AuditEvent, e
 	if q.ResourceType != nil {
 		query += fmt.Sprintf(" AND resource_type = $%d", argN)
 		args = append(args, *q.ResourceType)
+		argN++
+	}
+	if q.From != nil {
+		query += fmt.Sprintf(" AND occurred_at >= $%d", argN)
+		args = append(args, *q.From)
+		argN++
+	}
+	if q.To != nil {
+		query += fmt.Sprintf(" AND occurred_at <= $%d", argN)
+		args = append(args, *q.To)
 		argN++
 	}
 

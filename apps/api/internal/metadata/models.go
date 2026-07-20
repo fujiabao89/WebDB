@@ -171,7 +171,7 @@ type Execution struct {
 	ResultRef       *string         `json:"result_ref,omitempty"`
 	ResultExpiresAt *time.Time      `json:"result_expires_at,omitempty"`
 	ErrorCode       *string         `json:"error_code,omitempty"`
-	ErrorMessage    *string         `json:"error_message,omitempty"`
+	ErrorMessage    *string         `json:"-"`
 	CreatedAt       time.Time       `json:"created_at"`
 }
 
