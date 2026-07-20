@@ -1,16 +1,25 @@
 // WebDB API 与执行服务入口
-// P0-01：仅提供 /health 端点，不实现业务功能
+// P0-02：支持 serve 与 migrate 子命令；serve 启动时不自动迁移
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
+
+	"github.com/fujiabao89/webdb/internal/migrate"
 )
 
-const version = "0.1.0"
+const version = "0.2.0"
+
+// ---- serve ----------------------------------------------------------------
 
 type healthResponse struct {
 	Status  string `json:"status"`
@@ -34,7 +43,7 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func main() {
+func runServe() error {
 	port := os.Getenv("API_PORT")
 	if port == "" {
 		port = "8080"
@@ -52,7 +61,76 @@ func main() {
 	}
 
 	log.Printf("WebDB API %s 启动，端口 %s", version, port)
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("服务启动失败: %v", err)
+	return server.ListenAndServe()
+}
+
+// ---- migrate --------------------------------------------------------------
+
+func metaDSN() string {
+	host := envOr("META_DB_HOST", "webdb-meta")
+	port := envOr("META_DB_PORT", "5432")
+	user := envOr("META_DB_USER", "webdb")
+	password := envOr("META_DB_PASSWORD", "change_me")
+	dbname := envOr("META_DB_NAME", "webdb_meta")
+	sslmode := envOr("META_DB_SSLMODE", "disable")
+
+	return fmt.Sprintf(
+		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+		host, port, user, password, dbname, sslmode,
+	)
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func runMigrate(dir string) error {
+	dsn := metaDSN()
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("连接元数据库失败: %w", err)
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if dir == "status" {
+		return migrate.Status(ctx, db)
+	}
+	if dir == "validate" {
+		return migrate.Validate()
+	}
+	return migrate.Run(ctx, db, dir)
+}
+
+// ---- main ----------------------------------------------------------------
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "用法: %s <serve|migrate> [up|down|status|validate]\n", os.Args[0])
+		os.Exit(1)
+	}
+
+	var err error
+	switch os.Args[1] {
+	case "serve":
+		err = runServe()
+	case "migrate":
+		dir := "up"
+		if len(os.Args) > 2 {
+			dir = os.Args[2]
+		}
+		err = runMigrate(dir)
+	default:
+		fmt.Fprintf(os.Stderr, "未知命令: %s\n", os.Args[1])
+		os.Exit(1)
+	}
+
+	if err != nil {
+		log.Fatalf("执行失败: %v", err)
 	}
 }
