@@ -140,12 +140,13 @@ type Connection struct {
 }
 
 // ConnectionPolicy 连接策略。
+// 布尔字段使用 *bool：nil 时保留 DB 默认值（allow_read=true, allow_write/export=false）。
 type ConnectionPolicy struct {
 	WorkspaceID        uuid.UUID `json:"workspace_id"`
 	ConnectionID       uuid.UUID `json:"connection_id"`
-	AllowRead          bool      `json:"allow_read"`
-	AllowWrite         bool      `json:"allow_write"`
-	AllowExport        bool      `json:"allow_export"`
+	AllowRead          *bool     `json:"allow_read"`
+	AllowWrite         *bool     `json:"allow_write"`
+	AllowExport        *bool     `json:"allow_export"`
 	StatementTimeoutMs int       `json:"statement_timeout_ms"`
 	MaxRows            int       `json:"max_rows"`
 	CreatedAt          time.Time `json:"created_at"`

@@ -110,13 +110,13 @@ func runMigrate(dir string) error {
 // ---- main ----------------------------------------------------------------
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "用法: %s <serve|migrate> [up|down|status|validate]\n", os.Args[0])
-		os.Exit(1)
+	cmd := "serve"
+	if len(os.Args) > 1 {
+		cmd = os.Args[1]
 	}
 
 	var err error
-	switch os.Args[1] {
+	switch cmd {
 	case "serve":
 		err = runServe()
 	case "migrate":

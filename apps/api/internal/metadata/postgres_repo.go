@@ -346,6 +346,20 @@ func (s *PGStore) UpdateConnection(ctx context.Context, c *Connection) error {
 // ---- ConnectionPolicyStore ------------------------------------------------
 
 func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
+	// *bool 为 nil 表示调用方未指定，使用 DB schema 默认值（allow_read=true, 其余=false）。
+	allowRead := true
+	if p.AllowRead != nil {
+		allowRead = *p.AllowRead
+	}
+	allowWrite := false
+	if p.AllowWrite != nil {
+		allowWrite = *p.AllowWrite
+	}
+	allowExport := false
+	if p.AllowExport != nil {
+		allowExport = *p.AllowExport
+	}
+
 	const q = `
 		INSERT INTO connection_policies
 			(workspace_id, connection_id, allow_read, allow_write, allow_export,
@@ -361,7 +375,7 @@ func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
 		RETURNING created_at, updated_at`
 	return s.DB.QueryRowContext(ctx, q,
 		p.WorkspaceID, p.ConnectionID,
-		p.AllowRead, p.AllowWrite, p.AllowExport,
+		allowRead, allowWrite, allowExport,
 		p.StatementTimeoutMs, p.MaxRows,
 	).Scan(&p.CreatedAt, &p.UpdatedAt)
 }
@@ -372,9 +386,10 @@ func (s *PGStore) PolicyByConnection(ctx context.Context, wsID, connID uuid.UUID
 		statement_timeout_ms, max_rows, created_at, updated_at
 		FROM connection_policies WHERE workspace_id = $1 AND connection_id = $2`
 	p := &ConnectionPolicy{}
+	var allowRead, allowWrite, allowExport sql.NullBool
 	err := s.DB.QueryRowContext(ctx, q, wsID, connID).Scan(
 		&p.WorkspaceID, &p.ConnectionID,
-		&p.AllowRead, &p.AllowWrite, &p.AllowExport,
+		&allowRead, &allowWrite, &allowExport,
 		&p.StatementTimeoutMs, &p.MaxRows,
 		&p.CreatedAt, &p.UpdatedAt,
 	)
@@ -383,6 +398,15 @@ func (s *PGStore) PolicyByConnection(ctx context.Context, wsID, connID uuid.UUID
 	}
 	if err != nil {
 		return nil, err
+	}
+	if allowRead.Valid {
+		p.AllowRead = &allowRead.Bool
+	}
+	if allowWrite.Valid {
+		p.AllowWrite = &allowWrite.Bool
+	}
+	if allowExport.Valid {
+		p.AllowExport = &allowExport.Bool
 	}
 	return p, nil
 }
@@ -467,7 +491,42 @@ func (s *PGStore) UpdateExecution(ctx context.Context, e *Execution) error {
 
 // ---- AuditEventStore ------------------------------------------------------
 
+// sanitizeAuditMetadata 按允许列表过滤审计元数据，移除 SQL 正文、凭证、KEK、
+// 目标库结果、原始错误等敏感字段。ADR-013: 审计 metadata 必须是脱敏对象。
+func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return json.RawMessage("{}")
+	}
+
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		// 非 JSON 对象无法按允许列表脱敏，原样返回交由 DB 约束拒绝（ADR-013）
+		return raw
+	}
+
+	// P0 允许列表：仅保留明确安全的键
+	allowed := map[string]bool{
+		"summary":       true,
+		"rows_affected": true,
+		"cached":        true,
+	}
+
+	filtered := make(map[string]any, len(m))
+	for k, v := range m {
+		if allowed[k] {
+			filtered[k] = v
+		}
+	}
+
+	result, err := json.Marshal(filtered)
+	if err != nil {
+		return json.RawMessage("{}")
+	}
+	return json.RawMessage(result)
+}
+
 // AppendAudit 追加一条审计事件。数据库触发器阻止 UPDATE/DELETE/TRUNCATE。
+// 写入前按允许列表脱敏 metadata（ADR-013）。
 func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 	const q = `
 		INSERT INTO audit_events
@@ -476,10 +535,7 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 			 metadata, trace_id, execution_id, occurred_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		RETURNING id, created_at`
-	md := e.Metadata
-	if md == nil {
-		md = json.RawMessage("{}")
-	}
+	md := sanitizeAuditMetadata(e.Metadata)
 	return s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, string(e.ActorType), e.ActorID, e.ConnectionID,
 		e.Action, e.ResourceType, e.ResourceID, string(e.Outcome),
