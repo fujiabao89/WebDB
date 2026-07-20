@@ -525,12 +525,12 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 		e.ID, wsID,
 	)
 	if err != nil {
-			return err
-		}
-		if n, _ := res.RowsAffected(); n == 0 {
-			return fmt.Errorf("execution %s not found in workspace", e.ID)
-		}
-		return nil
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("execution %s not found in workspace", e.ID)
+	}
+	return nil
 }
 
 // ---- AuditEventStore ------------------------------------------------------
