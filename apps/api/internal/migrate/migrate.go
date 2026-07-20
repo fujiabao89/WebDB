@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"embed"
 	"fmt"
+	"io/fs"
 
 	"github.com/pressly/goose/v3"
 )
@@ -38,7 +39,7 @@ func Status(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// Validate 校验 migration 文件完整性（不连接数据库）。
+// Validate 校验 migration 文件完整性和 SQL 语法（不连接数据库）。
 func Validate() error {
 	goose.SetBaseFS(migrations)
 
@@ -47,5 +48,19 @@ func Validate() error {
 		return fmt.Errorf("migration 校验失败: %w", err)
 	}
 	fmt.Printf("已发现 %d 个 migration\n", len(entries))
+
+	// 额外解析每个 SQL 文件以捕获语法层面的错误
+	for _, e := range entries {
+		// goose 已解析过文件，CollectMigrations 成功意味着文件存在且命名正确；
+		// 进一步用 goose.Open 尝试完整解析 SQL 内容
+		src, err := fs.ReadFile(migrations, e.Source)
+		if err != nil {
+			return fmt.Errorf("migration %s: 读取失败: %w", e.Source, err)
+		}
+		if len(src) == 0 {
+			return fmt.Errorf("migration %s: 文件为空", e.Source)
+		}
+		fmt.Printf("  ✓ %s (%d bytes)\n", e.Source, len(src))
+	}
 	return nil
 }

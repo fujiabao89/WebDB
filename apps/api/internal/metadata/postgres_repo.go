@@ -26,15 +26,18 @@ func (s *PGStore) CreateUser(ctx context.Context, u *User) error {
 	const q = `
 		INSERT INTO users (email, password_hash, status, identity_provider, external_subject, external_tenant)
 		VALUES ($1, $2, $3, $4, $5, $6)
-		RETURNING id, created_at, updated_at`
+		RETURNING id, status, created_at, updated_at`
 	st := string(u.Status)
 	if st == "" {
 		st = string(UserStatusActive)
 	}
-	return s.DB.QueryRowContext(ctx, q,
+	if err := s.DB.QueryRowContext(ctx, q,
 		u.Email, u.PasswordHash, st,
 		u.IdentityProvider, u.ExternalSubject, u.ExternalTenant,
-	).Scan(&u.ID, &u.CreatedAt, &u.UpdatedAt)
+	).Scan(&u.ID, &u.Status, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *PGStore) UserByID(ctx context.Context, id uuid.UUID) (*User, error) {
@@ -336,7 +339,7 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
 	const q = `UPDATE connections SET name=$1, engine=$2, host=$3, port=$4,
 		database=$5, environment=$6, secret_ref=$7, secret_version=$8, updated_at=now()
-		WHERE id=$9 AND workspace_id=$10`
+		WHERE id=$8 AND workspace_id=$9`
 	res, err := s.DB.ExecContext(ctx, q,
 		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
 		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
@@ -510,7 +513,7 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 	const q = `UPDATE executions SET status=$1, finished_at=$2, duration_ms=$3,
 		row_count=$4, result_ref=$5, result_expires_at=$6,
 		error_code=$7
-		WHERE id=$9 AND workspace_id=$10`
+		WHERE id=$8 AND workspace_id=$9`
 	_, err := s.DB.ExecContext(ctx, q,
 		string(e.Status), e.FinishedAt, e.DurationMs, e.RowCount,
 		e.ResultRef, expiry, e.ErrorCode,
@@ -579,6 +582,7 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		RETURNING id, created_at`
 	md := sanitizeAuditMetadata(e.Metadata)
+	e.Metadata = md
 	return s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, string(e.ActorType), e.ActorID, e.ConnectionID,
 		e.Action, e.ResourceType, e.ResourceID, string(e.Outcome),
