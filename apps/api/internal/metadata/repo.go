@@ -42,9 +42,9 @@ type CredentialEnvelopeStore interface {
 // ConnectionStore 连接仓储。
 type ConnectionStore interface {
 	CreateConnection(ctx context.Context, conn *Connection) error
-	ConnectionByID(ctx context.Context, id uuid.UUID) (*Connection, error)
+	ConnectionByID(ctx context.Context, wsID, id uuid.UUID) (*Connection, error)
 	ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connection, error)
-	UpdateConnection(ctx context.Context, conn *Connection) error
+	UpdateConnection(ctx context.Context, wsID uuid.UUID, conn *Connection) error
 }
 
 // ConnectionPolicyStore 连接策略仓储。
@@ -56,9 +56,9 @@ type ConnectionPolicyStore interface {
 // ExecutionStore 执行记录仓储。
 type ExecutionStore interface {
 	CreateExecution(ctx context.Context, exec *Execution) error
-	ExecutionByID(ctx context.Context, id uuid.UUID) (*Execution, error)
-	ExecutionByTraceID(ctx context.Context, traceID string) (*Execution, error)
-	UpdateExecution(ctx context.Context, exec *Execution) error
+	ExecutionByID(ctx context.Context, wsID, id uuid.UUID) (*Execution, error)
+	ExecutionByTraceID(ctx context.Context, wsID uuid.UUID, traceID string) (*Execution, error)
+	UpdateExecution(ctx context.Context, wsID uuid.UUID, exec *Execution) error
 }
 
 // AuditEventStore 审计事件仓储 — 仅追加写与查询，不支持更新或删除。

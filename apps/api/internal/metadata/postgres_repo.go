@@ -286,12 +286,12 @@ func (s *PGStore) CreateConnection(ctx context.Context, c *Connection) error {
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
 }
 
-func (s *PGStore) ConnectionByID(ctx context.Context, id uuid.UUID) (*Connection, error) {
+func (s *PGStore) ConnectionByID(ctx context.Context, wsID, id uuid.UUID) (*Connection, error) {
 	const q = `SELECT id, workspace_id, name, engine, host, port, database,
 		environment, secret_ref, secret_version, created_by,
-		created_at, updated_at FROM connections WHERE id = $1`
+		created_at, updated_at FROM connections WHERE id = $1 AND workspace_id = $2`
 	c := &Connection{}
-	err := s.DB.QueryRowContext(ctx, q, id).Scan(
+	err := s.DB.QueryRowContext(ctx, q, id, wsID).Scan(
 		&c.ID, &c.WorkspaceID, &c.Name, &c.Engine,
 		&c.Host, &c.Port, &c.Database, &c.Environment,
 		&c.SecretRef, &c.SecretVersion, &c.CreatedBy,
@@ -332,13 +332,13 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 	return conns, rows.Err()
 }
 
-func (s *PGStore) UpdateConnection(ctx context.Context, c *Connection) error {
+func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
 	const q = `UPDATE connections SET name=$1, engine=$2, host=$3, port=$4,
 		database=$5, environment=$6, secret_ref=$7, secret_version=$8, updated_at=now()
-		WHERE id=$9`
+		WHERE id=$9 AND workspace_id=$10`
 	_, err := s.DB.ExecContext(ctx, q,
 		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
-		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID,
+		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
 	)
 	return err
 }
@@ -346,36 +346,24 @@ func (s *PGStore) UpdateConnection(ctx context.Context, c *Connection) error {
 // ---- ConnectionPolicyStore ------------------------------------------------
 
 func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
-	// *bool 为 nil 表示调用方未指定，使用 DB schema 默认值（allow_read=true, 其余=false）。
-	allowRead := true
-	if p.AllowRead != nil {
-		allowRead = *p.AllowRead
-	}
-	allowWrite := false
-	if p.AllowWrite != nil {
-		allowWrite = *p.AllowWrite
-	}
-	allowExport := false
-	if p.AllowExport != nil {
-		allowExport = *p.AllowExport
-	}
-
+	// nil bool 在 INSERT 时使用 COALESCE 取默认值（allow_read=true, 其余=false），
+	// 在 UPDATE 冲突时使用 COALESCE(EXCLUDED, connection_policies) 保留现有值。
 	const q = `
 		INSERT INTO connection_policies
 			(workspace_id, connection_id, allow_read, allow_write, allow_export,
 			 statement_timeout_ms, max_rows)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
+		VALUES ($1, $2, COALESCE($3, true), COALESCE($4, false), COALESCE($5, false), $6, $7)
 		ON CONFLICT (workspace_id, connection_id) DO UPDATE SET
-			allow_read = EXCLUDED.allow_read,
-			allow_write = EXCLUDED.allow_write,
-			allow_export = EXCLUDED.allow_export,
+			allow_read = COALESCE(EXCLUDED.allow_read, connection_policies.allow_read),
+			allow_write = COALESCE(EXCLUDED.allow_write, connection_policies.allow_write),
+			allow_export = COALESCE(EXCLUDED.allow_export, connection_policies.allow_export),
 			statement_timeout_ms = EXCLUDED.statement_timeout_ms,
 			max_rows = EXCLUDED.max_rows,
 			updated_at = now()
 		RETURNING created_at, updated_at`
 	return s.DB.QueryRowContext(ctx, q,
 		p.WorkspaceID, p.ConnectionID,
-		allowRead, allowWrite, allowExport,
+		p.AllowRead, p.AllowWrite, p.AllowExport,
 		p.StatementTimeoutMs, p.MaxRows,
 	).Scan(&p.CreatedAt, &p.UpdatedAt)
 }
@@ -428,14 +416,14 @@ func (s *PGStore) CreateExecution(ctx context.Context, e *Execution) error {
 	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt)
 }
 
-func (s *PGStore) ExecutionByID(ctx context.Context, id uuid.UUID) (*Execution, error) {
+func (s *PGStore) ExecutionByID(ctx context.Context, wsID, id uuid.UUID) (*Execution, error) {
 	const q = `SELECT id, workspace_id, connection_id, actor_id,
 		document_id, query_version_id, statement_hash, status, trace_id,
 		started_at, finished_at, duration_ms, row_count,
 		result_ref, result_expires_at, error_code, error_message, created_at
-		FROM executions WHERE id = $1`
+		FROM executions WHERE id = $1 AND workspace_id = $2`
 	e := &Execution{}
-	err := s.DB.QueryRowContext(ctx, q, id).Scan(
+	err := s.DB.QueryRowContext(ctx, q, id, wsID).Scan(
 		&e.ID, &e.WorkspaceID, &e.ConnectionID, &e.ActorID,
 		&e.DocumentID, &e.QueryVersionID,
 		&e.StatementHash, &e.Status, &e.TraceID,
@@ -452,14 +440,14 @@ func (s *PGStore) ExecutionByID(ctx context.Context, id uuid.UUID) (*Execution, 
 	return e, nil
 }
 
-func (s *PGStore) ExecutionByTraceID(ctx context.Context, traceID string) (*Execution, error) {
+func (s *PGStore) ExecutionByTraceID(ctx context.Context, wsID uuid.UUID, traceID string) (*Execution, error) {
 	const q = `SELECT id, workspace_id, connection_id, actor_id,
 		document_id, query_version_id, statement_hash, status, trace_id,
 		started_at, finished_at, duration_ms, row_count,
 		result_ref, result_expires_at, error_code, error_message, created_at
-		FROM executions WHERE trace_id = $1 ORDER BY started_at DESC LIMIT 1`
+		FROM executions WHERE trace_id = $1 AND workspace_id = $2 ORDER BY started_at DESC LIMIT 1`
 	e := &Execution{}
-	err := s.DB.QueryRowContext(ctx, q, traceID).Scan(
+	err := s.DB.QueryRowContext(ctx, q, traceID, wsID).Scan(
 		&e.ID, &e.WorkspaceID, &e.ConnectionID, &e.ActorID,
 		&e.DocumentID, &e.QueryVersionID,
 		&e.StatementHash, &e.Status, &e.TraceID,
@@ -476,15 +464,15 @@ func (s *PGStore) ExecutionByTraceID(ctx context.Context, traceID string) (*Exec
 	return e, nil
 }
 
-func (s *PGStore) UpdateExecution(ctx context.Context, e *Execution) error {
+func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execution) error {
 	const q = `UPDATE executions SET status=$1, finished_at=$2, duration_ms=$3,
 		row_count=$4, result_ref=$5, result_expires_at=$6,
 		error_code=$7, error_message=$8
-		WHERE id=$9`
+		WHERE id=$9 AND workspace_id=$10`
 	_, err := s.DB.ExecContext(ctx, q,
 		string(e.Status), e.FinishedAt, e.DurationMs, e.RowCount,
 		e.ResultRef, e.ResultExpiresAt, e.ErrorCode, e.ErrorMessage,
-		e.ID,
+		e.ID, wsID,
 	)
 	return err
 }
