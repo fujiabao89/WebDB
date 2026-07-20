@@ -339,7 +339,7 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
 	const q = `UPDATE connections SET name=$1, engine=$2, host=$3, port=$4,
 		database=$5, environment=$6, secret_ref=$7, secret_version=$8, updated_at=now()
-		WHERE id=$8 AND workspace_id=$9`
+		WHERE id=$9 AND workspace_id=$10`
 	res, err := s.DB.ExecContext(ctx, q,
 		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
 		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
@@ -447,12 +447,16 @@ func (s *PGStore) CreateExecution(ctx context.Context, e *Execution) error {
 		expiry = &t
 	}
 	e.ResultExpiresAt = expiry
-	return s.DB.QueryRowContext(ctx, q,
+	if err := s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, e.ConnectionID, e.ActorID,
 		e.DocumentID, e.QueryVersionID,
 		e.StatementHash, st, e.TraceID,
 		e.ResultRef, expiry,
-	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt)
+	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt); err != nil {
+		return err
+	}
+	e.Status = ExecutionStatus(st)
+	return nil
 }
 
 func (s *PGStore) ExecutionByID(ctx context.Context, wsID, id uuid.UUID) (*Execution, error) {
