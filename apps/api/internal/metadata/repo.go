@@ -50,7 +50,8 @@ type ConnectionStore interface {
 
 // ConnectionPolicyStore 连接策略仓储。
 type ConnectionPolicyStore interface {
-	UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error
+	CreatePolicy(ctx context.Context, p *ConnectionPolicy) error
+	UpdatePolicy(ctx context.Context, p *ConnectionPolicy) error
 	PolicyByConnection(ctx context.Context, wsID, connID uuid.UUID) (*ConnectionPolicy, error)
 }
 

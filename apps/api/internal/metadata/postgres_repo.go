@@ -337,16 +337,24 @@ func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Conne
 	const q = `UPDATE connections SET name=$1, engine=$2, host=$3, port=$4,
 		database=$5, environment=$6, secret_ref=$7, secret_version=$8, updated_at=now()
 		WHERE id=$9 AND workspace_id=$10`
-	_, err := s.DB.ExecContext(ctx, q,
+	res, err := s.DB.ExecContext(ctx, q,
 		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
 		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("connection %s not found in workspace %s", c.ID, wsID)
+	}
+	return nil
 }
 
 // ---- ConnectionPolicyStore ------------------------------------------------
 
-func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
+// CreatePolicy 创建连接策略，同一连接已有策略时显式拒绝（主键冲突）。
+func (s *PGStore) CreatePolicy(ctx context.Context, p *ConnectionPolicy) error {
 	// nil bool 在 INSERT 时使用 COALESCE 取默认值（allow_read=true, 其余=false），
 	// 在 UPDATE 冲突时使用 COALESCE(EXCLUDED, connection_policies) 保留现有值。
 	const q = `
@@ -354,19 +362,35 @@ func (s *PGStore) UpsertPolicy(ctx context.Context, p *ConnectionPolicy) error {
 			(workspace_id, connection_id, allow_read, allow_write, allow_export,
 			 statement_timeout_ms, max_rows)
 		VALUES ($1, $2, COALESCE($3, true), COALESCE($4, false), COALESCE($5, false), $6, $7)
-		ON CONFLICT (workspace_id, connection_id) DO UPDATE SET
-			allow_read = CASE WHEN $3::bool IS NULL THEN connection_policies.allow_read ELSE COALESCE($3, true) END,
-			allow_write = CASE WHEN $4::bool IS NULL THEN connection_policies.allow_write ELSE COALESCE($4, false) END,
-			allow_export = CASE WHEN $5::bool IS NULL THEN connection_policies.allow_export ELSE COALESCE($5, false) END,
-			statement_timeout_ms = EXCLUDED.statement_timeout_ms,
-			max_rows = EXCLUDED.max_rows,
-			updated_at = now()
 		RETURNING created_at, updated_at`
 	return s.DB.QueryRowContext(ctx, q,
 		p.WorkspaceID, p.ConnectionID,
 		p.AllowRead, p.AllowWrite, p.AllowExport,
 		p.StatementTimeoutMs, p.MaxRows,
 	).Scan(&p.CreatedAt, &p.UpdatedAt)
+}
+
+// UpdatePolicy 更新已有策略，nil bool 保留现有值，无匹配行时报错。
+func (s *PGStore) UpdatePolicy(ctx context.Context, p *ConnectionPolicy) error {
+	const q = `
+		UPDATE connection_policies SET
+			allow_read = COALESCE($3, allow_read),
+			allow_write = COALESCE($4, allow_write),
+			allow_export = COALESCE($5, allow_export),
+			statement_timeout_ms = $6,
+			max_rows = $7,
+			updated_at = now()
+		WHERE workspace_id = $1 AND connection_id = $2
+		RETURNING created_at, updated_at`
+	err := s.DB.QueryRowContext(ctx, q,
+		p.WorkspaceID, p.ConnectionID,
+		p.AllowRead, p.AllowWrite, p.AllowExport,
+		p.StatementTimeoutMs, p.MaxRows,
+	).Scan(&p.CreatedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("policy not found for connection %s in workspace %s", p.ConnectionID, p.WorkspaceID)
+	}
+	return err
 }
 
 // PolicyByConnection 返回 nil 表示未配置策略（调用方应默认拒绝）。
@@ -413,11 +437,18 @@ func (s *PGStore) CreateExecution(ctx context.Context, e *Execution) error {
 	if st == "" {
 		st = string(ExecStatusPending)
 	}
+	// ADR-010: result_ref 非空且无过期时间时，默认 7 天后过期
+	expiry := e.ResultExpiresAt
+	if e.ResultRef != nil && *e.ResultRef != "" && expiry == nil {
+		t := time.Now().UTC().Add(7 * 24 * time.Hour)
+		expiry = &t
+	}
+	e.ResultExpiresAt = expiry
 	return s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, e.ConnectionID, e.ActorID,
 		e.DocumentID, e.QueryVersionID,
 		e.StatementHash, st, e.TraceID,
-		e.ResultRef, e.ResultExpiresAt,
+		e.ResultRef, expiry,
 	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt)
 }
 
@@ -425,7 +456,7 @@ func (s *PGStore) ExecutionByID(ctx context.Context, wsID, id uuid.UUID) (*Execu
 	const q = `SELECT id, workspace_id, connection_id, actor_id,
 		document_id, query_version_id, statement_hash, status, trace_id,
 		started_at, finished_at, duration_ms, row_count,
-		result_ref, result_expires_at, error_code, error_message, created_at
+		result_ref, result_expires_at, error_code, created_at
 		FROM executions WHERE id = $1 AND workspace_id = $2`
 	e := &Execution{}
 	err := s.DB.QueryRowContext(ctx, q, id, wsID).Scan(
@@ -434,7 +465,7 @@ func (s *PGStore) ExecutionByID(ctx context.Context, wsID, id uuid.UUID) (*Execu
 		&e.StatementHash, &e.Status, &e.TraceID,
 		&e.StartedAt, &e.FinishedAt, &e.DurationMs, &e.RowCount,
 		&e.ResultRef, &e.ResultExpiresAt,
-		&e.ErrorCode, &e.ErrorMessage, &e.CreatedAt,
+		&e.ErrorCode, &e.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("execution %s: %w", id, err)
@@ -449,7 +480,7 @@ func (s *PGStore) ExecutionByTraceID(ctx context.Context, wsID uuid.UUID, traceI
 	const q = `SELECT id, workspace_id, connection_id, actor_id,
 		document_id, query_version_id, statement_hash, status, trace_id,
 		started_at, finished_at, duration_ms, row_count,
-		result_ref, result_expires_at, error_code, error_message, created_at
+		result_ref, result_expires_at, error_code, created_at
 		FROM executions WHERE trace_id = $1 AND workspace_id = $2 ORDER BY started_at DESC LIMIT 1`
 	e := &Execution{}
 	err := s.DB.QueryRowContext(ctx, q, traceID, wsID).Scan(
@@ -458,7 +489,7 @@ func (s *PGStore) ExecutionByTraceID(ctx context.Context, wsID uuid.UUID, traceI
 		&e.StatementHash, &e.Status, &e.TraceID,
 		&e.StartedAt, &e.FinishedAt, &e.DurationMs, &e.RowCount,
 		&e.ResultRef, &e.ResultExpiresAt,
-		&e.ErrorCode, &e.ErrorMessage, &e.CreatedAt,
+		&e.ErrorCode, &e.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("execution trace %s: %w", traceID, err)
@@ -478,11 +509,11 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 	}
 	const q = `UPDATE executions SET status=$1, finished_at=$2, duration_ms=$3,
 		row_count=$4, result_ref=$5, result_expires_at=$6,
-		error_code=$7, error_message=$8
+		error_code=$7
 		WHERE id=$9 AND workspace_id=$10`
 	_, err := s.DB.ExecContext(ctx, q,
 		string(e.Status), e.FinishedAt, e.DurationMs, e.RowCount,
-		e.ResultRef, expiry, e.ErrorCode, e.ErrorMessage,
+		e.ResultRef, expiry, e.ErrorCode,
 		e.ID, wsID,
 	)
 	return err
@@ -515,10 +546,15 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		if !allowed[k] {
 			continue
 		}
-		// 仅允许安全的标量类型（string、float64、bool）
-		switch v.(type) {
-		case string, float64, bool:
-			filtered[k] = v
+		// 仅允许安全的标量类型（string、float64、bool），字符串截断防 SQL 泄露
+		switch val := v.(type) {
+		case string:
+			if len(val) > 500 {
+				val = val[:500]
+			}
+			filtered[k] = val
+		case float64, bool:
+			filtered[k] = val
 		}
 	}
 
@@ -554,9 +590,9 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 func (s *PGStore) QueryAudit(ctx context.Context, q AuditQuery) ([]AuditEvent, error) {
 	if q.Limit <= 0 {
 		q.Limit = 50
-		if q.Limit > 1000 {
-			q.Limit = 1000
-		}
+	}
+	if q.Limit > 1000 {
+		q.Limit = 1000
 	}
 	query := `SELECT id, workspace_id, actor_type, actor_id, connection_id,
 		action, resource_type, resource_id, outcome,

@@ -170,7 +170,6 @@ CREATE TABLE executions (
     result_ref          TEXT,
     result_expires_at   TIMESTAMPTZ,
     error_code          TEXT,
-    error_message       TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (id),
     CONSTRAINT uq_executions_ws_conn_id UNIQUE (workspace_id, connection_id, id),
@@ -251,6 +250,10 @@ CREATE INDEX idx_audit_resource
     ON audit_events (workspace_id, resource_type, resource_id);
 CREATE INDEX idx_audit_trace
     ON audit_events (trace_id);
+
+-- 执行 trace 查询索引
+CREATE INDEX idx_executions_ws_trace
+    ON executions (workspace_id, trace_id);
 
 -- ============================================================
 -- 审计不可变触发器 — 拒绝 UPDATE、DELETE、TRUNCATE

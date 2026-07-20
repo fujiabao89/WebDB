@@ -496,15 +496,20 @@ func TestPolicy_Upsert_Succeeds(t *testing.T) {
 		WorkspaceID: conn.WorkspaceID, ConnectionID: conn.ID,
 		StatementTimeoutMs: 30000, MaxRows: 500,
 	}
-	if err := store.UpsertPolicy(ctx, p); err != nil {
+	if err := store.CreatePolicy(ctx, p); err != nil {
 		t.Fatalf("创建策略失败: %v", err)
 	}
+	// 重复创建应被拒绝
 	p2 := &ConnectionPolicy{
 		WorkspaceID: conn.WorkspaceID, ConnectionID: conn.ID,
 		StatementTimeoutMs: 60000, MaxRows: 1000,
 	}
-	if err := store.UpsertPolicy(ctx, p2); err != nil {
-		t.Fatalf("upsert 策略应成功: %v", err)
+	if err := store.CreatePolicy(ctx, p2); err == nil {
+		t.Fatal("期望重复策略创建被拒绝")
+	}
+	// 更新已有策略应成功
+	if err := store.UpdatePolicy(ctx, p2); err != nil {
+		t.Fatalf("更新策略失败: %v", err)
 	}
 }
 
@@ -513,7 +518,7 @@ func TestPolicy_NonPositiveMaxRows_Rejected(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	err := store.UpsertPolicy(ctx, &ConnectionPolicy{
+	err := store.CreatePolicy(ctx, &ConnectionPolicy{
 		WorkspaceID: conn.WorkspaceID, ConnectionID: conn.ID,
 		StatementTimeoutMs: 30000, MaxRows: 0,
 	})
@@ -527,7 +532,7 @@ func TestPolicy_NonPositiveTimeout_Rejected(t *testing.T) {
 	defer cleanup()
 	ctx := context.Background()
 
-	err := store.UpsertPolicy(ctx, &ConnectionPolicy{
+	err := store.CreatePolicy(ctx, &ConnectionPolicy{
 		WorkspaceID: conn.WorkspaceID, ConnectionID: conn.ID,
 		StatementTimeoutMs: 0, MaxRows: 100,
 	})
@@ -552,7 +557,7 @@ func TestPolicy_MissingPolicy_ReturnsNil(t *testing.T) {
 
 // ---- executions 约束测试 -------------------------------------------------
 
-func TestExecution_ResultRefWithoutExpiry_Rejected(t *testing.T) {
+func TestExecution_ResultRefWithAutoExpiry(t *testing.T) {
 	_, store, _, _, _, _, conn, cleanup := setupFull(t)
 	defer cleanup()
 	ctx := context.Background()
@@ -564,10 +569,29 @@ func TestExecution_ResultRefWithoutExpiry_Rejected(t *testing.T) {
 		Status: ExecStatusPending, TraceID: "trace-001",
 		ResultRef: &ref,
 	}
-	err := store.CreateExecution(ctx, e)
-	if err == nil {
-		t.Fatal("期望 result_ref 非空但无过期时间被拒绝")
+	if err := store.CreateExecution(ctx, e); err != nil {
+		t.Fatalf("CreateExecution 应自动设置默认过期: %v", err)
 	}
+	if e.ResultExpiresAt == nil {
+		t.Fatal("期望 ResultExpiresAt 被自动设置为 7 天默认值")
+	}
+}
+
+func TestExecution_ResultRefWithoutExpiry_RawSQL_Rejected(t *testing.T) {
+	db, _, _, _, _, _, conn, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 绕过 Go 代码直接 INSERT — DB CHECK 约束应拒绝
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO executions
+			(workspace_id, connection_id, actor_id, statement_hash, status, trace_id, result_ref, result_expires_at)
+		VALUES ($1, $2, $3, 'sha256:xyz', 'pending', 'trace-raw-001', 'result-raw', NULL)
+	`, conn.WorkspaceID, conn.ID, conn.CreatedBy)
+	if err == nil {
+		t.Fatal("期望数据库 CHECK 约束拒绝 result_ref 非空但无过期时间")
+	}
+	t.Logf("DB CHECK 拒绝: %v", err)
 }
 
 func TestExecution_CrossWorkspaceActor_Rejected(t *testing.T) {
