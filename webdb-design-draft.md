@@ -202,7 +202,7 @@ flowchart TB
 | 表格 | AG Grid Community 或 TanStack Table + 虚拟列表 | AG Grid Community 采用 MIT 许可证；需要先确认社区版功能是否覆盖筛选与编辑需求，避免隐式依赖企业功能。[许可证](https://www.ag-grid.com/eula/AG-Grid-Community-License.html) |
 | 后端 | Go + `pgx` / MySQL 驱动 | 直接使用数据库驱动与连接池；不把“数据库协议代理”纳入 MVP |
 | 协作 | Yjs + 有持久化、鉴权能力的 WebSocket provider | 对 SQL 文本做协作 POC，验证断线恢复、房间隔离、快照与负载 |
-| 元数据 | PostgreSQL + `pressly/goose/v3` SQL migration | 事务、JSONB、全文搜索与审计查询均适配；P0 使用显式、可回滚、可嵌入的顺序 migration，API 启动不自动迁移（ADR-013） |
+| 元数据 | PostgreSQL 16 + `pressly/goose/v3` v3.27.2 SQL migration | 已实现（P0-02，PR #10）；嵌入式 migration、显式 migrate 子命令、API 启动不自动迁移；pgx/v5 驱动 |
 | 认证 | MVP 使用本地账号 + Cookie 会话或短时 access token / refresh token；完整版本接入 OIDC / SSO | 不把“JWT”当作完整安全方案；必须包含撤销、轮换、CSRF 策略与身份映射 |
 | 部署 | Docker Compose；生产提供反向代理示例 | 将镜像体积列为优化指标而非功能承诺 |
 
@@ -266,7 +266,7 @@ P0-02 的初始 migration 只落地用户、工作区、成员、凭证信封、
 | `connection_policies` | `workspace_id`, `connection_id`, `allow_read`, `allow_write`, `allow_export`, `statement_timeout_ms`, `max_rows` | `(workspace_id, connection_id)` 为主键；超时和行数上限为正数；缺失策略默认拒绝全部操作 |
 | `query_documents` | `id`, `workspace_id`, `title`, `owner_id`, `tags`, `search_vector`, `yjs_state_ref` | 协作 SQL 文档及其快照引用；`search_vector` 用 PostgreSQL `tsvector` 支持全文检索 |
 | `query_versions` | `id`, `document_id`, `content`, `created_by` | 可读版本快照；不把临时 Presence 写入其中 |
-| `executions` | `id`, `workspace_id`, `connection_id`, `actor_id`, `document_id`, `query_version_id`, `statement_hash`, `status`, `trace_id`, `started_at`, `duration_ms`, `row_count`, `result_ref`, `result_expires_at` | workspace/connection/actor 必填，actor 必须是工作区成员；非空结果引用必须有过期时间，默认 7 天后删除 |
+| `executions` | `id`, `workspace_id`, `connection_id`, `actor_id`, `document_id`, `query_version_id`, `statement_hash`, `status`, `trace_id`, `started_at`, `duration_ms`, `row_count`, `result_ref`, `result_expires_at`, `error_code` | workspace/connection/actor 必填，actor 必须是工作区成员；非空 result_ref 必须有过期时间（默认 7 天）；仅保留脱敏 error_code，不存原始 error_message |
 | `change_requests` | `id`, `execution_id`, `risk_level`, `status`, `approved_by` | 受控写入 / 审批流程 |
 | `audit_events` | `id`, `workspace_id`, `actor_type`, `actor_id`, `connection_id`, `action`, `resource_type`, `resource_id`, `outcome`, `metadata`, `trace_id`, `execution_id`, `occurred_at` | 直接引用真实 workspace；actor 判别器约束 user/system 空值语义；action/resource/trace/time 必填，metadata 仅对象；数据库拒绝 update/delete/truncate |
 | `export_jobs` | `id`, `execution_id`, `status`, `object_ref`, `expires_at` | 异步导出与自动清理 |
@@ -360,10 +360,10 @@ P0 结束前必须有两项硬门槛：
 ## 11. P0 实施清单
 
 - [x] 建立 monorepo：`apps/web`、`apps/api`、`packages/contracts`、`deploy/compose`、`docs/adr`。（P0-01，PR #2）
-- [ ] 添加 Apache License 2.0 的 `LICENSE`、`NOTICE` 与第三方依赖许可证清单。
-- [ ] 为 PostgreSQL 和 MySQL 编写统一 adapter 接口：连接测试、列出 Schema、只读执行、取消、分页。
-- [ ] 创建元数据库迁移：用户、工作区、成员、连接、策略、执行、审计。
-- [ ] 实现凭证加密与日志脱敏；为密钥轮换预留版本字段。
+- [x] 添加 Apache License 2.0 的 `LICENSE`、`NOTICE` 与第三方依赖许可证清单。（P0-02，PR #10）
+- [ ] 为 PostgreSQL 和 MySQL 编写统一 adapter 接口：连接测试、列出 Schema、只读执行、取消、分页。（P0-03）
+- [x] 创建元数据库迁移：用户、工作区、成员、连接、策略、执行、审计。（P0-02，PR #10，8 张 P0 表）
+- [x] 实现凭证加密与日志脱敏；为密钥轮换预留版本字段。（P0-02，PR #10，加解密留给 P0-05）
 - [ ] 实现只读 SQL 策略：单语句、按 PostgreSQL / MySQL 方言分别进行 AST 分类、超时、最大行数、取消；无法可靠判定的语句默认拒绝。
 - [ ] 实现目标连接池与执行准入：上限、获取超时、429、取消、指标和压力测试。
 - [ ] 制作最小 React 页面：连接列表、Schema 树、Monaco、结果表格。
