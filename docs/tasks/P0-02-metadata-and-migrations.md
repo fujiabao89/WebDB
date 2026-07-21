@@ -60,13 +60,13 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 | 迁移工具 | `pressly/goose/v3` v3.27.2，SQL-only 顺序 migration，`//go:embed` 嵌入 |
 | 迁移命令 | `./api migrate <up\|down\|reset\|status\|validate>`；`reset`=`down-to 0` 完整回滚；API 启动不自动迁移 |
 | 数据库驱动 | `github.com/jackc/pgx/v5` v5.10.0 |
-| SQL migration | `00001_p0_schema.sql`：8 张 P0 表 + 索引 + 审计拒绝触发器 |
+| SQL migration | `00001_p0_schema.sql`（8 张表）+ `00002_statement_hash_check.sql`（空白修复+CHECK） |
 | Go 数据模型 | `internal/metadata/models.go`：8 实体 + 7 组枚举常量 |
 | 仓储接口 | `internal/metadata/repo.go`：8 个接口，审计仅 Append/Query |
 | PostgreSQL 实现 | `internal/metadata/postgres_repo.go`：PGStore 单一实现 |
 | 凭证存储 | 连接仅存 `secret_ref` + `secret_version`；密文隔离在 `credential_envelopes` |
 | 审计脱敏 | `sanitizeAuditMetadata()` 按允许列表过滤键值，`looksLikeSQL()`/`looksLikeCredential()` 检测敏感文本 |
-| 依赖清单 | `docs/DEPENDENCY-LICENSES.md`：Go/Docker 依赖 MIT/BSD/Apache 2.0 兼容 |
+| 依赖清单 | `docs/DEPENDENCY-LICENSES.md`：Go 依赖 MIT/BSD/Apache 2.0；Docker 含 PostgreSQL License/GPLv2（演示用） |
 | CI 集成测试 | PostgreSQL 16 service + `go test -tags=integration` |
 
 ### 审查历史
@@ -88,7 +88,7 @@ go test ./...                              → PASS
 go vet ./...                               → PASS
 gofmt -l .                                 → (clean)
 go build ./cmd/server                      → PASS
-go test -tags=integration ./internal/metadata/... → PASS (39 tests)
+go test -tags=integration ./internal/metadata/... → PASS (41 tests)
 git diff --check                           → OK
 CI: 6 checks (含新增集成测试)                → ALL SUCCESS
 ```
@@ -104,5 +104,5 @@ CI: 6 checks (含新增集成测试)                → ALL SUCCESS
 ## 交接记录
 
 - 2026-07-19：已读设计稿第 6、7、8、10、11 节，ADR-004/006/010/011、P0-05 与当前 Go/Compose 骨架。通过 ADR-013 固定迁移工具、P0 表边界、追加式审计和凭证字段方案。状态改为 Ready。
-- 2026-07-20：完整实施 P0-02，包括 SQL migration、Go 仓储层、39 个集成测试、依赖许可证清单。经过 7 轮 Codex 独立审查，PR #10 所有问题已修复。分支 `feat/P0-02-metadata-migrations-impl`，HEAD `bd3a98e`。
+- 2026-07-20：完整实施 P0-02，包括 SQL migration、Go 仓储层、41 个集成测试、依赖许可证清单。经过 7 轮 Codex 独立审查，PR #10 所有问题已修复；PR #11 文档同步多轮审查。分支 `feat/P0-02-metadata-migrations-impl`，HEAD `8cf675f`。
 - 未决项（留给 P0-05）：AEAD/KDF、凭证 payload 编码、KEK 轮换与审计保留/归档策略。

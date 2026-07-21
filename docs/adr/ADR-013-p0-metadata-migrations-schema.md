@@ -99,7 +99,7 @@ P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新�
 
 本 ADR 通过 PR [#10](https://github.com/fujiabao89/WebDB/pull/10) 完整实现，关键事实：
 
-- **迁移工具**：`pressly/goose/v3` v3.27.2，单文件 SQL migration（`-- +goose Up` / `-- +goose Down`），通过 `//go:embed` 嵌入 Go 二进制。提供 `up`/`down`/`status`/`validate` 子命令，API 启动不自动迁移。
+- **迁移工具**：`pressly/goose/v3` v3.27.2，单文件 SQL migration（`-- +goose Up` / `-- +goose Down`），通过 `//go:embed` 嵌入 Go 二进制。提供 `up`/`down`/`reset`（=`down-to 0`）/`status`/`validate` 子命令，API 启动不自动迁移。
 - **8 张 P0 表**：`users`、`workspaces`、`workspace_members`、`credential_envelopes`、`connections`、`connection_policies`、`executions`、`audit_events` 全部创建，含复合外键、唯一索引、CHECK 约束和触发器。
 - **审计不可变**：`audit_events` 表上安装 `BEFORE UPDATE`/`BEFORE DELETE`/`BEFORE TRUNCATE` 触发器，Go 仓储层仅暴露 `AppendAudit`/`QueryAudit`。
 - **凭证隔离**：`connections` 仅保存 `secret_ref` + `secret_version`，密文/DEK/nonce 隔离在 `credential_envelopes`。
