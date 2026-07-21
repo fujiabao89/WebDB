@@ -2,7 +2,7 @@
 
 > 状态：P0（已实现）｜更新日期：2026-07-21
 >
-> 本项目采用 Apache License 2.0。所有依赖均与 AL2.0 兼容。
+> 本项目采用 Apache License 2.0。以下列出 Go 后端和 Docker 镜像依赖，均与 AL2.0 兼容。npm 前端依赖未包含。
 
 ## Go 依赖（apps/api）
 

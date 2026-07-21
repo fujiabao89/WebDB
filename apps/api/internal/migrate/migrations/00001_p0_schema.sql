@@ -158,7 +158,8 @@ CREATE TABLE executions (
     actor_id            UUID NOT NULL,
     document_id         UUID,
     query_version_id    UUID,
-    statement_hash      TEXT NOT NULL,
+    statement_hash      TEXT NOT NULL
+                        CHECK (btrim(statement_hash) <> ''),
     status              TEXT NOT NULL DEFAULT 'pending'
                         CHECK (status IN ('pending', 'running', 'completed', 'failed', 'cancelled')),
     trace_id            TEXT NOT NULL

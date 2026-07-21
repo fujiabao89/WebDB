@@ -516,6 +516,7 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 		t := time.Now().UTC().Add(7 * 24 * time.Hour)
 		expiry = &t
 	}
+	e.ResultExpiresAt = expiry
 	const q = `UPDATE executions SET status=$1, finished_at=$2, duration_ms=$3,
 		row_count=$4, result_ref=$5, result_expires_at=$6,
 		error_code=$7
@@ -685,15 +686,21 @@ var (
 )
 
 // sqlKeywordRE 匹配 SQL DML/DDL 关键词（忽略大小写，后跟空白、注释或换行）
-var sqlKeywordRE = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC(UTE)?)\b[\s/*\n\t]`)
+var sqlKeywordRE = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC(UTE)?)\b`)
 
 // looksLikeSQL 检测字符串是否包含 SQL 语句特征（P0 审计脱敏辅助）。
 func looksLikeSQL(s string) bool {
 	return sqlKeywordRE.MatchString(s)
 }
 
+// credPatternRE 匹配 DSN URL 凭证和 Bearer token（P0 审计脱敏辅助）
+var credPatternRE = regexp.MustCompile(`(?i)(://[^@\s]+@|bearer\s+[\w-]+)`)
+
 // looksLikeCredential 检测字符串是否包含凭证模式（P0 审计脱敏辅助）。
 func looksLikeCredential(s string) bool {
+	if credPatternRE.MatchString(s) {
+		return true
+	}
 	for _, pattern := range []string{"password", "secret", "token", "key=", "pass="} {
 		if strings.Contains(strings.ToLower(s), pattern) {
 			return true
