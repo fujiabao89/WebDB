@@ -59,7 +59,7 @@ func setupDB(t *testing.T) (*sql.DB, func()) {
 	db := testDB(t)
 	ctx := context.Background()
 
-	_ = migrate.Run(ctx, db, "down")
+	_ = migrate.Run(ctx, db, "down-to", "0")
 	if err := migrate.Run(ctx, db, "up"); err != nil {
 		t.Fatalf("migration up 失败: %v", err)
 	}
@@ -83,7 +83,7 @@ func setupFull(t *testing.T) (*sql.DB, *PGStore, *User, *Workspace, *WorkspaceMe
 	db := testDB(t)
 	ctx := context.Background()
 
-	_ = migrate.Run(ctx, db, "down")
+	_ = migrate.Run(ctx, db, "down-to", "0")
 	if err := migrate.Run(ctx, db, "up"); err != nil {
 		t.Fatalf("migration up 失败: %v", err)
 	}
@@ -157,11 +157,11 @@ func TestMigration_UpDownUpUp_NoSideEffects(t *testing.T) {
 	defer db.Close()
 	ctx := context.Background()
 
-	_ = migrate.Run(ctx, db, "down")
+	_ = migrate.Run(ctx, db, "down-to", "0")
 	if err := migrate.Run(ctx, db, "up"); err != nil {
 		t.Fatalf("首次 up 失败: %v", err)
 	}
-	if err := migrate.Run(ctx, db, "down"); err != nil {
+	if err := migrate.Run(ctx, db, "down-to", "0"); err != nil {
 		t.Fatalf("down 失败: %v", err)
 	}
 	if err := migrate.Run(ctx, db, "up"); err != nil {
