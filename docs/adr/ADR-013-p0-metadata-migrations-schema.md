@@ -97,7 +97,7 @@ P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新�
 
 ## 实施记录（2026-07-20）
 
-本 ADR 通过 PR [#10](https://github.com/fujiabao89/WebDB/pull/10) 完整实现，关键事实：
+本 ADR 通过 PR [#10](https://github.com/fujiabao89/WebDB/pull/10) 实现，PR [#11](https://github.com/fujiabao89/WebDB/pull/11) 补充 00002 迁移和文档同步。关键事实：
 
 - **迁移工具**：`pressly/goose/v3` v3.27.2，单文件 SQL migration（`-- +goose Up` / `-- +goose Down`），通过 `//go:embed` 嵌入 Go 二进制。提供 `up`/`down`/`reset`（=`down-to 0`）/`status`/`validate` 子命令，API 启动不自动迁移。
 - **8 张 P0 表**：`users`、`workspaces`、`workspace_members`、`credential_envelopes`、`connections`、`connection_policies`、`executions`、`audit_events` 全部创建，含复合外键、唯一索引、CHECK 约束和触发器。
@@ -107,5 +107,5 @@ P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新�
 - **email 空白**：`CHECK (email !~ '^\s' AND email !~ '\s$' AND email <> '')` + `UNIQUE INDEX ON lower(email)`。
 - **settings 约束**：`CHECK (jsonb_typeof(settings) = 'object')`。
 - **CI 集成测试**：PostgreSQL 16 service + `go test -tags=integration`。
-- **测试覆盖**：39 个集成测试覆盖 migration up/down/up/up、约束拒绝、审计不可变、跨工作区拒绝等。
+- **测试覆盖**：41 个集成测试覆盖 migration up/down/up/up、约束拒绝、审计不可变、跨工作区拒绝等。
 - **待 P0-05**：AEAD/KDF 算法、凭证加解密实现、KEK 轮换流程。

@@ -84,11 +84,12 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 ### 验证结果
 
 ```text
-go test ./...                              → PASS
-go vet ./...                               → PASS
-gofmt -l .                                 → (clean)
-go build ./cmd/server                      → PASS
-go test -tags=integration ./internal/metadata/... → PASS (41 tests)
+# 所有命令从仓库根目录执行
+go -C apps/api test ./...                              → PASS
+go -C apps/api vet ./...                               → PASS
+gofmt -l apps/api                                       → (clean)
+go -C apps/api build ./cmd/server                      → PASS
+go -C apps/api test -tags=integration ./internal/metadata/... → PASS (41 tests)
 git diff --check                           → OK
 CI: 6 checks (含新增集成测试)                → ALL SUCCESS
 ```
