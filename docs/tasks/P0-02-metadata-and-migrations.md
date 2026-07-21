@@ -58,7 +58,7 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 | 类别 | 内容 |
 |------|------|
 | 迁移工具 | `pressly/goose/v3` v3.27.2，SQL-only 顺序 migration，`//go:embed` 嵌入 |
-| 迁移命令 | `./api migrate <up\|down\|status\|validate>`；API 启动不自动迁移 |
+| 迁移命令 | `./api migrate <up\|down\|reset\|status\|validate>`；`reset`=`down-to 0` 完整回滚；API 启动不自动迁移 |
 | 数据库驱动 | `github.com/jackc/pgx/v5` v5.10.0 |
 | SQL migration | `00001_p0_schema.sql`：8 张 P0 表 + 索引 + 审计拒绝触发器 |
 | Go 数据模型 | `internal/metadata/models.go`：8 实体 + 7 组枚举常量 |
