@@ -107,7 +107,7 @@ func runMigrate(dir string) error {
 	case "up", "down":
 		return migrate.Run(ctx, db, dir)
 	case "reset":
-		return migrate.Run(ctx, db, "down-to 0")
+		return migrate.Run(ctx, db, "down-to", "0")
 	case "status":
 		return migrate.Status(ctx, db)
 	case "validate":

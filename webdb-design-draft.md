@@ -361,7 +361,7 @@ P0 结束前必须有两项硬门槛：
 
 - [x] 建立 monorepo：`apps/web`、`apps/api`、`packages/contracts`、`deploy/compose`、`docs/adr`。（P0-01，PR #2）
 - [ ] 添加 Apache License 2.0 的 `LICENSE`、`NOTICE` 文件。（P0-01-followup）
-- [x] 第三方依赖许可证清单（Go 和 Docker）。（P0-02，PR #10）
+- [ ] 第三方依赖许可证清单（含 npm 前端）。（P0-01-followup）
 - [ ] 为 PostgreSQL 和 MySQL 编写统一 adapter 接口。（P0-03）
 - [x] 创建元数据库迁移：8 张 P0 表。（P0-02，PR #10）
 - [x] 凭证信封 Schema + 审计元数据脱敏。（P0-02，PR #10）

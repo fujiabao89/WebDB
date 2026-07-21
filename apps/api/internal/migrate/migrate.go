@@ -19,10 +19,10 @@ var migrations embed.FS
 
 // Run 按指定方向执行 migration。
 // dir 为 "up" 或 "down"；db 必须是 PostgreSQL 连接。
-func Run(ctx context.Context, db *sql.DB, dir string) error {
+func Run(ctx context.Context, db *sql.DB, dir string, args ...string) error {
 	goose.SetBaseFS(migrations)
 
-	if err := goose.RunContext(ctx, dir, db, "migrations"); err != nil {
+	if err := goose.RunContext(ctx, dir, db, "migrations", args...); err != nil {
 		return fmt.Errorf("migration %s 失败: %w", dir, err)
 	}
 	return nil
