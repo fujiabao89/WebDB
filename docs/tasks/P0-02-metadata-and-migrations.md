@@ -66,7 +66,7 @@ go -C apps/api test -tags=integration ./internal/metadata/...
 | PostgreSQL 实现 | `internal/metadata/postgres_repo.go`：PGStore 单一实现 |
 | 凭证存储 | 连接仅存 `secret_ref` + `secret_version`；密文隔离在 `credential_envelopes` |
 | 审计脱敏 | `sanitizeAuditMetadata()` 按允许列表过滤键值，`looksLikeSQL()`/`looksLikeCredential()` 检测敏感文本 |
-| 依赖清单 | `docs/DEPENDENCY-LICENSES.md`：全部依赖 MIT/BSD/Apache 2.0 兼容 |
+| 依赖清单 | `docs/DEPENDENCY-LICENSES.md`：Go/Docker 依赖 MIT/BSD/Apache 2.0 兼容 |
 | CI 集成测试 | PostgreSQL 16 service + `go test -tags=integration` |
 
 ### 审查历史
