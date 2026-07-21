@@ -1,6 +1,6 @@
 # ADR-013：P0 元数据库迁移与 Schema 基线
 
-> 状态：已接受｜日期：2026-07-19｜Owner：WebDB Owner
+> 状态：已实现｜日期：2026-07-19｜实现日期：2026-07-20｜Owner：WebDB Owner｜PR：[#10](https://github.com/fujiabao89/WebDB/pull/10)
 
 ## 背景
 
@@ -94,3 +94,18 @@ P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新�
 - [ADR-011：本地账号优先，后续 OIDC/SSO](ADR-011-local-auth-then-oidc.md)
 - [P0-02：元数据库与迁移](../tasks/P0-02-metadata-and-migrations.md)
 - [Goose 官方仓库](https://github.com/pressly/goose)
+
+## 实施记录（2026-07-20）
+
+本 ADR 通过 PR [#10](https://github.com/fujiabao89/WebDB/pull/10) 实现，PR [#11](https://github.com/fujiabao89/WebDB/pull/11) 补充 00002 迁移和文档同步。关键事实：
+
+- **迁移工具**：`pressly/goose/v3` v3.27.2，单文件 SQL migration（`-- +goose Up` / `-- +goose Down`），通过 `//go:embed` 嵌入 Go 二进制。提供 `up`/`down`/`reset`（=`down-to 0`）/`status`/`validate` 子命令，API 启动不自动迁移。
+- **8 张 P0 表**：`users`、`workspaces`、`workspace_members`、`credential_envelopes`、`connections`、`connection_policies`、`executions`、`audit_events` 全部创建，含复合外键、唯一索引、CHECK 约束和触发器。
+- **审计不可变**：`audit_events` 表上安装 `BEFORE UPDATE`/`BEFORE DELETE`/`BEFORE TRUNCATE` 触发器，Go 仓储层仅暴露 `AppendAudit`/`QueryAudit`。
+- **凭证隔离**：`connections` 仅保存 `secret_ref` + `secret_version`，密文/DEK/nonce 隔离在 `credential_envelopes`。
+- **审计脱敏**：`sanitizeAuditMetadata()` 按允许列表过滤元数据键值，`looksLikeSQL()`/`looksLikeCredential()` 检测敏感文本。
+- **email 空白**：`CHECK (email !~ '^\s' AND email !~ '\s$' AND email <> '')` + `UNIQUE INDEX ON lower(email)`。
+- **settings 约束**：`CHECK (jsonb_typeof(settings) = 'object')`。
+- **CI 集成测试**：PostgreSQL 16 service + `go test -tags=integration`。
+- **测试覆盖**：41 个集成测试覆盖 migration up/down/up/up、约束拒绝、审计不可变、跨工作区拒绝等。
+- **待 P0-05**：AEAD/KDF 算法、凭证加解密实现、KEK 轮换流程。

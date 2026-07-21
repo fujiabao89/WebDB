@@ -106,12 +106,14 @@ func runMigrate(dir string) error {
 	switch dir {
 	case "up", "down":
 		return migrate.Run(ctx, db, dir)
+	case "reset":
+		return migrate.Run(ctx, db, "down-to", "0")
 	case "status":
 		return migrate.Status(ctx, db)
 	case "validate":
 		return migrate.Validate()
 	default:
-		return fmt.Errorf("migrate: 不支持的方向 %q（仅支持 up、down、status、validate）", dir)
+		return fmt.Errorf("migrate: 不支持的方向 %q（仅支持 up、down、reset、status、validate）", dir)
 	}
 }
 

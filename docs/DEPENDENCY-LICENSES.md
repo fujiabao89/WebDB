@@ -1,8 +1,8 @@
 # WebDB P0 依赖许可证清单
 
-> 状态：P0｜更新日期：2026-07-20
+> 状态：P0（Go/Docker 已完成，npm 包待补充）｜更新日期：2026-07-21
 >
-> 本项目采用 Apache License 2.0。所有依赖均与 AL2.0 兼容。
+> 本项目采用 Apache License 2.0。以下列出 Go 后端和 Docker 镜像依赖，均与 AL2.0 兼容。npm 前端依赖未包含。
 
 ## Go 依赖（apps/api）
 
@@ -26,12 +26,14 @@
 |---|---|---|
 | postgres:16-alpine | 元数据库/演示 PG | PostgreSQL License |
 | mysql:8.4 | 演示 MySQL | GPLv2 |
-| golang:1.26-bookworm | 构建/dev 运行 | BSD-style |
-| gcr.io/distroless/static-debian12:nonroot | 生产运行 | Apache 2.0 |
+| golang:1.26-bookworm | API 构建/dev | BSD-style |
+| gcr.io/distroless/static-debian12:nonroot | API 生产 | Apache 2.0 |
+| node:22-alpine | Web 构建/dev | MIT |
+| nginx:1.28-alpine | Web 生产 | BSD-style |
 
 ## 合规说明
 
-- 所有 Go 依赖许可证与项目 Apache License 2.0 兼容。
-- PostgreSQL License 与 AL2.0 兼容（BSD 风格）。
-- MySQL GPLv2 仅用于演示容器，不嵌入 WebDB。
+- Go 依赖均与 AL2.0 兼容（MIT/BSD/Apache 2.0）。
+- PostgreSQL/nginx/node Docker 镜像均与 AL2.0 兼容。
+- MySQL GPLv2 仅用于 Compose 演示容器，不嵌入 WebDB，不与项目代码链接。
 - 无 AGPL、SSPL 或商业受限许可证。
