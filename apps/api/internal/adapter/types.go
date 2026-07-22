@@ -43,6 +43,7 @@ type SortKey struct {
 	Column    string    `json:"column"`
 	Order     SortOrder `json:"order"`
 	NullsLast bool      `json:"nulls_last"`
+	Unique    bool      `json:"unique,omitempty"` // 该列是否构成唯一顺序，用于 keyset tie-breaker
 }
 
 // UserWorkspaceScope 请求作用域（非安全凭证）。

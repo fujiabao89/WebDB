@@ -57,6 +57,7 @@ type AdapterManager struct {
 	closed        bool
 	genCounter    int64
 	cleanupCancel context.CancelFunc
+	creating      sync.Map // per-cid singleflight: map[string]chan struct{}
 }
 
 func NewAdapterManager(opts ManagerOptions) *AdapterManager {
@@ -65,6 +66,7 @@ func NewAdapterManager(opts ManagerOptions) *AdapterManager {
 		pools: make(map[string]*poolEntry), ac: newAdmissionController(),
 		registry: newContinuationRegistry(), opts: opts,
 		currentRevs: make(map[string]int64), currentCfgs: make(map[string]ConnectConfig),
+		creating:      sync.Map{},
 		cleanupCancel: cancel,
 	}
 	go m.cleanupLoop(ctx)
@@ -107,12 +109,44 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 			return nil, newError(ErrConfigConflict, "config conflict", nil)
 		}
 	}
+	// Singleflight: 若已有其他 goroutine 在创建同 cid 的池，等待其完成
+	if ch, loaded := m.creating.LoadOrStore(cid, make(chan struct{})); loaded {
+		m.mu.Unlock()
+		select {
+		case <-ch.(chan struct{}):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		// 重试：池应已存在
+		m.mu.Lock()
+		if m.closed {
+			m.mu.Unlock()
+			return nil, newError(ErrPoolClosed, "manager closed", nil)
+		}
+		cr = m.currentRevs[cid]
+		if cfg.ConfigRevision < cr {
+			m.mu.Unlock()
+			return nil, newError(ErrStaleConfig, "stale config", nil)
+		}
+		if ex, ok := m.pools[cid]; ok && !ex.isClosed() {
+			if cfg.compareConfig(m.currentCfgs[cid]) {
+				m.mu.Unlock()
+				return &PoolHandle{entry: ex, gen: ex.generation}, nil
+			}
+		}
+		m.mu.Unlock()
+		return nil, newError(ErrConfigConflict, "config conflict after singleflight", nil)
+	}
 	m.mu.Unlock()
 	entry, err := m.createPool(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
+	if ch, ok := m.creating.Load(cid); ok {
+		close(ch.(chan struct{}))
+		m.creating.Delete(cid)
+	}
 	defer m.mu.Unlock()
 	if m.closed {
 		entry.close()
@@ -407,7 +441,10 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 		return nil, err
 	}
 	if result.NextToken != nil && result.TotalReturned < req.MaxRows {
-		pv := extractLastValues(result.Rows, specs)
+		pv, err := extractLastValues(result.Rows, result.Columns, specs)
+		if err != nil {
+			return nil, err
+		}
 		copiedArgs := make([]any, len(req.Args))
 		copy(copiedArgs, req.Args)
 		copiedSortKeys := make([]SortKey, len(req.SortKeys))
@@ -473,7 +510,12 @@ func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, tok
 	if result.NextToken == nil {
 		h.entry.manager.registry.expire(token)
 	} else {
-		plan.LastSortValues = extractLastValues(result.Rows, specs)
+		pv, err := extractLastValues(result.Rows, result.Columns, specs)
+		if err != nil {
+			h.entry.manager.registry.restore(token, plan)
+			return nil, err
+		}
+		plan.LastSortValues = pv
 		newTok, _ := genToken()
 		h.entry.manager.registry.replace(token, newTok, plan)
 		result.NextToken = &newTok
@@ -706,15 +748,31 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 			case reflect.Slice, reflect.Array:
 				size := rv.Len()
 				dst[i] = val
-				elemSize := int(rv.Type().Elem().Size())
+				var byteSize int
 				if rv.Type().Elem().Kind() == reflect.String {
-					elemSize = 64 // 字符串保守估算
+					for j := 0; j < size; j++ {
+						elem := rv.Index(j)
+						if elem.Kind() == reflect.String {
+							s := elem.String()
+							byteSize += len(s)
+							if maxCell > 0 && len(s) > maxCell {
+								return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+							}
+						} else {
+							byteSize += int(elem.Type().Size())
+							if maxCell > 0 && byteSize > maxCell {
+								return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+							}
+						}
+					}
+				} else {
+					elemSize := int(rv.Type().Elem().Size())
+					if elemSize < 8 {
+						elemSize = 8
+					}
+					byteSize = size * elemSize
 				}
-				if elemSize < 8 {
-					elemSize = 8
-				}
-				byteSize := size * elemSize
-				if byteSize > maxCell {
+				if maxCell > 0 && byteSize > maxCell {
 					return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
 				}
 				total += byteSize
@@ -726,15 +784,26 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 	}
 	return dst, total, nil
 }
-func extractLastValues(rows [][]any, specs []sortSpec) []any {
+func extractLastValues(rows [][]any, colInfos []ColumnInfo, specs []sortSpec) ([]any, error) {
 	if len(rows) == 0 {
-		return nil
+		return nil, nil
+	}
+	colIdx := make(map[string]int, len(colInfos))
+	for i, c := range colInfos {
+		if _, exists := colIdx[c.Name]; exists {
+			return nil, newError(ErrDatabaseError, "duplicate column name: "+c.Name, nil)
+		}
+		colIdx[c.Name] = i
 	}
 	last := rows[len(rows)-1]
 	vals := make([]any, len(specs)*2)
-	for i := range specs {
-		vals[i*2] = last[i] == nil
-		vals[i*2+1] = last[i]
+	for i, s := range specs {
+		pos, ok := colIdx[s.column]
+		if !ok {
+			return nil, newError(ErrDatabaseError, "sort column not in result: "+s.column, nil)
+		}
+		vals[i*2] = last[pos] == nil
+		vals[i*2+1] = last[pos]
 	}
-	return vals
+	return vals, nil
 }
