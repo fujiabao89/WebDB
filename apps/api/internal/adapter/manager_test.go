@@ -356,13 +356,13 @@ func TestNextPage_ScopeMismatch(t *testing.T) {
 
 func TestKeyset_SQL_Debug(t *testing.T) {
 	specs, _ := buildSortSpecs([]SortKey{{Column: "id", Order: SortAsc, NullsLast: false}})
-	sql, args, err := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EnginePostgreSQL, []any{int32(3)}, nil, 4)
+	sql, args, err := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EnginePostgreSQL, []any{false, int32(3)}, nil, 4)
 	if err != nil {
 		t.Fatalf("buildSQL: %v", err)
 	}
 	t.Logf("PG SQL: %s", sql)
 	t.Logf("PG Args: %v", args)
-	sql2, args2, _ := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EngineMySQL, []any{int32(3)}, nil, 4)
+	sql2, args2, _ := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EngineMySQL, []any{false, int32(3)}, nil, 4)
 	t.Logf("MySQL SQL: %s", sql2)
 	t.Logf("MySQL Args: %v", args2)
 }
@@ -578,6 +578,122 @@ func TestLeak_Cancel_PG(t *testing.T) {
 	t.Logf("PG cancel leak check passed")
 }
 
+func TestNextPage_MySQL_FullPagination(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
+	req := FirstPageRequest{
+		Scope: scope, SQL: "SELECT id, first_name FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false}},
+		PageSize: 3, MaxRows: 100,
+	}
+	r1, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if r1.NextToken == nil {
+		t.Fatal("expected next token for MySQL page 1")
+	}
+	t.Logf("MySQL page1: %d rows, token=%s", r1.ReturnedRows, (*r1.NextToken)[:8])
+
+	r2, err := h.NextPage(context.Background(), scope, *r1.NextToken)
+	if err != nil {
+		t.Fatalf("MySQL page 2: %v", err)
+	}
+	if r2.ReturnedRows == 0 {
+		t.Fatal("expected rows in MySQL page 2")
+	}
+	t.Logf("MySQL page2: %d rows, next=%v", r2.ReturnedRows, r2.NextToken != nil)
+
+	seen := map[int]bool{}
+	for _, row := range r1.Rows {
+		seen[int(row[0].(int64))] = true
+	}
+	for _, row := range r2.Rows {
+		id := int(row[0].(int64))
+		if seen[id] {
+			t.Fatalf("duplicate id %d across MySQL pages", id)
+		}
+		seen[id] = true
+	}
+	t.Logf("MySQL no duplicates across 2 pages")
+}
+
+func TestNextPage_PG_ThirdPage(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
+	req := FirstPageRequest{
+		Scope: scope, SQL: "SELECT id, first_name FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false}},
+		PageSize: 2, MaxRows: 100,
+	}
+	r1, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+	if r1.NextToken == nil {
+		t.Fatal("expected page 2 token")
+	}
+	// Page 2
+	r2, err := h.NextPage(context.Background(), scope, *r1.NextToken)
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+	if r2.NextToken == nil {
+		t.Skip("no page 3 — not enough rows")
+	}
+	// Page 3 — this would fail without the inUse reset fix
+	r3, err := h.NextPage(context.Background(), scope, *r2.NextToken)
+	if err != nil {
+		t.Fatalf("page 3: %v", err)
+	}
+	if r3.ReturnedRows == 0 {
+		t.Fatal("expected rows in page 3")
+	}
+	t.Logf("page3: %d rows, next=%v", r3.ReturnedRows, r3.NextToken != nil)
+}
+
+func TestAdmission_RateLimit(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	// maxUser=2: acquire 2 permits for same user
+	p1, err := m.ac.TryAcquire("u_limit", "ws1", "conn1")
+	if err != nil {
+		t.Fatalf("permit 1: %v", err)
+	}
+	p2, err := m.ac.TryAcquire("u_limit", "ws1", "conn1")
+	if err != nil {
+		p1.Release()
+		t.Fatalf("permit 2: %v", err)
+	}
+	// 3rd should fail
+	_, err = m.ac.TryAcquire("u_limit", "ws1", "conn1")
+	if err == nil {
+		p1.Release()
+		p2.Release()
+		t.Fatal("expected rate limit error for 3rd permit")
+	}
+	t.Logf("rate limit: %v", err)
+	p1.Release()
+	p2.Release()
+	// Now should succeed again
+	p3, err := m.ac.TryAcquire("u_limit", "ws1", "conn1")
+	if err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+	p3.Release()
+	t.Log("rate limit recovery OK")
+}
 func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 	t.Helper()
 	h, err := m.Get(context.Background(), cfg)

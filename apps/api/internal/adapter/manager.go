@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -131,6 +133,7 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 	}
 	if old, ok := m.pools[cid]; ok && !old.isClosed() {
 		old.drain()
+		go old.close()
 	}
 	m.pools[cid] = entry
 	m.currentRevs[cid] = cfg.ConfigRevision
@@ -170,7 +173,8 @@ func isLocalHost(h string) bool {
 }
 
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
-	cs := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable", cfg.User, cfg.Password, cfg.Host, cfg.Port, cfg.Database)
+	cs := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
+		url.QueryEscape(cfg.User), url.QueryEscape(cfg.Password), cfg.Host, cfg.Port, url.QueryEscape(cfg.Database))
 	pc, err := pgxpool.ParseConfig(cs)
 	if err != nil {
 		return nil, wrapError(ErrConnectionFailed, err)
@@ -320,6 +324,11 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	permit, err := h.entry.manager.ac.TryAcquire(req.Scope.UserID, req.Scope.WorkspaceID, h.entry.cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer permit.Release()
 	if req.PageSize <= 0 {
 		req.PageSize = 100
 	}
@@ -363,6 +372,11 @@ func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, tok
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	permit, err := h.entry.manager.ac.TryAcquire(scope.UserID, scope.WorkspaceID, h.entry.cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer permit.Release()
 	plan, err := h.entry.manager.registry.claim(token)
 	if err != nil {
 		return nil, err
@@ -405,6 +419,7 @@ func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, tok
 		h.entry.manager.registry.expire(token)
 	} else {
 		plan.LastSortValues = extractLastValues(result.Rows, specs)
+		plan.inUse = false // 清除 claim 设置的 inUse，确保下一页可 claim
 		newTok, _ := genToken()
 		h.entry.manager.registry.replace(token, newTok, plan)
 		result.NextToken = &newTok
@@ -446,10 +461,20 @@ func (h *PoolHandle) execQuery(ctx context.Context, sql string, args []any, limi
 	}
 	return nil, newError(ErrPoolClosed, "no connection", nil)
 }
+func mapExecError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return newError(ErrQueryTimeout, "query exceeded deadline", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return newError(ErrQueryCanceled, "query cancelled", err)
+	}
+	return wrapError(ErrDatabaseError, err)
+}
+
 func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
 	rows, err := h.entry.pgPool.Query(ctx, sql, args...)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapExecError(err)
 	}
 	defer rows.Close()
 	cols := rows.FieldDescriptions()
@@ -496,7 +521,7 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
 	rows, err := h.entry.sqlDB.QueryContext(ctx, sql, args...)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapExecError(err)
 	}
 	defer rows.Close()
 	cn, err := rows.Columns()
