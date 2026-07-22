@@ -72,6 +72,7 @@ func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any
 		// args 已在 phNull/phVal 中按 placeholder 生成顺序追加
 		allArgs = append(allArgs, b.mysqlArgs...)
 	}
+	sql = strings.TrimRight(strings.TrimSpace(sql), ";")
 	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS webdb_page", sql)
 	if contClause != "" {
 		wrapped += "\nWHERE " + contClause
