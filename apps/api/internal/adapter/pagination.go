@@ -81,6 +81,23 @@ func (r *ContinuationRegistry) create(plan *PagePlan) (string, error) {
 		}
 	}
 
+	// 最终验证：循环退出后确认所有上限均满足
+	connCount, userCount, wsCount, globalCount := 0, 0, 0, 0
+	for _, p := range r.tokens {
+		if p.ConnectionID == connKey {
+			connCount++
+		}
+		if p.Scope.UserID == userKey {
+			userCount++
+		}
+		if p.Scope.WorkspaceID == wsKey {
+			wsCount++
+		}
+		globalCount++
+	}
+	if globalCount >= r.maxGlobal || connCount >= r.maxConn || userCount >= r.maxUser || wsCount >= r.maxWS {
+		return "", newError(ErrPaginationCapacity, "token capacity exhausted", nil)
+	}
 	plan.ExpiresAt = time.Now().Add(5 * time.Minute)
 	r.tokens[tok] = plan
 	return tok, nil

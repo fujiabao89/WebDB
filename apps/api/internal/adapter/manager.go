@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -180,7 +181,14 @@ func isLocalHost(h string) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "demo-pg" || h == "demo-mysql"
 }
 
+// isExplainSQL 判断是否为 EXPLAIN 查询，不对其进行 keyset 包装。
+func isExplainSQL(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upper, "EXPLAIN") || strings.HasPrefix(upper, "DESCRIBE")
+}
+
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
+
 	pc, err := pgxpool.ParseConfig("")
 	if err != nil {
 		return nil, wrapError(ErrConnectionFailed, err)
@@ -318,6 +326,11 @@ func (h *PoolHandle) Schemas(ctx context.Context) ([]Schema, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
 		return pgSchemas(ctx, h.entry.pgPool)
@@ -333,6 +346,11 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string) ([]Table, error)
 	}
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
+		if _, ok := ctx.Deadline(); !ok {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+		}
 		return pgTables(ctx, h.entry.pgPool, schema)
 	case EngineMySQL:
 		return mysqlTables(ctx, h.entry.sqlDB, schema)
@@ -369,7 +387,14 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 		req.PageSize = 500
 	}
 	if req.MaxRows <= 0 {
-		req.MaxRows = req.PageSize
+		req.MaxRows = 500 // 默认最大行数，大于 PageSize 以允许续页
+	}
+	if isExplainSQL(req.SQL) {
+		result, err := h.execQuery(ctx, req.SQL, req.Args, req.PageSize+1, req.PageSize, 0, req.MaxRows)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
 	}
 	specs, err := buildSortSpecs(req.SortKeys)
 	if err != nil {
