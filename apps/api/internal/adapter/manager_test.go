@@ -483,14 +483,15 @@ func TestTimeout_MySQL(t *testing.T) {
 		t.Fatal("expected timeout error")
 	}
 	t.Logf("mysql timeout: %v", err)
-	r2, _ := h.Query(context.Background(), FirstPageRequest{
+	r2, err := h.Query(context.Background(), FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
 		SQL:   "SELECT 1 AS n", Args: nil,
 		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
 	})
-	if r2 != nil {
-		t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+	if err != nil {
+		t.Fatalf("mysql pool recovery after timeout: %v", err)
 	}
+	t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
 }
 
 func TestCancel_MySQL(t *testing.T) {
@@ -510,14 +511,15 @@ func TestCancel_MySQL(t *testing.T) {
 		t.Fatal("expected cancel error")
 	}
 	t.Logf("mysql cancel: %v", err)
-	r2, _ := h.Query(context.Background(), FirstPageRequest{
+	r2, err := h.Query(context.Background(), FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
 		SQL:   "SELECT 1 AS n", Args: nil,
 		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
 	})
-	if r2 != nil {
-		t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+	if err != nil {
+		t.Fatalf("mysql pool recovery after cancel: %v", err)
 	}
+	t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
 }
 
 func TestLeak_Timeout_PG(t *testing.T) {

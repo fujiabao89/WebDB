@@ -124,12 +124,15 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 		return nil, newError(ErrStaleConfig, "stale config", nil)
 	}
 	if cfg.ConfigRevision == cr {
-		if cfg.compareConfig(m.currentCfgs[cid]) {
+		if ex, ok := m.pools[cid]; ok && !ex.isClosed() {
+			if cfg.compareConfig(m.currentCfgs[cid]) {
+				entry.close()
+				return &PoolHandle{entry: ex, gen: ex.generation}, nil
+			}
 			entry.close()
-			return &PoolHandle{entry: m.pools[cid], gen: m.pools[cid].generation}, nil
+			return nil, newError(ErrConfigConflict, "config conflict", nil)
 		}
-		entry.close()
-		return nil, newError(ErrConfigConflict, "config conflict", nil)
+		// 池尚不存在（零 Revision 首次注册）：继续注册新池
 	}
 	if old, ok := m.pools[cid]; ok && !old.isClosed() {
 		old.drain()
@@ -193,6 +196,7 @@ func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry 
 		pc.ConnConfig.TLSConfig = nil
 	}
 	pc.MaxConns = int32(normInt(cfg.MaxOpen, defaultMaxOpen))
+	// pgxpool 无 MaxIdle 等价设置，空闲连接由 MaxConnIdleTime 控制回收
 	pc.MinConns = 0
 	pc.MaxConnLifetime = maxConnLT(time.Now().UnixNano())
 	pc.MaxConnIdleTime = 5 * time.Minute
@@ -265,8 +269,14 @@ func (m *AdapterManager) Close(ctx context.Context) error {
 		wg.Add(1)
 		go func(pe *poolEntry) { defer wg.Done(); pe.drain(); pe.close() }(e)
 	}
-	wg.Wait()
-	return nil
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type PoolHandle struct {
@@ -491,12 +501,23 @@ func mapExecError(err error) error {
 	return wrapError(ErrDatabaseError, err)
 }
 
+// mapAcquireError 映射连接获取错误：DeadlineExceeded 视为池耗尽而非查询超时。
+func mapAcquireError(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return newError(ErrConnPoolExhausted, "pool exhausted", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return newError(ErrQueryCanceled, "acquire cancelled", err)
+	}
+	return wrapError(ErrDatabaseError, err)
+}
+
 func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
 	aCtx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
 	conn, err := h.entry.pgPool.Acquire(aCtx)
 	if err != nil {
-		return nil, mapExecError(err)
+		return nil, mapAcquireError(err)
 	}
 	defer conn.Release()
 	rows, err := conn.Query(ctx, sql, args...)
@@ -541,7 +562,7 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	defer cancel()
 	conn, err := h.entry.sqlDB.Conn(aCtx)
 	if err != nil {
-		return nil, mapExecError(err)
+		return nil, mapAcquireError(err)
 	}
 	defer conn.Close()
 	rows, err := conn.QueryContext(ctx, sql, args...)
