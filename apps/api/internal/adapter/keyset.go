@@ -5,19 +5,12 @@ import (
 	"strings"
 )
 
-type nullRank int
-
-const (
-	rankNullFirst    nullRank = 0
-	rankNonNullFirst nullRank = 1
-)
-
 type sortSpec struct {
 	column      string
 	asc         bool
 	nullsLast   bool
-	nullRank    int // NULL 的 rank 值
-	nonNullRank int // 非 NULL 的 rank 值
+	nullRank    int
+	nonNullRank int
 }
 
 func buildSortSpecs(keys []SortKey) ([]sortSpec, error) {
@@ -25,10 +18,15 @@ func buildSortSpecs(keys []SortKey) ([]sortSpec, error) {
 		return nil, newError(ErrUnsupportedQuery, "sort keys required", nil)
 	}
 	specs := make([]sortSpec, len(keys))
+	seen := map[string]bool{}
 	for i, k := range keys {
 		if !validIdent(k.Column) {
-			return nil, newError(ErrUnsupportedQuery, "invalid column name: "+k.Column, nil)
+			return nil, newError(ErrUnsupportedQuery, "invalid column: "+k.Column, nil)
 		}
+		if seen[k.Column] {
+			return nil, newError(ErrUnsupportedQuery, "duplicate sort column: "+k.Column, nil)
+		}
+		seen[k.Column] = true
 		s := sortSpec{column: k.Column, asc: k.Order != SortDesc, nullsLast: k.NullsLast}
 		if k.NullsLast {
 			s.nullRank, s.nonNullRank = 1, 0
@@ -36,14 +34,6 @@ func buildSortSpecs(keys []SortKey) ([]sortSpec, error) {
 			s.nullRank, s.nonNullRank = 0, 1
 		}
 		specs[i] = s
-	}
-	// check duplicate columns
-	seen := map[string]bool{}
-	for _, s := range specs {
-		if seen[s.column] {
-			return nil, newError(ErrUnsupportedQuery, "duplicate sort column: "+s.column, nil)
-		}
-		seen[s.column] = true
 	}
 	return specs, nil
 }
@@ -53,20 +43,38 @@ func validIdent(s string) bool {
 		return false
 	}
 	for i, r := range s {
-		if i == 0 && !isIdentStart(r) {
+		if i == 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_') {
 			return false
 		}
-		if i > 0 && !isIdentPart(r) {
+		if i > 0 && !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_') {
 			return false
 		}
 	}
 	return true
 }
-func isIdentStart(r rune) bool { return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' }
-func isIdentPart(r rune) bool  { return isIdentStart(r) || (r >= '0' && r <= '9') }
 
-// buildOrderBy 生成方言 ORDER BY 子句。
-func buildOrderBy(specs []sortSpec, engine Engine) string {
+func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any, args []any, limit int) (string, []any, error) {
+	orderClause := buildOrderByClause(specs, engine)
+	allArgs := make([]any, len(args))
+	copy(allArgs, args)
+	paramIdx := len(allArgs) + 1
+	var contClause string
+	if len(lastVals) > 0 {
+		contClause, paramIdx = buildContinuationClause(specs, engine, paramIdx)
+		allArgs = append(allArgs, lastVals...)
+	}
+	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS webdb_page", sql)
+	if contClause != "" {
+		wrapped += "\nWHERE " + contClause
+	}
+	wrapped += "\nORDER BY " + orderClause
+	lp := placeholder(engine, paramIdx)
+	wrapped += fmt.Sprintf("\nLIMIT %s", lp)
+	allArgs = append(allArgs, limit)
+	return wrapped, allArgs, nil
+}
+
+func buildOrderByClause(specs []sortSpec, engine Engine) string {
 	var parts []string
 	for _, s := range specs {
 		col := quoteIdent(s.column, engine)
@@ -74,50 +82,68 @@ func buildOrderBy(specs []sortSpec, engine Engine) string {
 		if !s.asc {
 			dir = "DESC"
 		}
-		nulls := "NULLS FIRST"
-		if s.nullsLast {
-			nulls = "NULLS LAST"
+		if engine == EnginePostgreSQL {
+			n := "NULLS FIRST"
+			if s.nullsLast {
+				n = "NULLS LAST"
+			}
+			parts = append(parts, fmt.Sprintf("%s %s %s", col, dir, n))
+		} else {
+			nr := 0
+			if s.nullsLast {
+				nr = 1
+			}
+			parts = append(parts, fmt.Sprintf("CASE WHEN %s IS NULL THEN %d ELSE %d END, %s %s", col, nr, 1-nr, col, dir))
 		}
-		parts = append(parts, fmt.Sprintf("%s %s %s", col, dir, nulls))
 	}
 	return strings.Join(parts, ", ")
 }
 
-// buildContinuation 生成 continuation predicate。
-func buildContinuation(specs []sortSpec, engine Engine) string {
-	return buildAfter(specs, 0, engine)
+func buildContinuationClause(specs []sortSpec, engine Engine, startIdx int) (string, int) {
+	c, idx := buildAfterClause(specs, 0, engine, startIdx)
+	return c, idx
 }
 
-func buildAfter(specs []sortSpec, idx int, engine Engine) string {
+func buildAfterClause(specs []sortSpec, idx int, engine Engine, pi int) (string, int) {
 	if idx >= len(specs) {
-		return "FALSE"
+		return "FALSE", pi
 	}
 	s := specs[idx]
 	col := quoteIdent(s.column, engine)
-	ascOp := ">"
+	ao := ">"
 	if !s.asc {
-		ascOp = "<"
+		ao = "<"
 	}
-
-	currentRankExpr := fmt.Sprintf("CASE WHEN %s IS NULL THEN %d ELSE %d END", col, s.nullRank, s.nonNullRank)
-
-	after := fmt.Sprintf("(%s > $L%d)", currentRankExpr, idx)
-	after += fmt.Sprintf("\n    OR (%s = $L%d AND %s = %d AND %s %s $V%d)",
-		currentRankExpr, idx, currentRankExpr, s.nonNullRank, col, ascOp, idx)
-
+	ph := placeholder(engine, pi)
+	pi++
+	cr := fmt.Sprintf("(CASE WHEN %s IS NULL THEN %d ELSE %d END)", col, s.nullRank, s.nonNullRank)
+	lr := fmt.Sprintf("(CASE WHEN %s IS NULL THEN %d ELSE %d END)", ph, s.nullRank, s.nonNullRank)
+	af := fmt.Sprintf("(%s > %s)", cr, lr)
+	af += fmt.Sprintf(" OR (%s = %s AND %s = %d AND %s %s %s)", cr, lr, cr, s.nonNullRank, col, ao, ph)
 	if idx+1 < len(specs) {
-		equal := fmt.Sprintf("(%s = $L%d AND %s = %d AND %s = $V%d)",
-			currentRankExpr, idx, currentRankExpr, s.nullRank, col, idx)
-		nextAfter := buildAfter(specs, idx+1, engine)
-		after += fmt.Sprintf("\n    OR (%s AND %s)", equal, nextAfter)
+		eq := fmt.Sprintf("(%s = %s AND (%s = %d OR %s = %s))", cr, lr, cr, s.nullRank, col, ph)
+		na, npi := buildAfterClause(specs, idx+1, engine, pi)
+		af += fmt.Sprintf(" OR (%s AND %s)", eq, na)
+		pi = npi
 	}
-	return after
+	return af, pi
+}
+
+func placeholder(engine Engine, n int) string {
+	switch engine {
+	case EnginePostgreSQL:
+		return fmt.Sprintf("$%d", n)
+	case EngineMySQL:
+		return "?"
+	default:
+		return "?"
+	}
 }
 
 func quoteIdent(ident string, engine Engine) string {
 	switch engine {
 	case EnginePostgreSQL:
-		return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+		return "\"" + strings.ReplaceAll(ident, "\"", "\"\"") + "\""
 	case EngineMySQL:
 		return "`" + strings.ReplaceAll(ident, "`", "``") + "`"
 	default:

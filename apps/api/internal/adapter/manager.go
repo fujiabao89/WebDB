@@ -29,6 +29,7 @@ type poolEntry struct {
 	draining   int32
 	closed     int32
 	createdAt  time.Time
+	manager    *AdapterManager
 }
 
 func (e *poolEntry) isClosed() bool { return atomic.LoadInt32(&e.closed) == 1 }
@@ -153,7 +154,7 @@ func (m *AdapterManager) createPool(ctx context.Context, cfg ConnectConfig) (*po
 		}
 	}
 	gen := atomic.AddInt64(&m.genCounter, 1)
-	entry := &poolEntry{cfg: cfg, generation: gen, createdAt: time.Now()}
+	entry := &poolEntry{cfg: cfg, generation: gen, createdAt: time.Now(), manager: m}
 	switch cfg.Engine {
 	case EnginePostgreSQL:
 		return m.createPG(ctx, cfg, entry)
@@ -314,10 +315,99 @@ func (h *PoolHandle) Columns(ctx context.Context, schema, table string) ([]Colum
 	}
 }
 func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	if err := h.check(); err != nil {
+		return nil, err
+	}
+	if req.PageSize <= 0 {
+		req.PageSize = 100
+	}
+	if req.PageSize > 500 {
+		req.PageSize = 500
+	}
+	if req.MaxRows <= 0 {
+		req.MaxRows = req.PageSize
+	}
+	specs, err := buildSortSpecs(req.SortKeys)
+	if err != nil {
+		return nil, err
+	}
+	limit := req.PageSize
+	if limit > req.MaxRows {
+		limit = req.MaxRows
+	}
+	limit++
+	sql, args, err := buildWrappedSQL(req.SQL, specs, h.entry.cfg.Engine, nil, req.Args, limit)
+	if err != nil {
+		return nil, err
+	}
+	result, err := h.execQuery(ctx, sql, args, limit, req.PageSize, 0, req.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	if result.NextToken != nil {
+		pv := extractLastValues(result.Rows, specs)
+		plan := &PagePlan{SQL: req.SQL, Args: req.Args, SortKeys: req.SortKeys, LastSortValues: pv,
+			PageSize: req.PageSize, MaxRows: req.MaxRows, CumulativeCount: result.TotalReturned,
+			Scope: req.Scope, ConnectionID: h.entry.cfg.ConnectionID, Generation: h.gen}
+		tok, err := h.entry.manager.registry.create(plan)
+		if err != nil {
+			return nil, err
+		}
+		result.NextToken = &tok
+	}
+	return result, nil
 }
 func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, token string) (*QueryResult, error) {
-	return nil, fmt.Errorf("not implemented")
+	if err := h.check(); err != nil {
+		return nil, err
+	}
+	plan, err := h.entry.manager.registry.claim(token)
+	if err != nil {
+		return nil, err
+	}
+	if plan.Scope.UserID != scope.UserID || plan.Scope.WorkspaceID != scope.WorkspaceID {
+		h.entry.manager.registry.restore(token, plan)
+		return nil, newError(ErrInvalidPageToken, "scope mismatch", nil)
+	}
+	if plan.ConnectionID != h.entry.cfg.ConnectionID || plan.Generation != h.gen {
+		h.entry.manager.registry.restore(token, plan)
+		return nil, newError(ErrInvalidPageToken, "token not for this pool", nil)
+	}
+	if plan.CumulativeCount >= plan.MaxRows {
+		h.entry.manager.registry.expire(token)
+		return &QueryResult{Rows: [][]any{}, TotalReturned: plan.CumulativeCount}, nil
+	}
+	specs, err := buildSortSpecs(plan.SortKeys)
+	if err != nil {
+		h.entry.manager.registry.restore(token, plan)
+		return nil, err
+	}
+	limit := plan.PageSize
+	rem := plan.MaxRows - plan.CumulativeCount
+	if rem < limit {
+		limit = rem
+	}
+	limit++
+	sql, args, err := buildWrappedSQL(plan.SQL, specs, h.entry.cfg.Engine, plan.LastSortValues, plan.Args, limit)
+	if err != nil {
+		h.entry.manager.registry.restore(token, plan)
+		return nil, err
+	}
+	result, err := h.execQuery(ctx, sql, args, limit, plan.PageSize, plan.CumulativeCount, plan.MaxRows)
+	if err != nil {
+		h.entry.manager.registry.restore(token, plan)
+		return nil, err
+	}
+	plan.CumulativeCount = result.TotalReturned
+	if result.NextToken == nil {
+		h.entry.manager.registry.expire(token)
+	} else {
+		plan.LastSortValues = extractLastValues(result.Rows, specs)
+		newTok, _ := genToken()
+		h.entry.manager.registry.replace(token, newTok, plan)
+		result.NextToken = &newTok
+	}
+	return result, nil
 }
 func (h *PoolHandle) Stats() PoolStats {
 	if h.entry.pgPool != nil {
@@ -329,4 +419,134 @@ func (h *PoolHandle) Stats() PoolStats {
 		return PoolStats{ActiveConns: int32(st.InUse), IdleConns: int32(st.Idle), MaxOpen: st.MaxOpenConnections}
 	}
 	return PoolStats{}
+}
+
+func (h *PoolHandle) execQuery(ctx context.Context, sql string, args []any, limit int, pageSize int, cumCount int, maxRows int) (*QueryResult, error) {
+	if h.entry.pgPool != nil {
+		return h.execPG(ctx, sql, args, pageSize, cumCount, maxRows)
+	}
+	if h.entry.sqlDB != nil {
+		return h.execMySQL(ctx, sql, args, pageSize, cumCount, maxRows)
+	}
+	return nil, newError(ErrPoolClosed, "no connection", nil)
+}
+
+func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, pageSize, cumCount, maxRows int) (*QueryResult, error) {
+	rows, err := h.entry.pgPool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	defer rows.Close()
+	cols := rows.FieldDescriptions()
+	colInfos := make([]ColumnInfo, len(cols))
+	for i, c := range cols {
+		colInfos[i] = ColumnInfo{Name: string(c.Name), DataType: fmt.Sprintf("%d", c.DataTypeOID)}
+	}
+	var data [][]any
+	rowCount := 0
+	for rows.Next() {
+		vals, err := rows.Values()
+		if err != nil {
+			return nil, wrapError(ErrDatabaseError, err)
+		}
+		dd := make([]any, len(vals))
+		copyDefensive(dd, vals)
+		data = append(data, dd)
+		rowCount++
+		if rowCount >= pageSize+1 {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	next := rowCount > pageSize
+	if next {
+		data = data[:pageSize]
+		rowCount = pageSize
+	}
+	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rowCount, TotalReturned: cumCount + rowCount}
+	if next && (maxRows == 0 || cumCount+rowCount < maxRows) {
+		result.NextToken = &[]string{"x"}[0]
+	}
+	return result, nil
+}
+
+func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, pageSize, cumCount, maxRows int) (*QueryResult, error) {
+	rows, err := h.entry.sqlDB.QueryContext(ctx, sql, args...)
+	if err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	defer rows.Close()
+	colNames, err := rows.Columns()
+	if err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	colInfos := make([]ColumnInfo, len(colNames))
+	for i, n := range colNames {
+		colInfos[i] = ColumnInfo{Name: n}
+	}
+	var data [][]any
+	rowCount := 0
+	for rows.Next() {
+		vals := make([]any, len(colNames))
+		ptrs := make([]any, len(colNames))
+		for i := range vals {
+			ptrs[i] = &vals[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, wrapError(ErrDatabaseError, err)
+		}
+		dd := make([]any, len(vals))
+		copyDefensive(dd, vals)
+		data = append(data, dd)
+		rowCount++
+		if rowCount >= pageSize+1 {
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	next := rowCount > pageSize
+	if next {
+		data = data[:pageSize]
+		rowCount = pageSize
+	}
+	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rowCount, TotalReturned: cumCount + rowCount}
+	if next && (maxRows == 0 || cumCount+rowCount < maxRows) {
+		result.NextToken = &[]string{"x"}[0]
+	}
+	return result, nil
+}
+
+func copyDefensive(dst, src []any) {
+	for i, v := range src {
+		switch val := v.(type) {
+		case []byte:
+			b := make([]byte, len(val))
+			copy(b, val)
+			dst[i] = b
+		default:
+			dst[i] = val
+		}
+	}
+}
+
+func extractLastValues(rows [][]any, specs []sortSpec) []any {
+	if len(rows) == 0 {
+		return nil
+	}
+	last := rows[len(rows)-1]
+	vals := make([]any, len(specs))
+	for i, s := range specs {
+		for _, ci := range last {
+			if ci == nil {
+				continue
+			}
+		}
+		_ = s
+		vals[i] = last[i]
+	}
+	return vals
 }

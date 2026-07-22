@@ -158,3 +158,66 @@ func TestTables_MySQL(t *testing.T) {
 	}
 	t.Logf("MySQL tables: %d", len(tables))
 }
+
+func TestQuery_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT id, first_name FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false}},
+		PageSize: 10, MaxRows: 100,
+	}
+	result, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if result.ReturnedRows == 0 {
+		t.Fatal("expected rows")
+	}
+	t.Logf("PG query: %d rows, columns: %v", result.ReturnedRows, result.Columns)
+}
+
+func TestQuery_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), myCfg())
+	defer h.Release()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT id, first_name FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false}},
+		PageSize: 10, MaxRows: 100,
+	}
+	result, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if result.ReturnedRows == 0 {
+		t.Fatal("expected rows")
+	}
+	t.Logf("MySQL query: %d rows", result.ReturnedRows)
+}
+
+func TestQuery_PageSize(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT id, first_name FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false}},
+		PageSize: 3, MaxRows: 100,
+	}
+	result, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if result.ReturnedRows > 3 {
+		t.Fatalf("expected <=3 rows, got %d", result.ReturnedRows)
+	}
+	t.Logf("page size test: %d rows, next=%v", result.ReturnedRows, result.NextToken != nil)
+}
