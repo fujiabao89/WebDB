@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -179,16 +178,6 @@ func (m *AdapterManager) createPool(ctx context.Context, cfg ConnectConfig) (*po
 
 func isLocalHost(h string) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "demo-pg" || h == "demo-mysql"
-}
-
-// isExplainSQL 判断是否为安全的 EXPLAIN 查询（仅生成执行计划，不实际执行）。
-// EXPLAIN ANALYZE 在 PostgreSQL 中实际执行语句，必须拒绝透传，防止绕过只读保护。
-func isExplainSQL(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	if strings.HasPrefix(upper, "EXPLAIN") {
-		return !strings.Contains(upper, "ANALYZE")
-	}
-	return strings.HasPrefix(upper, "DESCRIBE")
 }
 
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
@@ -412,14 +401,6 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	}
 	if req.MaxRows <= 0 {
 		req.MaxRows = 500 // 默认最大行数，大于 PageSize 以允许续页
-	}
-	if isExplainSQL(req.SQL) {
-		result, err := h.execQuery(ctx, req.SQL, req.Args, req.PageSize+1, req.PageSize, 0, req.MaxRows)
-		if err != nil {
-			return nil, err
-		}
-		result.NextToken = nil
-		return result, nil
 	}
 	specs, err := buildSortSpecs(req.SortKeys)
 	if err != nil {
