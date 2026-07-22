@@ -306,6 +306,11 @@ func (h *PoolHandle) Ping(ctx context.Context) error {
 	if err := h.check(); err != nil {
 		return err
 	}
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+	}
 	if h.entry.pgPool != nil {
 		err := h.entry.pgPool.Ping(ctx)
 		if err != nil {
@@ -415,7 +420,11 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	}
 	if result.NextToken != nil && result.TotalReturned < req.MaxRows {
 		pv := extractLastValues(result.Rows, specs)
-		plan := &PagePlan{SQL: req.SQL, Args: req.Args, SortKeys: req.SortKeys, LastSortValues: pv,
+		copiedArgs := make([]any, len(req.Args))
+		copy(copiedArgs, req.Args)
+		copiedSortKeys := make([]SortKey, len(req.SortKeys))
+		copy(copiedSortKeys, req.SortKeys)
+		plan := &PagePlan{SQL: req.SQL, Args: copiedArgs, SortKeys: copiedSortKeys, LastSortValues: pv,
 			PageSize: req.PageSize, MaxRows: req.MaxRows, CumulativeCount: result.TotalReturned,
 			Scope: req.Scope, ConnectionID: h.entry.cfg.ConnectionID, Generation: h.gen}
 		tok, err := h.entry.manager.registry.create(plan)

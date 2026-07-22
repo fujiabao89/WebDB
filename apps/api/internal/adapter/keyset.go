@@ -27,6 +27,9 @@ func buildSortSpecs(keys []SortKey) ([]sortSpec, error) {
 			return nil, newError(ErrUnsupportedQuery, "duplicate sort column: "+k.Column, nil)
 		}
 		seen[k.Column] = true
+		if k.Order != SortAsc && k.Order != SortDesc && k.Order != "" {
+			return nil, newError(ErrUnsupportedQuery, "invalid sort order: "+string(k.Order), nil)
+		}
 		s := sortSpec{column: k.Column, asc: k.Order != SortDesc, nullsLast: k.NullsLast}
 		if k.NullsLast {
 			s.nullRank, s.nonNullRank = 1, 0

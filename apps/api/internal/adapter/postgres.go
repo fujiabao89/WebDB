@@ -20,7 +20,10 @@ func pgSchemas(ctx context.Context, pool *pgxpool.Pool) ([]Schema, error) {
 		}
 		out = append(out, Schema{Name: name})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }
 
 func pgTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]Table, error) {
@@ -42,7 +45,10 @@ func pgTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]Table, 
 		}
 		out = append(out, Table{Schema: schema, Name: name, Type: t})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }
 
 func pgColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string) ([]Column, error) {
@@ -63,5 +69,8 @@ FROM information_schema.columns c WHERE c.table_schema=$1 AND c.table_name=$2 OR
 		}
 		out = append(out, Column{Name: name, Ordinal: ord, NativeType: dt, Nullable: nullable == "YES", HasDefault: hasDef})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }

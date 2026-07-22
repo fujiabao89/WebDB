@@ -20,7 +20,10 @@ func mysqlSchemas(ctx context.Context, db *sql.DB) ([]Schema, error) {
 		}
 		out = append(out, Schema{Name: name})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }
 
 func mysqlTables(ctx context.Context, db *sql.DB, schema string) ([]Table, error) {
@@ -42,7 +45,10 @@ func mysqlTables(ctx context.Context, db *sql.DB, schema string) ([]Table, error
 		}
 		out = append(out, Table{Schema: schema, Name: name, Type: t})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }
 
 func mysqlColumns(ctx context.Context, db *sql.DB, schema, table string) ([]Column, error) {
@@ -63,5 +69,8 @@ FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY o
 		}
 		out = append(out, Column{Name: name, Ordinal: ord, NativeType: dt, Nullable: nullable == "YES", HasDefault: hasDef})
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
 }
