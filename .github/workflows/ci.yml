@@ -139,9 +139,13 @@ jobs:
         run: go test -tags=integration ./internal/adapter/...
         env:
           DEMO_PG_HOST: localhost
+          DEMO_PG_USER: webdb
           DEMO_PG_PASSWORD: change_me
+          DEMO_PG_NAME: webdb_meta
           DEMO_MYSQL_HOST: 127.0.0.1
+          DEMO_MYSQL_USER: root
           DEMO_MYSQL_PASSWORD: change_me
+          DEMO_MYSQL_NAME: webdb_demo
 
   contracts:
     name: Contracts checks

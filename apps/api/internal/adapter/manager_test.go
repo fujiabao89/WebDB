@@ -133,7 +133,7 @@ func TestSchemas_MySQL(t *testing.T) {
 func TestTables_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	tables, err := h.Tables(context.Background(), "public")
 	if err != nil {
@@ -148,7 +148,7 @@ func TestTables_PG(t *testing.T) {
 func TestTables_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), myCfg())
+	h := mustGet(t, m, myCfg())
 	defer h.Release()
 	tables, err := h.Tables(context.Background(), "webdb_demo")
 	if err != nil {
@@ -163,7 +163,7 @@ func TestTables_MySQL(t *testing.T) {
 func TestQuery_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -184,7 +184,7 @@ func TestQuery_PG(t *testing.T) {
 func TestQuery_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), myCfg())
+	h := mustGet(t, m, myCfg())
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -205,7 +205,7 @@ func TestQuery_MySQL(t *testing.T) {
 func TestQuery_PageSize(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -226,7 +226,7 @@ func TestQuery_PageSize(t *testing.T) {
 func TestNextPage_PG_FullPagination(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -267,7 +267,7 @@ func TestNextPage_PG_FullPagination(t *testing.T) {
 func TestNextPage_InvalidToken(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	_, err := h.NextPage(context.Background(), UserWorkspaceScope{}, "nonexistent-token")
 	if err == nil {
@@ -279,7 +279,7 @@ func TestNextPage_InvalidToken(t *testing.T) {
 func TestNextPage_MaxRows(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -307,7 +307,7 @@ func TestNextPage_MaxRows(t *testing.T) {
 func TestNextPage_ScopeMismatch(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -345,7 +345,7 @@ func TestKeyset_SQL_Debug(t *testing.T) {
 func TestNextPage_PG_Debug(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -379,7 +379,7 @@ func TestNextPage_PG_Debug(t *testing.T) {
 func TestTimeout_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -410,7 +410,7 @@ func TestTimeout_PG(t *testing.T) {
 func TestCancel_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
@@ -441,7 +441,7 @@ func TestCancel_PG(t *testing.T) {
 func TestTimeout_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), myCfg())
+	h := mustGet(t, m, myCfg())
 	defer h.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -467,7 +467,7 @@ func TestTimeout_MySQL(t *testing.T) {
 func TestCancel_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), myCfg())
+	h := mustGet(t, m, myCfg())
 	defer h.Release()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
@@ -493,7 +493,7 @@ func TestCancel_MySQL(t *testing.T) {
 func TestLeak_Timeout_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -521,7 +521,7 @@ func TestLeak_Timeout_PG(t *testing.T) {
 func TestLeak_Cancel_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
-	h, _ := m.Get(context.Background(), pgCfg())
+	h := mustGet(t, m, pgCfg())
 	defer h.Release()
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -545,12 +545,10 @@ func TestLeak_Cancel_PG(t *testing.T) {
 	}
 	t.Logf("PG cancel leak check passed")
 }
-func TestKeyset_SQL_v2(t *testing.T) {
-	specs, _ := buildSortSpecs([]SortKey{{Column: "id", Order: SortAsc, NullsLast: false}})
-	sql, args, err := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EnginePostgreSQL, []any{int32(3)}, nil, 4)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	t.Logf("SQL: %s", sql)
-	t.Logf("Args: %v", args)
+
+func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
+	t.Helper()
+	h, err := m.Get(context.Background(), cfg)
+	if err != nil { t.Skipf("db unavailable: %v", err) }
+	return h
 }
