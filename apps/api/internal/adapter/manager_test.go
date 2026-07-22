@@ -5,9 +5,21 @@ package adapter
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 )
+
+func envPort(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 65535 {
+			panic("invalid " + k + "=" + v)
+		}
+		return n
+	}
+	return def
+}
 
 func envDef(k, d string) string {
 	if v := os.Getenv(k); v != "" {
@@ -19,7 +31,7 @@ func envDef(k, d string) string {
 func pgCfg() ConnectConfig {
 	return ConnectConfig{
 		ConnectionID: "pg1", SecretVersion: 1, ConfigRevision: 1,
-		Engine: EnginePostgreSQL, Host: envDef("DEMO_PG_HOST", "localhost"), Port: 5433,
+		Engine: EnginePostgreSQL, Host: envDef("DEMO_PG_HOST", "localhost"), Port: envPort("DEMO_PG_PORT", 5433),
 		User: envDef("DEMO_PG_USER", "demo_reader"), Password: envDef("DEMO_PG_PASSWORD", "change_me"),
 		Database: envDef("DEMO_PG_NAME", "webdb_demo"), TLS: TLSDisable, MaxOpen: 2, MaxIdle: 1,
 	}
@@ -27,7 +39,7 @@ func pgCfg() ConnectConfig {
 func myCfg() ConnectConfig {
 	return ConnectConfig{
 		ConnectionID: "my1", SecretVersion: 1, ConfigRevision: 1,
-		Engine: EngineMySQL, Host: envDef("DEMO_MYSQL_HOST", "localhost"), Port: 3306,
+		Engine: EngineMySQL, Host: envDef("DEMO_MYSQL_HOST", "localhost"), Port: envPort("DEMO_MYSQL_PORT", 3306),
 		User: envDef("DEMO_MYSQL_USER", "demo_reader"), Password: envDef("DEMO_MYSQL_PASSWORD", "change_me"),
 		Database: envDef("DEMO_MYSQL_NAME", "webdb_demo"), TLS: TLSDisable, MaxOpen: 2, MaxIdle: 1,
 	}
@@ -142,7 +154,7 @@ func TestTables_PG(t *testing.T) {
 	}
 	if len(tables) == 0 {
 		if len(tables) == 0 {
-			t.Skip("no tables in public schema")
+			t.Fatal("no tables in public schema")
 		}
 	}
 	t.Logf("PG tables: %d", len(tables))
@@ -160,7 +172,7 @@ func TestTables_MySQL(t *testing.T) {
 	}
 	if len(tables) == 0 {
 		if len(tables) == 0 {
-			t.Skip("no tables in database")
+			t.Fatal("no tables in database")
 		}
 	}
 	t.Logf("MySQL tables: %d", len(tables))
@@ -570,7 +582,7 @@ func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 	t.Helper()
 	h, err := m.Get(context.Background(), cfg)
 	if err != nil {
-		t.Skipf("db unavailable: %v", err)
+		t.Fatalf("Get: %v", err)
 	}
 	return h
 }
