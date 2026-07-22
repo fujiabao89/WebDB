@@ -56,21 +56,26 @@ func (r *ContinuationRegistry) create(plan *PagePlan) (string, error) {
 	userKey := plan.Scope.UserID
 	wsKey := plan.Scope.WorkspaceID
 
-	connCount, userCount, wsCount, globalCount := 0, 0, 0, 0
-	for _, p := range r.tokens {
-		if p.ConnectionID == connKey {
-			connCount++
+	// 尝试驱逐直到所有上限满足，最多重试 2 次
+	for attempt := 0; attempt < 2; attempt++ {
+		connCount, userCount, wsCount, globalCount := 0, 0, 0, 0
+		for _, p := range r.tokens {
+			if p.ConnectionID == connKey {
+				connCount++
+			}
+			if p.Scope.UserID == userKey {
+				userCount++
+			}
+			if p.Scope.WorkspaceID == wsKey {
+				wsCount++
+			}
+			globalCount++
 		}
-		if p.Scope.UserID == userKey {
-			userCount++
-		}
-		if p.Scope.WorkspaceID == wsKey {
-			wsCount++
-		}
-		globalCount++
-	}
 
-	if globalCount >= r.maxGlobal || connCount >= r.maxConn || userCount >= r.maxUser || wsCount >= r.maxWS {
+		if globalCount < r.maxGlobal && connCount < r.maxConn && userCount < r.maxUser && wsCount < r.maxWS {
+			break
+		}
+
 		if !r.evict(connKey, userKey, wsKey, connCount, userCount, wsCount, globalCount) {
 			return "", newError(ErrPaginationCapacity, "token capacity exhausted", nil)
 		}

@@ -515,6 +515,11 @@ func mapAcquireError(err error) error {
 }
 
 func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		var deadlineCancel context.CancelFunc
+		ctx, deadlineCancel = context.WithTimeout(ctx, 30*time.Second)
+		defer deadlineCancel()
+	}
 	aCtx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
 	conn, err := h.entry.pgPool.Acquire(aCtx)
@@ -562,6 +567,11 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
 	aCtx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var deadlineCancel context.CancelFunc
+		ctx, deadlineCancel = context.WithTimeout(ctx, 30*time.Second)
+		defer deadlineCancel()
+	}
 	conn, err := h.entry.sqlDB.Conn(aCtx)
 	if err != nil {
 		return nil, mapAcquireError(err)
@@ -678,6 +688,9 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 				}
 				dst[i] = val
 				elemSize := int(rv.Type().Elem().Size())
+				if rv.Type().Elem().Kind() == reflect.String {
+					elemSize = 64 // 字符串保守估算
+				}
 				if elemSize < 8 {
 					elemSize = 8
 				}
