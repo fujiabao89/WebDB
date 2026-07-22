@@ -52,35 +52,25 @@ func validIdent(s string) bool {
 	return true
 }
 
+// ksBuilder 按占位符生成顺序记录 MySQL args，确保多列 keyset 参数顺序正确
 type ksBuilder struct {
-	engine       Engine
-	specs        []sortSpec
-	pgN          int
-	myNullCounts []int // is-null placeholder count per sort key (MySQL arg duplication)
-	myValCounts  []int // value placeholder count per sort key (MySQL arg duplication)
+	engine    Engine
+	specs     []sortSpec
+	pgN       int
+	lastVals  []any // [isNull0, val0, isNull1, val1, ...]
+	mysqlArgs []any // MySQL args 按 placeholder 生成顺序追加
 }
 
 func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any, args []any, limit int) (string, []any, error) {
 	orderClause := buildOrderByClause(specs, engine)
 	allArgs := make([]any, len(args))
 	copy(allArgs, args)
-	b := &ksBuilder{engine: engine, specs: specs, pgN: len(allArgs) + 1,
-		myNullCounts: make([]int, len(specs)), myValCounts: make([]int, len(specs))}
+	b := &ksBuilder{engine: engine, specs: specs, pgN: len(allArgs) + 1, lastVals: lastVals, mysqlArgs: make([]any, 0)}
 	var contClause string
 	if len(lastVals) > 0 {
 		contClause = b.buildContinuation()
-		// lastVals layout: [isNull0, val0, isNull1, val1, ...] (2 values per key)
-		// phNull/phVal 每次引用都重新调用，myNullCounts/myValCounts 记录各 key 的占位符出现次数
-		for i := range specs {
-			isNull := lastVals[i*2]
-			val := lastVals[i*2+1]
-			for j := 0; j < b.myNullCounts[i]; j++ {
-				allArgs = append(allArgs, isNull)
-			}
-			for j := 0; j < b.myValCounts[i]; j++ {
-				allArgs = append(allArgs, val)
-			}
-		}
+		// args 已在 phNull/phVal 中按 placeholder 生成顺序追加
+		allArgs = append(allArgs, b.mysqlArgs...)
 	}
 	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS webdb_page", sql)
 	if contClause != "" {
@@ -98,23 +88,23 @@ func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any
 }
 
 func (b *ksBuilder) phNull(keyIdx int) string {
-	b.myNullCounts[keyIdx]++
-	if b.engine == EnginePostgreSQL {
-		n := b.pgN
-		b.pgN++
-		return fmt.Sprintf("$%d", n)
+	b.mysqlArgs = append(b.mysqlArgs, b.lastVals[keyIdx*2]) // isNull
+	if b.engine == EngineMySQL {
+		return "?"
 	}
-	return "?"
+	n := b.pgN
+	b.pgN++
+	return fmt.Sprintf("$%d", n)
 }
 
 func (b *ksBuilder) phVal(keyIdx int) string {
-	b.myValCounts[keyIdx]++
-	if b.engine == EnginePostgreSQL {
-		n := b.pgN
-		b.pgN++
-		return fmt.Sprintf("$%d", n)
+	b.mysqlArgs = append(b.mysqlArgs, b.lastVals[keyIdx*2+1]) // val
+	if b.engine == EngineMySQL {
+		return "?"
 	}
-	return "?"
+	n := b.pgN
+	b.pgN++
+	return fmt.Sprintf("$%d", n)
 }
 
 func (b *ksBuilder) buildContinuation() string { return b.buildAfter(0) }
@@ -130,7 +120,6 @@ func (b *ksBuilder) buildAfter(idx int) string {
 		ao = "<"
 	}
 	cr := fmt.Sprintf("(CASE WHEN %s IS NULL THEN %d ELSE %d END)", col, s.nullRank, s.nonNullRank)
-	// 每次引用 phNull/phVal 都重新调用，确保 MySQL ? 计数与 args — 致
 	lr0 := fmt.Sprintf("(CASE WHEN %s THEN %d ELSE %d END)", b.phNull(idx), s.nullRank, s.nonNullRank)
 	lr1 := fmt.Sprintf("(CASE WHEN %s THEN %d ELSE %d END)", b.phNull(idx), s.nullRank, s.nonNullRank)
 	af := fmt.Sprintf("(%s > %s)", cr, lr0)

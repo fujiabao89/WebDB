@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,12 +16,11 @@ import (
 )
 
 const (
-	defaultMaxOpen      = 10
-	defaultMaxIdle      = 2
-	connAcquireTimeout  = 5 * time.Second
-	maxConnLTMin        = 27 * time.Minute
-	maxConnLTMax        = 30 * time.Minute
-	defaultQueryTimeout = 60 * time.Second
+	defaultMaxOpen     = 10
+	defaultMaxIdle     = 2
+	connAcquireTimeout = 5 * time.Second
+	maxConnLTMin       = 27 * time.Minute
+	maxConnLTMax       = 30 * time.Minute
 )
 
 type poolEntry struct {
@@ -138,13 +137,18 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 	}
 	m.pools[cid] = entry
 	m.currentRevs[cid] = cfg.ConfigRevision
-	m.currentCfgs[cid] = cfg
+	sanitized := cfg
+	sanitized.Password = ""
+	m.currentCfgs[cid] = sanitized
 	return &PoolHandle{entry: entry, gen: entry.generation}, nil
 }
 
 func (m *AdapterManager) createPool(ctx context.Context, cfg ConnectConfig) (*poolEntry, error) {
 	if cfg.Engine != EnginePostgreSQL && cfg.Engine != EngineMySQL {
 		return nil, newError(ErrUnsupportedEngine, "unsupported engine", nil)
+	}
+	if cfg.TLS != TLSRequire && cfg.TLS != TLSPrefer && cfg.TLS != TLSDisable {
+		return nil, newError(ErrInvalidConfig, "unknown TLS mode: "+string(cfg.TLS), nil)
 	}
 	if cfg.TLS == TLSPrefer {
 		return nil, newError(ErrUnsupportedCapability, "TLS prefer not supported", nil)
@@ -174,20 +178,25 @@ func isLocalHost(h string) bool {
 }
 
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
-	cs := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		url.PathEscape(cfg.User), url.PathEscape(cfg.Password), cfg.Host, cfg.Port, url.PathEscape(cfg.Database))
-	pc, err := pgxpool.ParseConfig(cs)
+	pc, err := pgxpool.ParseConfig("")
 	if err != nil {
 		return nil, wrapError(ErrConnectionFailed, err)
 	}
+	pc.ConnConfig.Host = cfg.Host
+	pc.ConnConfig.Port = uint16(cfg.Port)
+	pc.ConnConfig.User = cfg.User
+	pc.ConnConfig.Password = cfg.Password
+	pc.ConnConfig.Database = cfg.Database
+	if cfg.TLS == TLSRequire {
+		pc.ConnConfig.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: cfg.Host}
+	} else {
+		pc.ConnConfig.TLSConfig = nil
+	}
 	pc.MaxConns = int32(normInt(cfg.MaxOpen, defaultMaxOpen))
-	pc.MinConns = int32(normInt(cfg.MaxIdle, defaultMaxIdle))
+	pc.MinConns = 0
 	pc.MaxConnLifetime = maxConnLT(time.Now().UnixNano())
 	pc.MaxConnIdleTime = 5 * time.Minute
 	pc.HealthCheckPeriod = 30 * time.Second
-	if cfg.TLS == TLSRequire {
-		pc.ConnConfig.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	}
 	pool, err := pgxpool.NewWithConfig(ctx, pc)
 	if err != nil {
 		return nil, wrapError(ErrConnectionFailed, err)
@@ -277,10 +286,18 @@ func (h *PoolHandle) Ping(ctx context.Context) error {
 		return err
 	}
 	if h.entry.pgPool != nil {
-		return h.entry.pgPool.Ping(ctx)
+		err := h.entry.pgPool.Ping(ctx)
+		if err != nil {
+			return wrapError(ErrConnectionFailed, err)
+		}
+		return nil
 	}
 	if h.entry.sqlDB != nil {
-		return h.entry.sqlDB.PingContext(ctx)
+		err := h.entry.sqlDB.PingContext(ctx)
+		if err != nil {
+			return wrapError(ErrConnectionFailed, err)
+		}
+		return nil
 	}
 	return newError(ErrPoolClosed, "no connection", nil)
 }
@@ -456,14 +473,11 @@ func (h *PoolHandle) execQuery(ctx context.Context, sql string, args []any, limi
 		effPage = rem
 	}
 	mf := effPage + 1
-	// 应用服务端执行超时，防止无界等待池连接或长时间运行查询
-	qCtx, cancel := context.WithTimeout(ctx, defaultQueryTimeout)
-	defer cancel()
 	if h.entry.pgPool != nil {
-		return h.execPG(qCtx, sql, args, mf, effPage, cumCount, mpb, mcb)
+		return h.execPG(ctx, sql, args, mf, effPage, cumCount, mpb, mcb, maxRows)
 	}
 	if h.entry.sqlDB != nil {
-		return h.execMySQL(qCtx, sql, args, mf, effPage, cumCount, mpb, mcb)
+		return h.execMySQL(ctx, sql, args, mf, effPage, cumCount, mpb, mcb, maxRows)
 	}
 	return nil, newError(ErrPoolClosed, "no connection", nil)
 }
@@ -477,8 +491,15 @@ func mapExecError(err error) error {
 	return wrapError(ErrDatabaseError, err)
 }
 
-func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
-	rows, err := h.entry.pgPool.Query(ctx, sql, args...)
+func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
+	aCtx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
+	conn, err := h.entry.pgPool.Acquire(aCtx)
+	if err != nil {
+		return nil, mapExecError(err)
+	}
+	defer conn.Release()
+	rows, err := conn.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
 	}
@@ -513,19 +534,17 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 	if err := rows.Err(); err != nil {
 		return nil, mapExecError(err)
 	}
-	hasMore := rc > effPage
-	if hasMore {
-		data = data[:effPage]
-		rc = effPage
-	}
-	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: cumCount + rc}
-	if hasMore {
-		result.NextToken = &[]string{"_"}[0]
-	}
-	return result, nil
+	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
 }
-func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
-	rows, err := h.entry.sqlDB.QueryContext(ctx, sql, args...)
+func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
+	aCtx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
+	conn, err := h.entry.sqlDB.Conn(aCtx)
+	if err != nil {
+		return nil, mapExecError(err)
+	}
+	defer conn.Close()
+	rows, err := conn.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
 	}
@@ -534,9 +553,14 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	if err != nil {
 		return nil, mapExecError(err)
 	}
+	cts, _ := rows.ColumnTypes()
 	colInfos := make([]ColumnInfo, len(cn))
 	for i, n := range cn {
-		colInfos[i] = ColumnInfo{Name: n}
+		dt := ""
+		if i < len(cts) {
+			dt = cts[i].DatabaseTypeName()
+		}
+		colInfos[i] = ColumnInfo{Name: n, DataType: dt}
 	}
 	var data [][]any
 	rc := 0
@@ -567,17 +591,22 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	if err := rows.Err(); err != nil {
 		return nil, mapExecError(err)
 	}
+	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
+}
+func finalizeResult(colInfos []ColumnInfo, data [][]any, rc, effPage, cumCount, maxRows int) *QueryResult {
 	hasMore := rc > effPage
 	if hasMore {
 		data = data[:effPage]
 		rc = effPage
 	}
-	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: cumCount + rc}
-	if hasMore {
+	total := cumCount + rc
+	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: total}
+	if hasMore && total < maxRows {
 		result.NextToken = &[]string{"_"}[0]
 	}
-	return result, nil
+	return result
 }
+
 func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 	dst := make([]any, len(vals))
 	total := 0
@@ -613,9 +642,23 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 		case time.Time:
 			dst[i] = val
 			total += 32
-		default:
+		case int32:
 			dst[i] = val
-			total += 64
+			total += 4
+		default:
+			rv := reflect.ValueOf(v)
+			switch rv.Kind() {
+			case reflect.Slice, reflect.Array:
+				size := rv.Len()
+				if size > maxCell {
+					return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+				}
+				dst[i] = val
+				total += size * 8
+			default:
+				dst[i] = val
+				total += 64
+			}
 		}
 	}
 	return dst, total, nil
