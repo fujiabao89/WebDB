@@ -29,7 +29,7 @@ func myCfg() ConnectConfig {
 		ConnectionID: "my1", SecretVersion: 1, ConfigRevision: 1,
 		Engine: EngineMySQL, Host: envDef("DEMO_MYSQL_HOST", "localhost"), Port: 3306,
 		User: envDef("DEMO_MYSQL_USER", "demo_reader"), Password: envDef("DEMO_MYSQL_PASSWORD", "change_me"),
-		Database: envDef("DEMO_MYSQL_NAME", "mysql"), TLS: TLSDisable, MaxOpen: 2, MaxIdle: 1,
+		Database: envDef("DEMO_MYSQL_NAME", "webdb_demo"), TLS: TLSDisable, MaxOpen: 2, MaxIdle: 1,
 	}
 }
 
@@ -134,7 +134,7 @@ func TestTables_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	tables, err := h.Tables(context.Background(), "public")
 	if err != nil {
@@ -152,7 +152,7 @@ func TestTables_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	tables, err := h.Tables(context.Background(), "webdb_demo")
 	if err != nil {
@@ -170,7 +170,7 @@ func TestQuery_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -192,7 +192,7 @@ func TestQuery_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -214,7 +214,7 @@ func TestQuery_PageSize(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	req := FirstPageRequest{
 		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
@@ -236,7 +236,7 @@ func TestNextPage_PG_FullPagination(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -278,7 +278,7 @@ func TestNextPage_InvalidToken(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	_, err := h.NextPage(context.Background(), UserWorkspaceScope{}, "nonexistent-token")
 	if err == nil {
@@ -291,7 +291,7 @@ func TestNextPage_MaxRows(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -320,7 +320,7 @@ func TestNextPage_ScopeMismatch(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -359,7 +359,7 @@ func TestNextPage_PG_Debug(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 	req := FirstPageRequest{
@@ -394,7 +394,7 @@ func TestTimeout_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -426,7 +426,7 @@ func TestCancel_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
@@ -458,7 +458,7 @@ func TestTimeout_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -485,7 +485,7 @@ func TestCancel_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
@@ -512,7 +512,7 @@ func TestLeak_Timeout_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
@@ -541,7 +541,7 @@ func TestLeak_Cancel_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
-	tensureEmployees(t, h)
+	ensureEmployees(t, h)
 	defer h.Release()
 	for i := 0; i < 5; i++ {
 		ctx, cancel := context.WithCancel(context.Background())

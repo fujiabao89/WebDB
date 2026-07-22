@@ -147,7 +147,7 @@ jobs:
           DEMO_MYSQL_PORT: "3306"
           DEMO_MYSQL_USER: root
           DEMO_MYSQL_PASSWORD: change_me
-          DEMO_MYSQL_NAME: mysql
+          DEMO_MYSQL_NAME: webdb_demo
 
   contracts:
     name: Contracts checks
