@@ -589,9 +589,32 @@ func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 
 func ensureEmployees(t *testing.T, h *PoolHandle) {
 	t.Helper()
-	// Try creating the table if it doesn't exist (PG only for CI)
 	if h.entry.pgPool != nil {
-		h.entry.pgPool.Exec(context.Background(), "CREATE TABLE IF NOT EXISTS employees (id SERIAL PRIMARY KEY, first_name TEXT NOT NULL)")
-		h.entry.pgPool.Exec(context.Background(), "INSERT INTO employees (first_name) SELECT v FROM unnest(ARRAY['Alice','Bob','Charlie','David','Eve','Frank','Grace']) AS t(v) WHERE NOT EXISTS (SELECT 1 FROM employees)")
+		var exists bool
+		h.entry.pgPool.QueryRow(context.Background(), "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='employees')").Scan(&exists)
+		if !exists {
+			_, err := h.entry.pgPool.Exec(context.Background(), "CREATE TABLE employees (id SERIAL PRIMARY KEY, first_name TEXT NOT NULL)")
+			if err != nil {
+				t.Fatalf("create employees (PG): %v", err)
+			}
+			_, err = h.entry.pgPool.Exec(context.Background(), "INSERT INTO employees (first_name) VALUES ('Alice'),('Bob'),('Charlie'),('David'),('Eve'),('Frank'),('Grace')")
+			if err != nil {
+				t.Fatalf("seed employees (PG): %v", err)
+			}
+		}
+	}
+	if h.entry.sqlDB != nil {
+		var count int
+		h.entry.sqlDB.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='employees' AND table_schema=DATABASE()").Scan(&count)
+		if count == 0 {
+			_, err := h.entry.sqlDB.ExecContext(context.Background(), "CREATE TABLE employees (id INT AUTO_INCREMENT PRIMARY KEY, first_name VARCHAR(255) NOT NULL)")
+			if err != nil {
+				t.Fatalf("create employees (MySQL): %v", err)
+			}
+			_, err = h.entry.sqlDB.ExecContext(context.Background(), "INSERT IGNORE INTO employees (id,first_name) VALUES (1,'Alice'),(2,'Bob'),(3,'Charlie'),(4,'David'),(5,'Eve'),(6,'Frank'),(7,'Grace')")
+			if err != nil {
+				t.Fatalf("seed employees (MySQL): %v", err)
+			}
+		}
 	}
 }
