@@ -549,6 +549,8 @@ func TestLeak_Cancel_PG(t *testing.T) {
 func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 	t.Helper()
 	h, err := m.Get(context.Background(), cfg)
-	if err != nil { t.Skipf("db unavailable: %v", err) }
+	if err != nil {
+		t.Skipf("db unavailable: %v", err)
+	}
 	return h
 }
