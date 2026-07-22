@@ -140,7 +140,9 @@ func TestTables_PG(t *testing.T) {
 		t.Fatalf("Tables: %v", err)
 	}
 	if len(tables) == 0 {
-		if len(tables) == 0 { t.Skip("no tables in public schema") }
+		if len(tables) == 0 {
+			t.Skip("no tables in public schema")
+		}
 	}
 	t.Logf("PG tables: %d", len(tables))
 }
@@ -155,7 +157,9 @@ func TestTables_MySQL(t *testing.T) {
 		t.Fatalf("Tables: %v", err)
 	}
 	if len(tables) == 0 {
-		if len(tables) == 0 { t.Skip("no tables in database") }
+		if len(tables) == 0 {
+			t.Skip("no tables in database")
+		}
 	}
 	t.Logf("MySQL tables: %d", len(tables))
 }
