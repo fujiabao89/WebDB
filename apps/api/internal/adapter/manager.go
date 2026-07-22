@@ -324,11 +324,9 @@ func (h *PoolHandle) Schemas(ctx context.Context) ([]Schema, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-		defer cancel()
-	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
 		return pgSchemas(ctx, h.entry.pgPool)
@@ -344,18 +342,14 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string) ([]Table, error)
 	}
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
-		if _, ok := ctx.Deadline(); !ok {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-			defer cancel()
-		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
+		defer cancel()
 		return pgTables(ctx, h.entry.pgPool, schema)
 	case EngineMySQL:
-		if _, ok := ctx.Deadline(); !ok {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-			defer cancel()
-		}
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
+		defer cancel()
 		return mysqlTables(ctx, h.entry.sqlDB, schema)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
@@ -365,16 +359,9 @@ func (h *PoolHandle) Columns(ctx context.Context, schema, table string) ([]Colum
 	if err := h.check(); err != nil {
 		return nil, err
 	}
-	if _, ok := ctx.Deadline(); !ok {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-		defer cancel()
-		if _, ok := ctx.Deadline(); !ok {
-			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-			defer cancel()
-		}
-	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
 		return pgColumns(ctx, h.entry.pgPool, schema, table)
