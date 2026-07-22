@@ -358,6 +358,11 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string) ([]Table, error)
 		}
 		return pgTables(ctx, h.entry.pgPool, schema)
 	case EngineMySQL:
+			if _, ok := ctx.Deadline(); !ok {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+			}
 		return mysqlTables(ctx, h.entry.sqlDB, schema)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
@@ -367,6 +372,16 @@ func (h *PoolHandle) Columns(ctx context.Context, schema, table string) ([]Colum
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+			if _, ok := ctx.Deadline(); !ok {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+			if _, ok := ctx.Deadline(); !ok {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+				defer cancel()
+			}
+			}
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
 		return pgColumns(ctx, h.entry.pgPool, schema, table)
