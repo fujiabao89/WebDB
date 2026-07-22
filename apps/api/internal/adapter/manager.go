@@ -590,7 +590,9 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 	return dst, total, nil
 }
 func extractLastValues(rows [][]any, specs []sortSpec) []any {
-	if len(rows) == 0 { return nil }
+	if len(rows) == 0 {
+		return nil
+	}
 	last := rows[len(rows)-1]
 	vals := make([]any, len(specs)*2)
 	for i := range specs {
