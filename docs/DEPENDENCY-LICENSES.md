@@ -35,7 +35,7 @@
 
 ## 合规说明
 
-- Go 依赖均与 AL2.0 兼容（MIT/BSD/Apache 2.0）。
+- Go 依赖均与 AL2.0 兼容（MIT/BSD/Apache 2.0/MPL-2.0）。
 - PostgreSQL/nginx/node Docker 镜像均与 AL2.0 兼容。
 - MySQL GPLv2 仅用于 Compose 演示容器，不嵌入 WebDB，不与项目代码链接。
 - 无 AGPL、SSPL 或商业受限许可证。

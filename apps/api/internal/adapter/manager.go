@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	defaultMaxOpen     = 10
-	defaultMaxIdle     = 2
-	connAcquireTimeout = 5 * time.Second
-	maxConnLTMin       = 27 * time.Minute
-	maxConnLTMax       = 30 * time.Minute
+	defaultMaxOpen      = 10
+	defaultMaxIdle      = 2
+	connAcquireTimeout  = 5 * time.Second
+	maxConnLTMin        = 27 * time.Minute
+	maxConnLTMax        = 30 * time.Minute
+	defaultQueryTimeout = 60 * time.Second
 )
 
 type poolEntry struct {
@@ -174,7 +175,7 @@ func isLocalHost(h string) bool {
 
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
 	cs := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=disable",
-		url.QueryEscape(cfg.User), url.QueryEscape(cfg.Password), cfg.Host, cfg.Port, url.QueryEscape(cfg.Database))
+		url.PathEscape(cfg.User), url.PathEscape(cfg.Password), cfg.Host, cfg.Port, url.PathEscape(cfg.Database))
 	pc, err := pgxpool.ParseConfig(cs)
 	if err != nil {
 		return nil, wrapError(ErrConnectionFailed, err)
@@ -182,6 +183,8 @@ func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry 
 	pc.MaxConns = int32(normInt(cfg.MaxOpen, defaultMaxOpen))
 	pc.MinConns = int32(normInt(cfg.MaxIdle, defaultMaxIdle))
 	pc.MaxConnLifetime = maxConnLT(time.Now().UnixNano())
+	pc.MaxConnIdleTime = 5 * time.Minute
+	pc.HealthCheckPeriod = 30 * time.Second
 	if cfg.TLS == TLSRequire {
 		pc.ConnConfig.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
@@ -355,7 +358,7 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if err != nil {
 		return nil, err
 	}
-	if result.NextToken != nil {
+	if result.NextToken != nil && result.TotalReturned < req.MaxRows {
 		pv := extractLastValues(result.Rows, specs)
 		plan := &PagePlan{SQL: req.SQL, Args: req.Args, SortKeys: req.SortKeys, LastSortValues: pv,
 			PageSize: req.PageSize, MaxRows: req.MaxRows, CumulativeCount: result.TotalReturned,
@@ -453,11 +456,14 @@ func (h *PoolHandle) execQuery(ctx context.Context, sql string, args []any, limi
 		effPage = rem
 	}
 	mf := effPage + 1
+	// 应用服务端执行超时，防止无界等待池连接或长时间运行查询
+	qCtx, cancel := context.WithTimeout(ctx, defaultQueryTimeout)
+	defer cancel()
 	if h.entry.pgPool != nil {
-		return h.execPG(ctx, sql, args, mf, effPage, cumCount, mpb, mcb)
+		return h.execPG(qCtx, sql, args, mf, effPage, cumCount, mpb, mcb)
 	}
 	if h.entry.sqlDB != nil {
-		return h.execMySQL(ctx, sql, args, mf, effPage, cumCount, mpb, mcb)
+		return h.execMySQL(qCtx, sql, args, mf, effPage, cumCount, mpb, mcb)
 	}
 	return nil, newError(ErrPoolClosed, "no connection", nil)
 }
@@ -488,7 +494,7 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
-			return nil, wrapError(ErrDatabaseError, err)
+			return nil, mapExecError(err)
 		}
 		dd, cb, err := copyAndMeasure(vals, maxCell)
 		if err != nil {
@@ -505,7 +511,7 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapExecError(err)
 	}
 	hasMore := rc > effPage
 	if hasMore {
@@ -526,7 +532,7 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	defer rows.Close()
 	cn, err := rows.Columns()
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapExecError(err)
 	}
 	colInfos := make([]ColumnInfo, len(cn))
 	for i, n := range cn {
@@ -542,7 +548,7 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, wrapError(ErrDatabaseError, err)
+			return nil, mapExecError(err)
 		}
 		dd, cb, err := copyAndMeasure(vals, maxCell)
 		if err != nil {
@@ -559,7 +565,7 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapExecError(err)
 	}
 	hasMore := rc > effPage
 	if hasMore {
