@@ -326,7 +326,7 @@ func (h *PoolHandle) Schemas(ctx context.Context) ([]Schema, error) {
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
 	}
 	switch h.entry.cfg.Engine {
@@ -346,14 +346,14 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string) ([]Table, error)
 	case EnginePostgreSQL:
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 			defer cancel()
 		}
 		return pgTables(ctx, h.entry.pgPool, schema)
 	case EngineMySQL:
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 			defer cancel()
 		}
 		return mysqlTables(ctx, h.entry.sqlDB, schema)
@@ -367,11 +367,11 @@ func (h *PoolHandle) Columns(ctx context.Context, schema, table string) ([]Colum
 	}
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
 		if _, ok := ctx.Deadline(); !ok {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, 30*time.Second)
+			ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 			defer cancel()
 		}
 	}
