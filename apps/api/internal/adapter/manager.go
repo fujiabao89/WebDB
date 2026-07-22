@@ -199,7 +199,9 @@ func (m *AdapterManager) createMySQL(ctx context.Context, cfg ConnectConfig, ent
 	mc := mysql.NewConfig()
 	mc.User, mc.Passwd, mc.Net = cfg.User, cfg.Password, "tcp"
 	mc.Addr, mc.DBName = fmt.Sprintf("%s:%d", cfg.Host, cfg.Port), cfg.Database
-	if cfg.TLS != TLSRequire {
+	if cfg.TLS == TLSRequire {
+		mc.TLSConfig = "true"
+	} else {
 		mc.AllowFallbackToPlaintext = true
 	}
 	db, err := sql.Open("mysql", mc.FormatDSN())
@@ -588,13 +590,12 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 	return dst, total, nil
 }
 func extractLastValues(rows [][]any, specs []sortSpec) []any {
-	if len(rows) == 0 {
-		return nil
-	}
+	if len(rows) == 0 { return nil }
 	last := rows[len(rows)-1]
-	vals := make([]any, len(specs))
+	vals := make([]any, len(specs)*2)
 	for i := range specs {
-		vals[i] = last[i]
+		vals[i*2] = last[i] == nil
+		vals[i*2+1] = last[i]
 	}
 	return vals
 }

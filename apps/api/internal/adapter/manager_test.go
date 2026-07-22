@@ -545,3 +545,10 @@ func TestLeak_Cancel_PG(t *testing.T) {
 	}
 	t.Logf("PG cancel leak check passed")
 }
+func TestKeyset_SQL_v2(t *testing.T) {
+	specs, _ := buildSortSpecs([]SortKey{{Column: "id", Order: SortAsc, NullsLast: false}})
+	sql, args, err := buildWrappedSQL("SELECT id, first_name FROM employees", specs, EnginePostgreSQL, []any{int32(3)}, nil, 4)
+	if err != nil { t.Fatalf("err: %v", err) }
+	t.Logf("SQL: %s", sql)
+	t.Logf("Args: %v", args)
+}
