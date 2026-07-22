@@ -181,10 +181,14 @@ func isLocalHost(h string) bool {
 	return h == "localhost" || h == "127.0.0.1" || h == "demo-pg" || h == "demo-mysql"
 }
 
-// isExplainSQL 判断是否为 EXPLAIN 查询，不对其进行 keyset 包装。
+// isExplainSQL 判断是否为安全的 EXPLAIN 查询（仅生成执行计划，不实际执行）。
+// EXPLAIN ANALYZE 在 PostgreSQL 中实际执行语句，必须拒绝透传，防止绕过只读保护。
 func isExplainSQL(sql string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(sql))
-	return strings.HasPrefix(upper, "EXPLAIN") || strings.HasPrefix(upper, "DESCRIBE")
+	if strings.HasPrefix(upper, "EXPLAIN") {
+		return !strings.Contains(upper, "ANALYZE")
+	}
+	return strings.HasPrefix(upper, "DESCRIBE")
 }
 
 func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry *poolEntry) (*poolEntry, error) {
