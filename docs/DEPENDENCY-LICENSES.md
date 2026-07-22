@@ -11,6 +11,8 @@
 | github.com/google/uuid | v1.6.0 | BSD 3-Clause | direct |
 | github.com/jackc/pgx/v5 | v5.10.0 | MIT | direct |
 | github.com/pressly/goose/v3 | v3.27.2 | MIT | direct |
+| github.com/go-sql-driver/mysql | v1.10.0 | MPL-2.0 | direct |
+| filippo.io/edwards25519 | v1.2.0 | BSD 3-Clause | indirect |
 | github.com/jackc/pgpassfile | v1.0.0 | MIT | indirect |
 | github.com/jackc/pgservicefile | v0.0.0 | MIT | indirect |
 | github.com/jackc/puddle/v2 | v2.2.2 | MIT | indirect |

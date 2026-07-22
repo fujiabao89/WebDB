@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 )
 
 func envDef(k, d string) string {
@@ -373,4 +374,174 @@ func TestNextPage_PG_Debug(t *testing.T) {
 		t.Fatalf("raw query: %v", err)
 	}
 	rows.Close()
+}
+
+func TestTimeout_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT pg_sleep(10), id FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc}},
+		PageSize: 10, MaxRows: 100,
+	}
+	_, err := h.Query(ctx, req)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	t.Logf("timeout: %v", err)
+	// Verify pool still works after timeout
+	r2, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}},
+		PageSize: 1, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("pool recovery after timeout: %v", err)
+	}
+	t.Logf("recovery: %d rows", r2.ReturnedRows)
+}
+
+func TestCancel_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT pg_sleep(10), id FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc}},
+		PageSize: 10, MaxRows: 100,
+	}
+	_, err := h.Query(ctx, req)
+	if err == nil {
+		t.Fatal("expected cancel error")
+	}
+	t.Logf("cancel: %v", err)
+	// Verify pool still works
+	r2, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}},
+		PageSize: 1, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("pool recovery after cancel: %v", err)
+	}
+	t.Logf("recovery: %d rows", r2.ReturnedRows)
+}
+
+func TestTimeout_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), myCfg())
+	defer h.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := h.Query(ctx, FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT SLEEP(10), id FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc}}, PageSize: 10, MaxRows: 100,
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	t.Logf("mysql timeout: %v", err)
+	r2, _ := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+	})
+	if r2 != nil {
+		t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+	}
+}
+
+func TestCancel_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), myCfg())
+	defer h.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
+	_, err := h.Query(ctx, FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT SLEEP(10), id FROM employees", Args: nil,
+		SortKeys: []SortKey{{Column: "id", Order: SortAsc}}, PageSize: 10, MaxRows: 100,
+	})
+	if err == nil {
+		t.Fatal("expected cancel error")
+	}
+	t.Logf("mysql cancel: %v", err)
+	r2, _ := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+	})
+	if r2 != nil {
+		t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+	}
+}
+
+func TestLeak_Timeout_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		h.Query(ctx, FirstPageRequest{
+			Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+			SQL:   "SELECT pg_sleep(5), id FROM employees", Args: nil,
+			SortKeys: []SortKey{{Column: "id", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+		})
+		cancel()
+	}
+	r, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("leak check failed after 5 timeouts: %v", err)
+	}
+	if r.ReturnedRows != 1 {
+		t.Fatalf("expected 1 row, got %d", r.ReturnedRows)
+	}
+	t.Logf("PG leak check passed: %d rows after 5 timeouts", r.ReturnedRows)
+}
+
+func TestLeak_Cancel_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h, _ := m.Get(context.Background(), pgCfg())
+	defer h.Release()
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+		h.Query(ctx, FirstPageRequest{
+			Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+			SQL:   "SELECT pg_sleep(5), id FROM employees", Args: nil,
+			SortKeys: []SortKey{{Column: "id", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+		})
+	}
+	r, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		SortKeys: []SortKey{{Column: "n", Order: SortAsc}}, PageSize: 1, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("leak check failed after 5 cancels: %v", err)
+	}
+	if r.ReturnedRows != 1 {
+		t.Fatalf("expected 1 row, got %d", r.ReturnedRows)
+	}
+	t.Logf("PG cancel leak check passed")
 }
