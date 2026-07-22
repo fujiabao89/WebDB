@@ -132,7 +132,7 @@ func buildAfterClause(specs []sortSpec, idx int, engine Engine, pi int) (string,
 func placeholder(engine Engine, n int) string {
 	switch engine {
 	case EnginePostgreSQL:
-		return fmt.Sprintf("$%d", n)
+		return fmt.Sprintf("$%d::integer", n)
 	case EngineMySQL:
 		return "?"
 	default:

@@ -422,16 +422,29 @@ func (h *PoolHandle) Stats() PoolStats {
 }
 
 func (h *PoolHandle) execQuery(ctx context.Context, sql string, args []any, limit int, pageSize int, cumCount int, maxRows int) (*QueryResult, error) {
+	mpb := normInt(h.entry.cfg.MaxPageBytes, defaultMaxPageBytes)
+	if mpb > 16<<20 {
+		mpb = 16 << 20
+	}
+	mcb := normInt(h.entry.cfg.MaxCellBytes, defaultMaxCellBytes)
+	if mcb > 2<<20 {
+		mcb = 2 << 20
+	}
+	effPage := pageSize
+	rem := maxRows - cumCount
+	if rem < effPage {
+		effPage = rem
+	}
+	mf := effPage + 1
 	if h.entry.pgPool != nil {
-		return h.execPG(ctx, sql, args, pageSize, cumCount, maxRows)
+		return h.execPG(ctx, sql, args, mf, effPage, cumCount, mpb, mcb)
 	}
 	if h.entry.sqlDB != nil {
-		return h.execMySQL(ctx, sql, args, pageSize, cumCount, maxRows)
+		return h.execMySQL(ctx, sql, args, mf, effPage, cumCount, mpb, mcb)
 	}
 	return nil, newError(ErrPoolClosed, "no connection", nil)
 }
-
-func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, pageSize, cumCount, maxRows int) (*QueryResult, error) {
+func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
 	rows, err := h.entry.pgPool.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
@@ -443,109 +456,144 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, pageSiz
 		colInfos[i] = ColumnInfo{Name: string(c.Name), DataType: fmt.Sprintf("%d", c.DataTypeOID)}
 	}
 	var data [][]any
-	rowCount := 0
+	rc := 0
+	pb := 0
 	for rows.Next() {
 		vals, err := rows.Values()
 		if err != nil {
 			return nil, wrapError(ErrDatabaseError, err)
 		}
-		dd := make([]any, len(vals))
-		copyDefensive(dd, vals)
+		dd, cb, err := copyAndMeasure(vals, maxCell)
+		if err != nil {
+			return nil, err
+		}
+		pb += cb
+		if pb > maxPage {
+			return nil, newError(ErrResultTooLarge, "page byte limit exceeded", nil)
+		}
 		data = append(data, dd)
-		rowCount++
-		if rowCount >= pageSize+1 {
+		rc++
+		if rc >= maxFetch {
 			break
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
 	}
-	next := rowCount > pageSize
-	if next {
-		data = data[:pageSize]
-		rowCount = pageSize
+	hasMore := rc > effPage
+	if hasMore {
+		data = data[:effPage]
+		rc = effPage
 	}
-	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rowCount, TotalReturned: cumCount + rowCount}
-	if next && (maxRows == 0 || cumCount+rowCount < maxRows) {
-		result.NextToken = &[]string{"x"}[0]
+	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: cumCount + rc}
+	if hasMore {
+		result.NextToken = &[]string{"_"}[0]
 	}
 	return result, nil
 }
-
-func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, pageSize, cumCount, maxRows int) (*QueryResult, error) {
+func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell int) (*QueryResult, error) {
 	rows, err := h.entry.sqlDB.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
 	}
 	defer rows.Close()
-	colNames, err := rows.Columns()
+	cn, err := rows.Columns()
 	if err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
 	}
-	colInfos := make([]ColumnInfo, len(colNames))
-	for i, n := range colNames {
+	colInfos := make([]ColumnInfo, len(cn))
+	for i, n := range cn {
 		colInfos[i] = ColumnInfo{Name: n}
 	}
 	var data [][]any
-	rowCount := 0
+	rc := 0
+	pb := 0
 	for rows.Next() {
-		vals := make([]any, len(colNames))
-		ptrs := make([]any, len(colNames))
+		vals := make([]any, len(cn))
+		ptrs := make([]any, len(cn))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, wrapError(ErrDatabaseError, err)
 		}
-		dd := make([]any, len(vals))
-		copyDefensive(dd, vals)
+		dd, cb, err := copyAndMeasure(vals, maxCell)
+		if err != nil {
+			return nil, err
+		}
+		pb += cb
+		if pb > maxPage {
+			return nil, newError(ErrResultTooLarge, "page byte limit exceeded", nil)
+		}
 		data = append(data, dd)
-		rowCount++
-		if rowCount >= pageSize+1 {
+		rc++
+		if rc >= maxFetch {
 			break
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
 	}
-	next := rowCount > pageSize
-	if next {
-		data = data[:pageSize]
-		rowCount = pageSize
+	hasMore := rc > effPage
+	if hasMore {
+		data = data[:effPage]
+		rc = effPage
 	}
-	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rowCount, TotalReturned: cumCount + rowCount}
-	if next && (maxRows == 0 || cumCount+rowCount < maxRows) {
-		result.NextToken = &[]string{"x"}[0]
+	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: cumCount + rc}
+	if hasMore {
+		result.NextToken = &[]string{"_"}[0]
 	}
 	return result, nil
 }
-
-func copyDefensive(dst, src []any) {
-	for i, v := range src {
+func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
+	dst := make([]any, len(vals))
+	total := 0
+	for i, v := range vals {
+		if v == nil {
+			dst[i] = nil
+			continue
+		}
 		switch val := v.(type) {
 		case []byte:
+			if len(val) > maxCell {
+				return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+			}
 			b := make([]byte, len(val))
 			copy(b, val)
 			dst[i] = b
+			total += len(b)
+		case string:
+			if len(val) > maxCell {
+				return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+			}
+			dst[i] = val
+			total += len(val)
+		case float64:
+			dst[i] = val
+			total += 8
+		case int64:
+			dst[i] = val
+			total += 8
+		case bool:
+			dst[i] = val
+			total += 1
+		case time.Time:
+			dst[i] = val
+			total += 32
 		default:
 			dst[i] = val
+			total += 64
 		}
 	}
+	return dst, total, nil
 }
-
 func extractLastValues(rows [][]any, specs []sortSpec) []any {
 	if len(rows) == 0 {
 		return nil
 	}
 	last := rows[len(rows)-1]
 	vals := make([]any, len(specs))
-	for i, s := range specs {
-		for _, ci := range last {
-			if ci == nil {
-				continue
-			}
-		}
-		_ = s
+	for i := range specs {
 		vals[i] = last[i]
 	}
 	return vals
