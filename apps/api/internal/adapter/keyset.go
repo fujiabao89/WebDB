@@ -127,7 +127,7 @@ func (b *ksBuilder) buildAfter(idx int) string {
 	if idx+1 < len(b.specs) {
 		lr2 := fmt.Sprintf("(CASE WHEN %s THEN %d ELSE %d END)", b.phNull(idx), s.nullRank, s.nonNullRank)
 		eq := fmt.Sprintf("(%s = %s AND (%s = %d OR %s = %s))", cr, lr2, cr, s.nullRank, col, b.phVal(idx))
-		af += fmt.Sprintf(" OR (%s AND %s)", eq, b.buildAfter(idx+1))
+		af += fmt.Sprintf(" OR (%s AND (%s))", eq, b.buildAfter(idx+1))
 	}
 	return af
 }

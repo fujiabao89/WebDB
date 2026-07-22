@@ -142,6 +142,7 @@ func (r *ContinuationRegistry) replace(oldToken, newToken string, plan *PagePlan
 	if r.closed {
 		return newError(ErrPoolClosed, "registry closed", nil)
 	}
+	plan.inUse = false // 在锁内清除 inUse，消除 replace 前竞态窗口
 	delete(r.tokens, oldToken)
 	r.tokens[newToken] = plan
 	return nil

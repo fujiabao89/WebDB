@@ -186,6 +186,9 @@ func (m *AdapterManager) createPG(ctx context.Context, cfg ConnectConfig, entry 
 		return nil, wrapError(ErrConnectionFailed, err)
 	}
 	pc.ConnConfig.Host = cfg.Host
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return nil, newError(ErrInvalidConfig, "port out of range", nil)
+	}
 	pc.ConnConfig.Port = uint16(cfg.Port)
 	pc.ConnConfig.User = cfg.User
 	pc.ConnConfig.Password = cfg.Password
@@ -449,7 +452,6 @@ func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, tok
 		h.entry.manager.registry.expire(token)
 	} else {
 		plan.LastSortValues = extractLastValues(result.Rows, specs)
-		plan.inUse = false // 清除 claim 设置的 inUse，确保下一页可 claim
 		newTok, _ := genToken()
 		h.entry.manager.registry.replace(token, newTok, plan)
 		result.NextToken = &newTok
@@ -675,7 +677,11 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 					return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
 				}
 				dst[i] = val
-				total += size * 8
+				elemSize := int(rv.Type().Elem().Size())
+				if elemSize < 8 {
+					elemSize = 8
+				}
+				total += size * elemSize
 			default:
 				dst[i] = val
 				total += 64
