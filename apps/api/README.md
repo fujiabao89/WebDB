@@ -1,6 +1,6 @@
 # API 与执行服务
 
-这里是 WebDB 的 Go 模块化单体入口。当前 P0 已实现 `GET /health`、数据库 Adapter（PostgreSQL/MySQL 双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）和审计事件记录。SQL 只读策略由后续 P0-04 策略层负责，当前阶段依赖数据库只读账户（demo_reader）限制操作。按照安全边界，只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
+这里是 WebDB 的 Go 模块化单体入口。当前 P0 已实现 `GET /health`、数据库 Adapter（PostgreSQL/MySQL 双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）。SQL 只读策略由后续 P0-04 策略层负责，审计事件记录由 P0-05 负责，当前阶段依赖数据库只读账户（demo_reader）限制操作。按照安全边界，只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
 
 ## 工具链
 
