@@ -22,8 +22,8 @@
 **关键发现**：
 - P0-03 Adapter 不执行 SQL 安全裁决（代码注释："P0-03 不实现 SQL 安全裁决（P0-04 职责）"）
 - `FirstPageRequest.SQL` 是原始字符串，无任何预检查
-- `PageSize` 和 `MaxRows` 有默认值/上限（100/500），但由 Adapter 硬编码，未按连接策略取值
-- `NextPage` 仅验证 scope 和 token 匹配，不重新验证成员资格和连接策略
+- Adapter `PageSize` 上限为 500（超过则钳制），但 **`MaxRows` 仅在请求值 ≤0 时默认 500，正值直接透传** — P0-04 策略层需基于 ConnectionPolicy 实施硬上限
+- `NextPage` 验证 token scope/user/connection_id/pool_generation 匹配，但**不重新验证成员资格和连接策略** — P0-04 需补充重新授权
 
 ### 1.2 Adapter 稳定错误码
 
@@ -160,7 +160,7 @@ P0-04 需要扩展此允许列表以支持执行审计字段（statement_hash、
 | **单语句检测** | 含分号的 SQL、注释隐藏多语句 | 返回 statement 列表长度 ≥2 时拒绝 |
 | **许可证枚举** | 在隔离临时 module 中枚举所有直接和传递依赖的 LICENSE 文件（`go mod download` + 扫描各模块缓存目录）；生成完整报告 | 无 GPL/AGPL/SSPL/未知许可证；候选许可证仅写入 Spike 报告，正式批准依赖后才更新 `docs/DEPENDENCY-LICENSES.md` |
 
-Spike 结果写入 `docs/tasks/P0-04-spike-report.md`，通过后 Owner 批准新增依赖。
+Spike 结果写入 `docs/tasks/P0-04-spike-report.md`（该文件为 Spike 阶段产物，当前尚未创建；本提案冻结后进入 Spike 阶段时生成），通过后 Owner 批准新增依赖。
 
 **Spike 隔离边界**：
 
@@ -645,7 +645,8 @@ allowed := map[string]bool{
 - `statement_hash` 必须是 64 字符 hex 格式（单元测试验证）
 - `error_code` 必须是稳定业务错误码，不得包含 `pq:` 或 `MySQL Error` 前缀
 - `engine`/`environment` 必须是已知枚举值
-- 所有字段受现有 `looksLikeSQL()`/`looksLikeCredential()` 检测和 500 字符截断保护
+- `statement_hash`/`error_code`/`reason_code`/`engine`/`environment`/`row_count`/`duration_ms` 为已知稳定枚举或固定格式值，**必须豁免 `looksLikeCredential()` 的通用检测**（当前实现会因含 `token` 子串而误杀 `invalid_page_token`）；其他通用字符串字段仍受 `looksLikeSQL()`/`looksLikeCredential()` 和 500 字符截断保护
+- 实施时需同步更新 `sanitizeAuditMetadata()`：为 error_code/reason_code 添加白名单前缀（如 `invalid_`、`sql_`、`query_`、`connection_`、`rate_`、`result_`、`database_`、`audit_`、`internal_`、`statement_`、`multiple_`、`unsupported_`、`read_`、`policy_`、`forbidden`、`unauthorized`、`stale_`、`config_`、`pagination_`），或改用精确枚举匹配
 - SQL 正文、Args、结果、原始数据库错误、密码、secret_ref 仍被拒绝
 
 ### 8.6 审计写入失败：分阶段 fail-closed（修订）
