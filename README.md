@@ -1,6 +1,6 @@
 # WebDB
 
-WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架、Docker Compose 本地环境、健康检查和演示数据库只读权限基线；当前 API 只提供健康端点，尚未实现数据库工作台业务功能。
+WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架和 Docker Compose 本地环境；P0-02 已完成元数据库迁移；P0-03 已完成数据库 Adapter（双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）。
 
 ## 仓库结构
 

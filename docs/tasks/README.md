@@ -4,7 +4,7 @@
 
 | 优先级 | 任务 | 状态 | 依赖 |
 | --- | --- | --- | --- |
-| 1 | [P0-03 数据库 Adapter 契约](P0-03-database-adapter-contract.md) | Ready | P0-01 的目录/工具链骨架 |
+| 1 | [P0-03 数据库 Adapter 契约](P0-03-database-adapter-contract.md) | Done | P0-01 的目录/工具链骨架 |
 | 1 | [P0-04 SQL 安全执行策略](P0-04-sql-safety-policy.md) | Ready | P0-03 的执行边界 |
 | 2 | [P0-01 工程骨架与 Compose](P0-01-project-skeleton-and-compose.md) | Done | 无 |
 | 2 | [P0-02 元数据库与迁移](P0-02-metadata-and-migrations.md) | Done | P0-01、ADR-013 |

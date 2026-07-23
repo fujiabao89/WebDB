@@ -1,6 +1,6 @@
 # P0-03：数据库 Adapter 契约
 
-> 状态：Ready｜风险：High｜依赖：P0-01、ADR-001、ADR-002、ADR-008｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：Done｜风险：High｜依赖：P0-01、ADR-001、ADR-002、ADR-008｜实现者：Claude Code｜独立审查：Codex｜PR：#12
 
 ## 目标与范围
 
@@ -20,3 +20,10 @@
 ## 实施约束与交接
 
 不得在 Adapter 内以字符串判断 SQL 安全性；P0-04 是唯一策略裁决层。先提交接口与测试矩阵供审查，再接入 API。任何驱动能力差异需形成支持矩阵和明确错误码。
+
+## 完成情况
+
+- 完成时间：2026-07-23
+- 代码量：1,754 行生产代码（9 个 Go 源文件），771 行测试代码（24 个集成测试）
+- ADR：ADR-008 已追加 PostgreSQL MaxIdle 差异说明
+- 延期项：1 项 — MySQL []byte 文本值暂不转 string（需 ColumnTypes 类型感知重构）
