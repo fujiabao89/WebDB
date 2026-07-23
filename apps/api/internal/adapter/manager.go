@@ -130,7 +130,6 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 		}
 		// 调用方有更新的 ConfigRevision，需跳出重试循环重新创建池
 		if cfg.ConfigRevision > cr {
-			m.mu.Unlock()
 			goto createPool
 		}
 		if ex, ok := m.pools[cid]; ok && !ex.isClosed() {
