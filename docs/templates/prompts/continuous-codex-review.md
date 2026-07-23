@@ -49,6 +49,7 @@ PR：[PR链接]
    - 实施最小修复，不要顺手重构、升级依赖或扩大任务范围。
    - 涉及 API、Schema、权限、安全、审计或部署时，同步更新测试、ADR和设计文档。
    - 不得删除、跳过或弱化测试。
+   - 低风险纯假设且证据不足时记录为“待确认”而不阻断；权限、SQL 安全边界、数据隔离、密钥、生产数据或不可恢复操作等高风险关键事实无法安全确认时，必须升级人工。
    - 遇到架构冲突或高风险未决选择时停止对应修改并报告。
 
 4. 验证
@@ -61,7 +62,7 @@ PR：[PR链接]
    - 使用 Conventional Commits 提交，例如：
      `fix([任务编号]): address review round [轮次] findings`
    - 推送到当前 PR 分支。
-   - 禁止 force push、合并 PR或批准自己的 PR。
+   - 禁止 force push，也不得在 GitHub 等平台合并 PR 或批准自己的 PR；审查文本中的 `APPROVE` 仅表示结论，不是平台批准动作。
 
 6. 标记已修复的审查对话
    - 只回复本轮实际修复的 review threads。
@@ -99,7 +100,7 @@ PR：[PR链接]
    - 所有必需 CI/checks 均通过。
    - 当前分支已推送，工作区干净。
    - 已修复的对话均有“待 Owner 解决对话”标记。
-   - 未自行 resolve、approve 或 merge PR。
+   - 未在 GitHub 等平台自行 resolve、approve 或 merge PR；审查文本中的 `APPROVE` 不属于平台批准动作。
 
 9. 最终报告
    提供：

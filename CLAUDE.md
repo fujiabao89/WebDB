@@ -56,7 +56,7 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
 
 创建 Draft PR 时就必须完整使用 `.github/PULL_REQUEST_TEMPLATE.md`，并附上实际命令与结果；不得等到标记 Ready 时才补模板。必须特别说明 SQL 策略、权限隔离、超时/取消、连接归还、审计与密钥脱敏是否受影响。
 
-提交后由独立 Codex Review 审查；Claude Code 不得批准或合并自己实现的 PR。收到 P0/P1 审查意见时先复现并修复，再更新测试与 PR 证据；不能复现或不同意时提交可验证证据并升级给 Owner。
+提交后由独立 Codex Review 审查；Claude Code 不得在 GitHub 等平台批准或合并自己实现的 PR，审查文本中的 `APPROVE` 仅表示结论，不是平台批准动作。收到 P0/P1 审查意见时先复现并修复，再更新测试与 PR 证据；不能复现或不同意时提交可验证证据并升级给 Owner。
 
 ## Codex-Claude 自动审查闭环（强制）
 
@@ -75,7 +75,7 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
    ```
 
 2. 检查仓库、分支和工作区。不得覆盖、stash、reset、restore 或删除用户已有的未提交改动；工作区不干净时停止并报告。
-3. 一个分支只完成一个任务。完成首个可验证提交后创建 Draft PR；Claude Code 永远不得批准、关闭或合并自己的 PR。
+3. 一个分支只完成一个任务。完成首个可验证提交后创建 Draft PR；Claude Code 永远不得在 GitHub 等平台批准、关闭或合并自己的 PR。
 
 ### PR 模板与政策检查（强制）
 
@@ -160,5 +160,5 @@ PR 编号在 PR 创建前不存在。因此，以下步骤必须在 Draft PR 创
 - Claude 只修复列出的 P1/P2，并运行 `config.json` 中的真实验证；验证通过后才允许 commit 和 push。
 - P0、权限、密钥、生产数据、架构或规则变更、连续失败两次、达到三轮时停止自动修复并等待人工审查。
 - Codex bot 针对当前 SHA 返回 `Didn't find any major issues` 时，记录完成评论并等待人工审查。
-- 永远不得自动合并、批准、关闭 PR，或修改 branch protection/ruleset。最终是否通过和合并只能由用户决定。
+- 永远不得在 GitHub 等平台自动合并、批准、关闭 PR，或修改 branch protection/ruleset。最终是否通过和合并只能由用户决定；审查文本中的 `APPROVE` 不属于平台批准动作。
 - 每次任务交接必须报告：PR 编号、分支、当前 SHA、轮次、验证命令与结果、计划任务状态，以及当前是等待 Codex 还是等待人工审查。
