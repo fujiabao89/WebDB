@@ -1,6 +1,6 @@
 # API 与执行服务
 
-这里是 WebDB 的 Go 模块化单体入口。当前 P0-01 仅实现 `GET /health`；数据库 Adapter、SQL 策略、连接池和审计能力将在后续 P0 任务中加入。按照安全边界，未来也只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
+这里是 WebDB 的 Go 模块化单体入口。当前 P0 已实现 `GET /health`、数据库 Adapter（PostgreSQL/MySQL 双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）。SQL 只读策略由后续 P0-04 策略层负责，审计事件记录由 P0-05 负责，当前阶段依赖数据库只读账户（demo_reader）限制操作。按照安全边界，只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
 
 ## 工具链
 
@@ -26,6 +26,8 @@ go -C apps/api run ./cmd/server
 go -C apps/api test ./...
 go -C apps/api vet ./...
 test -z "$(gofmt -l apps/api)"
+go -C apps/api test -tags=integration ./internal/adapter/...
+go -C apps/api test -tags=integration ./internal/metadata/...
 ```
 
 Docker 镜像验证同样从仓库根目录执行：

@@ -104,6 +104,18 @@ jobs:
           --health-interval 5s
           --health-timeout 3s
           --health-retries 5
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: change_me
+          MYSQL_DATABASE: webdb_demo
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -115,7 +127,7 @@ jobs:
         run: go vet ./...
       - name: Test
         run: go test ./...
-      - name: Integration test
+      - name: Metadata integration test
         run: go test -tags=integration ./internal/metadata/...
         env:
           META_DB_HOST: localhost
@@ -123,6 +135,52 @@ jobs:
           META_DB_USER: webdb
           META_DB_PASSWORD: change_me
           META_DB_NAME: webdb_meta
+      - name: Setup read-only demo users
+        run: |
+          PGPASSWORD=change_me psql -h localhost -U webdb -d webdb_meta -c "
+            DO \$\$
+            BEGIN
+              IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname='demo_reader') THEN
+                CREATE ROLE demo_reader WITH LOGIN PASSWORD 'change_me';
+              END IF;
+            END
+            \$\$;
+            GRANT CONNECT ON DATABASE webdb_meta TO demo_reader;
+            GRANT USAGE ON SCHEMA public TO demo_reader;
+            GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_reader;
+            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO demo_reader;
+          "
+          mysql -h 127.0.0.1 -u root -pchange_me -e "
+            CREATE USER IF NOT EXISTS 'demo_reader'@'%' IDENTIFIED BY 'change_me';
+            GRANT SELECT ON webdb_demo.* TO 'demo_reader'@'%';
+            FLUSH PRIVILEGES;
+          " 2>/dev/null || true
+      - name: Seed test data (admin)
+        run: |
+          PGPASSWORD=change_me psql -h localhost -U webdb -d webdb_meta -c "
+            CREATE TABLE IF NOT EXISTS employees (id SERIAL PRIMARY KEY, first_name TEXT NOT NULL);
+            INSERT INTO employees (first_name) VALUES
+              ('Alice'),('Bob'),('Charlie'),('David'),('Eve'),('Frank'),('Grace')
+            ON CONFLICT DO NOTHING;
+          "
+          mysql -h 127.0.0.1 -u root -pchange_me webdb_demo -e "
+            CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, first_name VARCHAR(255) NOT NULL);
+            INSERT IGNORE INTO employees (id,first_name) VALUES
+              (1,'Alice'),(2,'Bob'),(3,'Charlie'),(4,'David'),(5,'Eve'),(6,'Frank'),(7,'Grace');
+          "
+      - name: Adapter integration test
+        run: go test -tags=integration ./internal/adapter/...
+        env:
+          DEMO_PG_HOST: localhost
+          DEMO_PG_PORT: "5432"
+          DEMO_PG_USER: demo_reader
+          DEMO_PG_PASSWORD: change_me
+          DEMO_PG_NAME: webdb_meta
+          DEMO_MYSQL_HOST: 127.0.0.1
+          DEMO_MYSQL_PORT: "3306"
+          DEMO_MYSQL_USER: demo_reader
+          DEMO_MYSQL_PASSWORD: change_me
+          DEMO_MYSQL_NAME: webdb_demo
 
   contracts:
     name: Contracts checks

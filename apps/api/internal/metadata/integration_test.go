@@ -65,14 +65,6 @@ func setupDB(t *testing.T) (*sql.DB, func()) {
 	}
 
 	cleanup := func() {
-		db.ExecContext(ctx, `DELETE FROM audit_events`)
-		db.ExecContext(ctx, `DELETE FROM executions`)
-		db.ExecContext(ctx, `DELETE FROM connection_policies`)
-		db.ExecContext(ctx, `DELETE FROM connections`)
-		db.ExecContext(ctx, `DELETE FROM credential_envelopes`)
-		db.ExecContext(ctx, `DELETE FROM workspace_members`)
-		db.ExecContext(ctx, `DELETE FROM workspaces`)
-		db.ExecContext(ctx, `DELETE FROM users`)
 		db.Close()
 	}
 	return db, cleanup
@@ -137,14 +129,6 @@ func setupFull(t *testing.T) (*sql.DB, *PGStore, *User, *Workspace, *WorkspaceMe
 	}
 
 	cleanup := func() {
-		db.ExecContext(ctx, `DELETE FROM audit_events`)
-		db.ExecContext(ctx, `DELETE FROM executions`)
-		db.ExecContext(ctx, `DELETE FROM connection_policies`)
-		db.ExecContext(ctx, `DELETE FROM connections`)
-		db.ExecContext(ctx, `DELETE FROM credential_envelopes`)
-		db.ExecContext(ctx, `DELETE FROM workspace_members`)
-		db.ExecContext(ctx, `DELETE FROM workspaces`)
-		db.ExecContext(ctx, `DELETE FROM users`)
 		db.Close()
 	}
 	return db, store, u, ws, m, env, conn, cleanup
