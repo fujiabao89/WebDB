@@ -210,8 +210,11 @@ type ASTFeatures struct {
     HasIntoOutfile    bool // MySQL INTO OUTFILE/DUMPFILE
     HasIntoVar        bool // MySQL SELECT ... INTO @var
     HasAssignment     bool // MySQL @x := ... 赋值
-    HasExecComment    bool // MySQL /*!version*/ 可执行注释
-    HasExplainAnalyze bool // EXPLAIN ANALYZE
+    HasExecComment     bool // MySQL /*!version*/ 可执行注释
+    HasExplainAnalyze  bool // EXPLAIN ANALYZE
+    HasModifyingCTE    bool // 含数据修改 CTE（INSERT/UPDATE/DELETE/MERGE 在 WITH 中）
+    HasExplainDMLDDL   bool // EXPLAIN 的目标是 DML/DDL
+    HasNestedExplain   bool // 嵌套 EXPLAIN（EXPLAIN EXPLAIN ...）
 }
 
 // ClassificationResult 语句分类结果
@@ -261,10 +264,12 @@ type AuthenticatedPrincipal struct {
     WorkspaceID uuid.UUID // 目标工作区 UUID（从路由/上下文派生）
 }
 
-// ---- FirstPage 与 NextPage 请求（拆分，避免非法状态组合） ----
+// ---- 执行服务请求类型（注意：与 adapter 包的同名类型语义不同） ----
 
-// FirstPageRequest 首次执行请求。
-type FirstPageRequest struct {
+// ExecuteFirstPageRequest 服务层首次执行请求。
+// 与 adapter.FirstPageRequest 的区别：后者由策略层构造并传入 Adapter，
+// 本类型携带 Principal、ConnectionID 和请求方上限，这些字段不进入 Adapter。
+type ExecuteFirstPageRequest struct {
     Principal      AuthenticatedPrincipal
     ConnectionID   uuid.UUID
     SQL            string
@@ -275,11 +280,36 @@ type FirstPageRequest struct {
     RequestTimeout time.Duration     // 0 = 使用策略上限
 }
 
-// NextPageRequest 续页请求。从服务端 continuation 恢复 SQL/Args/排序/上限，不接受调用方重新提交。
-type NextPageRequest struct {
+// ExecuteNextPageRequest 服务层续页请求。从服务端 continuation 恢复 SQL/Args/排序/上限，
+// 不接受调用方重新提交这些字段。
+type ExecuteNextPageRequest struct {
     Principal  AuthenticatedPrincipal
     Token      string
 }
+
+// ---- 服务层 → Adapter 字段映射契约 ----
+// ExecuteFirstPageRequest 经授权后构造 adapter.FirstPageRequest：
+//   adapter.Scope.UserID      ← Principal.UserID
+//   adapter.Scope.WorkspaceID ← Principal.WorkspaceID
+//   adapter.SQL               ← 原始 SQL（经策略层 AST 分类已通过）
+//   adapter.Args              ← 原始 Args（深拷贝，不记录）
+//   adapter.SortKeys          ← SortKeys
+//   adapter.PageSize          ← min(PageSize, effectiveMaxRows)；PageSize≤0 时使用默认值
+//   adapter.MaxRows           ← effectiveMaxRows
+// ExecuteNextPageRequest 的 Token 由服务端 continuation registry 解析，
+// 恢复原始 ExecuteFirstPageRequest 的 SQL/Args/SortKeys 和策略上限后再重新授权；
+// 不将 Token 直接传递给 Adapter。
+
+// ---- Continuation Token 安全属性 ----
+// Token 必须由服务端通过认证加密（AEAD）或签名生成，满足：
+//   - 绑定 Principal（UserID + WorkspaceID）
+//   - 绑定 ConnectionID（防止跨连接重放）
+//   - 绑定 StatementHash（防止 SQL 被替换）
+//   - 绑定生效的策略版本（AllowRead / MaxRows / StatementTimeoutMs 变更后 token 失效）
+//   - 包含明确的过期时间（建议 ≤5 分钟）
+//   - 禁止明文携带 SQL、Args、SortKeys 或结果数据
+//   - 禁止客户端修改 token 后重放（防篡改）
+//   - 每次 NextPage 消费后 token 轮换（防重放）
 
 // 以下由服务端从 Connection 元数据派生，不接受外部输入：
 //   - TraceID      string   // 服务端生成
@@ -367,6 +397,20 @@ type AuthorizedExecution struct {
       └─ DB 错误 → 更新 execution status=failed, error_code=database_error
                    创建 AuditEvent（outcome=failed）
 ```
+### 4.3.1 Adapter 错误码 → 业务错误码 + 审计 outcome 映射
+
+`invalid_page_token` 在 NextPage 前置校验中处理，不进入阶段 D 的 Adapter.Query 流程。
+
+| Adapter 错误码 | 业务错误码 | Execution 状态 | Audit Outcome | 备注 |
+|---|---|---|---|---|
+| `query_timeout` | `query_timeout` | `failed` | `failed` | |
+| `query_cancelled` | `query_cancelled` | `cancelled` | `cancelled` | |
+| `database_error` | `database_error` | `failed` | `failed` | 脱敏原始错误 |
+| `rate_limited` | `rate_limited` | 不创建 execution | — | 请求未到达 Adapter 时由准入层拦截；已到达则映射为 `rate_limited`，不改变 execution 状态 |
+| `connection_busy` | `connection_busy` | 不创建 execution | — | 同上 |
+| `result_too_large` | `result_too_large` | `failed` | `failed` | |
+| `invalid_page_token` | `invalid_page_token` | — | — | NextPage 前置校验拒绝，不进入 Adapter |
+| 其他未匹配错误 | `database_error` | `failed` | `failed` | fail-closed：未知 Adapter 错误均脱敏为 database_error |
 
 ---
 
@@ -446,8 +490,8 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 | `unauthorized` | 未认证 | A | 无有效 Principal |
 | `forbidden` | 非工作区成员 | A | |
 | `connection_not_found` | 连接不存在 | A | 统一不存在/跨工作区/不可见，防枚举 |
-| `policy_not_configured` | 策略未配置 | A | |
-| `read_not_allowed` | 禁止读取 | A | AllowRead != true |
+| `policy_not_configured` | 策略未配置 | A | ConnectionPolicy 行不存在 |
+| `read_not_allowed` | 禁止读取 | A | ConnectionPolicy 存在但 AllowRead != true |
 | `invalid_page_token` | 分页 token 无效 | D | |
 | `sql_parse_error` | SQL 解析失败 | C | 语法错误 |
 | `multiple_statements` | 检测到多条语句 | C | |
@@ -617,6 +661,12 @@ allowed := map[string]bool{
 - 故障注入测试必须覆盖：Execution 创建失败、running 更新失败、Audit append 失败、完成状态更新失败
 - 失败顺序和恢复方式在实施时写入详细契约
 
+**重试与结果恢复策略**：
+- **禁止自动重试**：审计写入失败不触发自动重试；客户端是否重试由调用方决定
+- **阶段 D 完成后审计失败**：Execution 已记录为 `completed`（含 row_count/duration_ms/statement_hash），但结果不返回客户端；客户端可通过 ExecutionID 查询执行状态和审计结果（需 P0-05 认证后提供查询接口）
+- **结果引用恢复**：`result_ref` 在 execution 更新为 `completed` 时已持久化；审计 append 独立失败后，可人工通过 ExecutionID 关联查询结果（结果本身已脱敏存储）
+- **副作用 SELECT 风险**：带副作用的函数（如 SECURITY DEFINER）重复执行是已知残余风险；客户端重试由调用方在理解此风险的前提下决定，执行层不承诺幂等
+
 ### 8.7 跨工作区/前置拒绝的审计
 
 阶段 A 拒绝时（无法确定合法的 actor/workspace FK 对）：
@@ -691,17 +741,20 @@ allowed := map[string]bool{
 | MY-06 | `SELECT * INTO DUMPFILE '/tmp/d' FROM t` | SELECT | HasIntoOutfile | **denied** |
 | MY-07 | `SELECT id INTO @var FROM t` | SELECT | HasIntoVar | **denied** |
 | MY-08 | `SELECT @x := id FROM t` | SELECT | HasAssignment | **denied** |
-| MY-09 | `/*!50000 DROP TABLE t*/ SELECT 1` | — | HasExecComment | **denied** |
-| MY-10 | `/*!40014 SET NAMES utf8mb4*/ SELECT 1` | — | HasExecComment | **denied** |
-| MY-11 | `WITH cte AS (SELECT * FROM t) SELECT * FROM cte` | SELECT | HasCTE | allowed |
-| MY-12 | `WITH d AS (DELETE FROM t) SELECT * FROM d` | — | HasCTE | **denied** |
-| MY-13 | `SELECT 1; DROP TABLE t` | — | — | **denied** |
-| MY-14 | `INSERT INTO t VALUES(1)` | INSERT | — | **denied** |
-| MY-15 | `LOAD DATA INFILE '/tmp/d' INTO TABLE t` | OTHER | — | **denied** |
-| MY-16 | `HANDLER t OPEN` | OTHER | — | **denied** |
-| MY-17 | `DO SLEEP(1)` | CALL | — | **denied** |
-| MY-18 | `LOCK TABLES t READ` | OTHER | — | **denied** |
-| MY-19 | `SET @x = 1` | OTHER | — | **denied** |
+| MY-09 | `/*!50000 DROP TABLE t*/ SELECT 1` | — | HasExecComment | **denied**（真正可执行注释） |
+| MY-10 | `/*!40014 SET NAMES utf8mb4*/ SELECT 1` | — | HasExecComment | **denied**（真正可执行注释） |
+| MY-11 | `SELECT '/*!50000 DROP TABLE t*/' AS txt` | SELECT | — | **allowed**（字符串字面量中的 `/*!`，不是可执行注释，parser 必须能区分） |
+| MY-12 | `SELECT * FROM t /* 普通注释含 /*!50000 */  WHERE id=1` | SELECT | — | **allowed**（普通块注释中的 `/*!` 不表示可执行注释） |
+| MY-13 | `/*!99999 SELECT 1*/` | — | — | **denied** 或按 parser 行为（未知版本号或非法版本号的可执行注释，parser/lexer 最终决定；若 parser 忽略该注释则允许内部 SELECT） |
+| MY-14 | `WITH cte AS (SELECT * FROM t) SELECT * FROM cte` | SELECT | HasCTE | allowed |
+| MY-15 | `WITH d AS (DELETE FROM t) SELECT * FROM d` | — | HasCTE | **denied** |
+| MY-16 | `SELECT 1; DROP TABLE t` | — | — | **denied** |
+| MY-17 | `INSERT INTO t VALUES(1)` | INSERT | — | **denied** |
+| MY-18 | `LOAD DATA INFILE '/tmp/d' INTO TABLE t` | OTHER | — | **denied** |
+| MY-19 | `HANDLER t OPEN` | OTHER | — | **denied** |
+| MY-20 | `DO SLEEP(1)` | CALL | — | **denied** |
+| MY-21 | `LOCK TABLES t READ` | OTHER | — | **denied** |
+| MY-22 | `SET @x = 1` | OTHER | — | **denied** |
 | MY-20 | `EXPLAIN DELETE FROM t` | EXPLAIN | — | **denied** |
 
 ### 9.3 授权测试
@@ -714,7 +767,7 @@ allowed := map[string]bool{
 | AUTH-04 | User 非 workspace member | A | `forbidden` | 否 | system |
 | AUTH-05 | Connection 不属于 workspace | A | `connection_not_found` | 否 | system |
 | AUTH-06 | Connection 不存在 | A | `connection_not_found` | 否 | system |
-| AUTH-07 | ConnectionPolicy 不存在 | A | `read_not_allowed` | 否 | system |
+| AUTH-07 | ConnectionPolicy 不存在 | A | `policy_not_configured` | 否 | system |
 | AUTH-08 | AllowRead=false | A | `read_not_allowed` | 否 | system |
 | AUTH-09 | AllowRead=true，全部通过 | A→C | — | 是 | user |
 
@@ -739,7 +792,8 @@ allowed := map[string]bool{
 | AUDIT-05 | Execution 创建失败（DB 错误） | 返回 `internal_error`，不访问目标库 |
 | AUDIT-06 | running 更新失败 | 返回 `internal_error`/`audit_failed`；**不获取 Adapter pool、不连接目标数据库、不执行查询**；Adapter.Query 调用次数必须 = 0 |
 | AUDIT-07 | 阶段 D 完成后 Audit append 失败 | 返回 `audit_failed`，不返回查询结果，明确 message 包含"查询已执行但审计失败" |
-| AUDIT-08 | 阶段 A 审计 append 失败 | 记录错误日志，返回 `audit_failed` |
+| AUDIT-08a | 阶段 A workspace 已确认存在但 AuditEvent append 失败 | 返回 `audit_failed`；不访问目标数据库；不创建 Execution | 
+| AUDIT-08b | 阶段 A workspace 无法解析或不存在 | 不尝试写 AuditEvent（FK 约束）；仅写脱敏应用安全日志（含 trace_id/reason_code）；返回原始业务错误码（`invalid_scope` / `connection_not_found`），不改为 `audit_failed` |
 | AUDIT-09 | metadata 不含 SQL/Args/密码/原始错误 | canary 检测（在 SQL/Args 中放入标记字符串，验证不会出现在 metadata 中） |
 | AUDIT-10 | statement_hash 格式 | 64 字符 hex |
 | AUDIT-11 | error_code 不含原始错误前缀 | 不含 `pq:` 、`MySQL Error`、`SQLSTATE` |
@@ -804,3 +858,4 @@ allowed := map[string]bool{
 | 2026-07-23 | 初版 |
 | 2026-07-23 | 回应 Owner 审查 v1：撤回 GoSQLX 推荐；拆分执行流（前置授权 → 不创建 Execution）；修正 P0-05 前提；修正 SELECT 安全声明；StatementKind 改为 AST 事实模型；扩展审计允许列表；拆分审计 fail-closed；分离业务错误码与 HTTP 映射；暂不更新 contracts；测试矩阵落为可执行表格 |
 | 2026-07-23 | 回应 Owner 审查 v2：修 running 更新失败不连目标库 + Adapter 调用次数断言；阶段 A 审计拆为 workspace 存在/不存在两路径；MySQL 可执行注释改为 parser/lexer 必须能力，Spike 不通过即淘汰候选；拆分 FirstPage/NextPage 请求类型；补齐 timeout 上限公式；修正许可证验证方法（枚举 LICENSE 文件）；Bytebase Omni 许可证改为 MIT；TiDB Parser 可执行注释改为待验证；TABLE/VALUES 默认拒绝；Spike 补充单语句检测行 |
+| 2026-07-23 | 回应 CodeRabbit 审查：ASTFeatures 扩展 HasModifyingCTE/HasExplainDMLDDL/HasNestedExplain；continuation token 安全属性（绑定 Principal/Connection/策略版本/过期时间/防篡改/防重放）；ExecuteFirstPageRequest 重命名 + Adapter 字段映射契约；授权错误码拆分 policy_not_configured vs read_not_allowed；Adapter→业务错误码+审计 outcome 映射表；审计失败重试与结果恢复策略；MySQL 可执行注释反例（字符串字面量/普通注释/非法版本号）；AUDIT-08 拆分为 workspace 存在/不存在两条独立路径 |
