@@ -72,6 +72,39 @@ func TestManager_Get_MySQL(t *testing.T) {
 	}
 	h.Release()
 }
+
+// TestManager_SingleflightCleanupOnFailure 验证 createPool 失败后 singleflight
+// channel 被正确清理，后续 Get 可以重试而非永久阻塞。
+func TestManager_SingleflightCleanupOnFailure(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+
+	badCfg := pgCfg()
+	badCfg.Port = 1
+	badCfg.ConnectionID = "sf-cleanup-test"
+	badCfg.ConfigRevision = 1
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, err := m.Get(ctx, badCfg)
+	cancel()
+	if err == nil {
+		t.Fatal("expected first Get to fail")
+	}
+	t.Logf("first Get failed (expected): %v", err)
+
+	goodCfg := pgCfg()
+	goodCfg.ConnectionID = "sf-cleanup-test"
+	goodCfg.ConfigRevision = 1
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	h, err := m.Get(ctx2, goodCfg)
+	if err != nil {
+		t.Fatalf("second Get should succeed after cleanup, got: %v", err)
+	}
+	h.Release()
+}
+
 func TestManager_UnsupportedEngine(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())

@@ -140,6 +140,12 @@ func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandl
 	m.mu.Unlock()
 	entry, err := m.createPool(ctx, cfg)
 	if err != nil {
+		m.mu.Lock()
+		if ch, ok := m.creating.Load(cid); ok {
+			close(ch.(chan struct{}))
+			m.creating.Delete(cid)
+		}
+		m.mu.Unlock()
 		return nil, err
 	}
 	m.mu.Lock()
