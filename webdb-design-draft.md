@@ -368,7 +368,7 @@ P0 结束前必须有两项硬门槛：
 - [ ] 实现凭证加解密与密钥轮换。（P0-05）
 - [ ] 实现只读 SQL 策略：单语句、按 PostgreSQL / MySQL 方言分别进行 AST 分类、超时、最大行数、取消；无法可靠判定的语句默认拒绝。
 - [x] 实现目标连接池与执行准入：上限、获取超时、取消。（P0-03，PR #12）
-- [ ] 连接池指标与压力测试。（P0-03-followup）
+- [ ] [连接池指标与压力测试](docs/tasks/P0-03-followup-pool-observability-and-load-test.md)。（P0-03-followup）
 - [ ] 制作最小 React 页面：连接列表、Schema 树、Monaco、结果表格。
 - [x] 用 Docker Compose 启动 WebDB 元数据库、演示 PG、演示 MySQL 和应用。（P0-01，PR #2）
 - [ ] 写出 P0 验收脚本和威胁模型；通过后再启动协作功能。

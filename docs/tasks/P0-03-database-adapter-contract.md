@@ -1,6 +1,6 @@
 # P0-03：数据库 Adapter 契约
 
-> 状态：Done｜风险：High｜依赖：P0-01、ADR-001、ADR-002、ADR-008｜实现者：Claude Code｜独立审查：Codex｜PR：#12
+> 状态：Done｜风险：High｜依赖：P0-01、ADR-001、ADR-002、ADR-008｜实现者：Claude Code｜独立审查：Codex｜PR：[#12](https://github.com/fujiabao89/WebDB/pull/12)
 
 ## 目标与范围
 
@@ -24,7 +24,11 @@
 ## 完成情况
 
 - 完成时间：2026-07-23
-- 代码量：1,754 行生产代码（9 个 Go 源文件），771 行测试代码（24 个集成测试）
+- 合并提交：[`925f7024`](https://github.com/fujiabao89/WebDB/commit/925f7024c4c3ced8ee56c29f03c31e1ae27ff61c)
+- 实现范围：9 个生产 Go 文件、1 个集成测试文件；合并时包含 29 个 `Test...` 测试函数
 - ADR：ADR-008 已追加 PostgreSQL MaxIdle 差异说明
-- 延期项：1 项 — MySQL []byte 文本值暂不转 string（需 ColumnTypes 类型感知重构）
+- 验证：PR #12 的 API、Web、Contracts、Repository safety 和 PR contract 检查全部通过；[CI 运行记录](https://github.com/fujiabao89/WebDB/actions/runs/29987480370)
+- 后续任务：
+  - [P0-03-followup：连接池可观测性与压力测试](P0-03-followup-pool-observability-and-load-test.md)
+  - [P0-03-followup：查询结果类型规范化](P0-03-followup-result-type-normalization.md)
 - 注：`AdmissionController` 已返回 `ErrRateLimited`，HTTP 429 映射由 P0-04 API 层负责（当前仅 `/health` 端点，未注册业务路由）

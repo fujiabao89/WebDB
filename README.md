@@ -1,6 +1,6 @@
 # WebDB
 
-WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架和 Docker Compose 本地环境；P0-02 已完成元数据库迁移；P0-03 已完成数据库 Adapter（双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）。
+WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架和 Docker Compose 本地环境；P0-02 已完成元数据库迁移；P0-03 已完成数据库 Adapter（双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）。该 Adapter 当前仅供内部 Go 调用，API 仍只公开 `/health`；SQL AST 安全策略和公开执行路径由 P0-04 实现。
 
 ## 仓库结构
 
@@ -89,6 +89,7 @@ CI 还会执行格式检查、仓库安全检查和 PR 契约检查。不要通�
 - [架构决策记录](docs/adr/README.md)
 - [P0 任务状态](docs/tasks/README.md)
 - [P0-01 最终验收记录](docs/tasks/P0-01-project-skeleton-and-compose.md)
+- [P0-03 最终验收记录](docs/tasks/P0-03-database-adapter-contract.md)
 - [AI 协作规则](AGENTS.md)
 
 许可证与第三方依赖清单尚未完成，状态见 [P0-01-followup](docs/tasks/P0-01-followup-license-inventory.md)；在该后续任务完成前，不应宣称仓库已完成 Apache 2.0 发布材料。
