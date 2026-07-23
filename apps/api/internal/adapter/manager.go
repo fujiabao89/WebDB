@@ -620,12 +620,16 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 		if err != nil {
 			return nil, mapExecError(err)
 		}
-		dd, cb, err := copyAndMeasure(vals, maxCell)
+		cellLimit := maxCell
+		if rc >= effPage {
+			cellLimit = 0 // 预读行不检查 cell 限制
+		}
+		dd, cb, err := copyAndMeasure(vals, cellLimit)
 		if err != nil {
 			return nil, err
 		}
 		pb += cb
-		if pb > maxPage {
+		if rc < effPage && pb > maxPage {
 			return nil, newError(ErrResultTooLarge, "page byte limit exceeded", nil)
 		}
 		data = append(data, dd)
@@ -682,12 +686,16 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, mapExecError(err)
 		}
-		dd, cb, err := copyAndMeasure(vals, maxCell)
+		cellLimit := maxCell
+		if rc >= effPage {
+			cellLimit = 0 // 预读行不检查 cell 限制
+		}
+		dd, cb, err := copyAndMeasure(vals, cellLimit)
 		if err != nil {
 			return nil, err
 		}
 		pb += cb
-		if pb > maxPage {
+		if rc < effPage && pb > maxPage {
 			return nil, newError(ErrResultTooLarge, "page byte limit exceeded", nil)
 		}
 		data = append(data, dd)

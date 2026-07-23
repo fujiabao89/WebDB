@@ -9,7 +9,7 @@ func pgSchemas(ctx context.Context, pool *pgxpool.Pool) ([]Schema, error) {
 	q := `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name`
 	rows, err := pool.Query(ctx, q)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Schema
@@ -30,7 +30,7 @@ func pgTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]Table, 
 	q := `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema=$1 ORDER BY table_name`
 	rows, err := pool.Query(ctx, q, schema)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Table
@@ -56,7 +56,7 @@ func pgColumns(ctx context.Context, pool *pgxpool.Pool, schema, table string) ([
 FROM information_schema.columns c WHERE c.table_schema=$1 AND c.table_name=$2 ORDER BY c.ordinal_position`
 	rows, err := pool.Query(ctx, q, schema, table)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Column

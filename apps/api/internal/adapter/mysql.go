@@ -9,7 +9,7 @@ func mysqlSchemas(ctx context.Context, db *sql.DB) ([]Schema, error) {
 	q := `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY schema_name`
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Schema
@@ -30,7 +30,7 @@ func mysqlTables(ctx context.Context, db *sql.DB, schema string) ([]Table, error
 	q := `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema=? ORDER BY table_name`
 	rows, err := db.QueryContext(ctx, q, schema)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Table
