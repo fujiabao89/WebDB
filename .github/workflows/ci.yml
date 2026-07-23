@@ -167,7 +167,7 @@ jobs:
             CREATE TABLE IF NOT EXISTS employees (id INT AUTO_INCREMENT PRIMARY KEY, first_name VARCHAR(255) NOT NULL);
             INSERT IGNORE INTO employees (id,first_name) VALUES
               (1,'Alice'),(2,'Bob'),(3,'Charlie'),(4,'David'),(5,'Eve'),(6,'Frank'),(7,'Grace');
-          " 2>/dev/null || true
+          "
       - name: Adapter integration test
         run: go test -tags=integration ./internal/adapter/...
         env:
