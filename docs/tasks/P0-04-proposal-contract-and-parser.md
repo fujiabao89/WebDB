@@ -304,12 +304,14 @@ type ExecuteNextPageRequest struct {
 // Token 必须由服务端通过认证加密（AEAD）或签名生成，满足：
 //   - 绑定 Principal（UserID + WorkspaceID）
 //   - 绑定 ConnectionID（防止跨连接重放）
+//   - 绑定连接池 generation（连接重建后旧 token 立即失效）
 //   - 绑定 StatementHash（防止 SQL 被替换）
 //   - 绑定生效的策略版本（AllowRead / MaxRows / StatementTimeoutMs 变更后 token 失效）
 //   - 包含明确的过期时间（建议 ≤5 分钟）
 //   - 禁止明文携带 SQL、Args、SortKeys 或结果数据
 //   - 禁止客户端修改 token 后重放（防篡改）
-//   - 每次 NextPage 消费后 token 轮换（防重放）
+//   - 每次 NextPage 由服务端通过原子 compare-and-consume 操作消费 token，
+//     替换 token 后旧 token 立即失效，防止并发 NextPage 重用同一 token
 
 // 以下由服务端从 Connection 元数据派生，不接受外部输入：
 //   - TraceID      string   // 服务端生成
@@ -399,18 +401,20 @@ type AuthorizedExecution struct {
 ```
 ### 4.3.1 Adapter 错误码 → 业务错误码 + 审计 outcome 映射
 
-`invalid_page_token` 在 NextPage 前置校验中处理，不进入阶段 D 的 Adapter.Query 流程。
+`invalid_page_token` 在 NextPage 前置校验中处理，不进入阶段 D 的 Adapter.Query 流程。`rate_limited` 和 `connection_busy` 需区分两个路径。
 
-| Adapter 错误码 | 业务错误码 | Execution 状态 | Audit Outcome | 备注 |
+| Adapter 错误码 | 触发层 | Execution 状态 | Audit Outcome | 备注 |
 |---|---|---|---|---|
-| `query_timeout` | `query_timeout` | `failed` | `failed` | |
-| `query_cancelled` | `query_cancelled` | `cancelled` | `cancelled` | |
-| `database_error` | `database_error` | `failed` | `failed` | 脱敏原始错误 |
-| `rate_limited` | `rate_limited` | 不创建 execution | — | 请求未到达 Adapter 时由准入层拦截；已到达则映射为 `rate_limited`，不改变 execution 状态 |
-| `connection_busy` | `connection_busy` | 不创建 execution | — | 同上 |
-| `result_too_large` | `result_too_large` | `failed` | `failed` | |
-| `invalid_page_token` | `invalid_page_token` | — | — | NextPage 前置校验拒绝，不进入 Adapter |
-| 其他未匹配错误 | `database_error` | `failed` | `failed` | fail-closed：未知 Adapter 错误均脱敏为 database_error |
+| `query_timeout` | Adapter | `failed` | `failed` | |
+| `query_cancelled` | Adapter | `cancelled` | `cancelled` | |
+| `database_error` | Adapter | `failed` | `failed` | 脱敏原始错误 |
+| `rate_limited` | **准入层** | 不创建 execution | — | 阶段 D 准入拦截，execution 未被创建；返回 `rate_limited` + Retry-After |
+| `rate_limited` | **Adapter** | `failed` | `failed` | 已在运行中收到限流（极端情况）；必须终结既有 running execution |
+| `connection_busy` | **准入层** | 不创建 execution | — | 同上准入拦截 |
+| `connection_busy` | **Adapter** | `failed` | `failed` | 同上 Adapter 路径 |
+| `result_too_large` | Adapter | `failed` | `failed` | |
+| `invalid_page_token` | NextPage 前置 | — | — | NextPage 前置校验拒绝，不进入 Adapter |
+| 其他未匹配错误 | Adapter | `failed` | `failed` | fail-closed：未知 Adapter 错误均脱敏为 database_error |
 
 ---
 
@@ -665,7 +669,7 @@ allowed := map[string]bool{
 **重试与结果恢复策略**：
 - **禁止自动重试**：审计写入失败不触发自动重试；客户端是否重试由调用方决定
 - **阶段 D 完成后审计失败**：Execution 已记录为 `completed`（含 row_count/duration_ms/statement_hash），但结果不返回客户端；客户端可通过 ExecutionID 查询执行状态和审计结果（需 P0-05 认证后提供查询接口）
-- **结果引用恢复**：`result_ref` 在 execution 更新为 `completed` 时已持久化；审计 append 独立失败后，可人工通过 ExecutionID 关联查询结果（结果本身已脱敏存储）
+- **结果引用恢复**：`result_ref` 在 execution 更新为 `completed` 时已持久化；审计 append 独立失败后，是否可通过 ExecutionID 恢复查询结果取决于结果存储的保护策略（脱敏、访问控制、保留期限、加密），这些保护策略属于 P0-03 Adapter 和 P0-05 凭证/存储范围，不在本提案中定义。P0-04 不承诺审计失败后结果一定可恢复
 - **副作用 SELECT 风险**：带副作用的函数（如 SECURITY DEFINER）重复执行是已知残余风险；客户端重试由调用方在理解此风险的前提下决定，执行层不承诺幂等
 
 ### 8.7 跨工作区/前置拒绝的审计
@@ -701,8 +705,8 @@ allowed := map[string]bool{
 | PG-13 | `SELECT * FROM t FOR KEY SHARE` | SELECT | HasLockingClause | **denied** |
 | PG-14 | `SELECT * FROM t FOR NO KEY UPDATE` | SELECT | HasLockingClause | **denied** |
 | PG-15 | `SELECT * INTO new_t FROM t` | SELECT | HasSelectInto | **denied** |
-| PG-16 | `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d` | — | HasCTE | **denied** |
-| PG-17 | `WITH d AS (INSERT INTO t VALUES(1)) SELECT * FROM d` | — | HasCTE | **denied** |
+| PG-16 | `WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d` | — | HasCTE + HasModifyingCTE | **denied**（修改性 CTE） |
+| PG-17 | `WITH d AS (INSERT INTO t VALUES(1)) SELECT * FROM d` | — | HasCTE + HasModifyingCTE | **denied**（修改性 CTE） |
 | PG-18 | `TABLE t` | OTHER | — | **denied**（非 SELECT/EXPLAIN） |
 | PG-19 | `VALUES (1,2,3)` | OTHER | — | **denied**（非 SELECT/EXPLAIN） |
 | PG-20 | `SELECT 1; DROP TABLE t` | — | — | **denied**（多语句） |
@@ -724,11 +728,12 @@ allowed := map[string]bool{
 | PG-36 | `GRANT SELECT ON t TO u` | DDL | — | **denied** |
 | PG-37 | `VACUUM t` | OTHER | — | **denied** |
 | PG-38 | `EXPLAIN ANALYZE SELECT * FROM t` | EXPLAIN | HasExplainAnalyze | **denied** |
-| PG-39 | `EXPLAIN DELETE FROM t` | EXPLAIN | — | **denied** |
-| PG-40 | `""` | — | — | **denied**（空语句） |
-| PG-41 | `-- only comment` | — | — | **denied**（仅注释） |
-| PG-42 | `SELEC * FORM t` | — | ParseError!=nil | **denied**（解析错误） |
-| PG-43 | 极深嵌套 SELECT（>100 层） | — | — | 拒绝或不 panic |
+| PG-39 | `EXPLAIN DELETE FROM t` | EXPLAIN | HasExplainDMLDDL | **denied** |
+| PG-40 | `EXPLAIN EXPLAIN SELECT * FROM t` | EXPLAIN | HasNestedExplain | **denied** |
+| PG-41 | `""` | — | — | **denied**（空语句） |
+| PG-42 | `-- only comment` | — | — | **denied**（仅注释） |
+| PG-43 | `SELEC * FORM t` | — | ParseError!=nil | **denied**（解析错误） |
+| PG-44 | 极深嵌套 SELECT（>100 层） | — | — | 拒绝或不 panic |
 
 ### 9.2 MySQL 分类测试
 
@@ -746,7 +751,7 @@ allowed := map[string]bool{
 | MY-10 | `/*!40014 SET NAMES utf8mb4*/ SELECT 1` | — | HasExecComment | **denied**（真正可执行注释） |
 | MY-11 | `SELECT '/*!50000 DROP TABLE t*/' AS txt` | SELECT | — | **allowed**（字符串字面量中的 `/*!`，不是可执行注释，parser 必须能区分） |
 | MY-12 | `SELECT * FROM t /* 普通注释含 /*!50000 */  WHERE id=1` | SELECT | — | **allowed**（普通块注释中的 `/*!` 不表示可执行注释） |
-| MY-13 | `/*!99999 SELECT 1*/` | — | — | **denied** 或按 parser 行为（未知版本号或非法版本号的可执行注释，parser/lexer 最终决定；若 parser 忽略该注释则允许内部 SELECT） |
+| MY-13 | `/*!99999 SELECT 1*/` | — | HasExecComment | **denied**（无法识别的版本号仍为可执行注释语法，fail-closed：必须无条件拒绝；Spike 若不能证明 parser/lexer 可靠拒绝则候选不通过） |
 | MY-14 | `WITH cte AS (SELECT * FROM t) SELECT * FROM cte` | SELECT | HasCTE | allowed |
 | MY-15 | `WITH d AS (DELETE FROM t) SELECT * FROM d` | — | HasCTE | **denied** |
 | MY-16 | `SELECT 1; DROP TABLE t` | — | — | **denied** |
