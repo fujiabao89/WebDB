@@ -56,7 +56,7 @@ func mysqlColumns(ctx context.Context, db *sql.DB, schema, table string) ([]Colu
 FROM information_schema.columns WHERE table_schema=? AND table_name=? ORDER BY ordinal_position`
 	rows, err := db.QueryContext(ctx, q, schema, table)
 	if err != nil {
-		return nil, wrapError(ErrDatabaseError, err)
+		return nil, mapAcquireError(err)
 	}
 	defer rows.Close()
 	var out []Column

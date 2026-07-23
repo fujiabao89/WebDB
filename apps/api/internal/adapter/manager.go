@@ -733,7 +733,7 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 		}
 		switch val := v.(type) {
 		case []byte:
-			if len(val) > maxCell {
+			if maxCell > 0 && len(val) > maxCell {
 				return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
 			}
 			b := make([]byte, len(val))
@@ -741,7 +741,7 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 			dst[i] = b
 			total += len(b)
 		case string:
-			if len(val) > maxCell {
+			if maxCell > 0 && len(val) > maxCell {
 				return nil, 0, newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
 			}
 			dst[i] = val
