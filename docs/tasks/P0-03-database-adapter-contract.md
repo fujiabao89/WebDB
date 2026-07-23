@@ -27,3 +27,4 @@
 - 代码量：1,754 行生产代码（9 个 Go 源文件），771 行测试代码（24 个集成测试）
 - ADR：ADR-008 已追加 PostgreSQL MaxIdle 差异说明
 - 延期项：1 项 — MySQL []byte 文本值暂不转 string（需 ColumnTypes 类型感知重构）
+- 注：`AdmissionController` 已返回 `ErrRateLimited`，HTTP 429 映射由 P0-04 API 层负责（当前仅 `/health` 端点，未注册业务路由）
