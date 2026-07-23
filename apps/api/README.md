@@ -1,6 +1,6 @@
 # API 与执行服务
 
-这里是 WebDB 的 Go 模块化单体入口。当前 P0-01 仅实现 `GET /health`；数据库 Adapter、SQL 策略、连接池和审计能力将在后续 P0 任务中加入。按照安全边界，未来也只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
+这里是 WebDB 的 Go 模块化单体入口。当前 P0 已实现 `GET /health`、数据库 Adapter（PostgreSQL/MySQL 双引擎连接池、Schema 拉取、只读 SQL 执行、keyset 分页）和审计事件记录；SQL 策略层将在后续 P0 任务中加入。按照安全边界，只有 API 服务可以连接目标 PostgreSQL/MySQL，浏览器不得直连数据库或接收数据库凭证。
 
 ## 工具链
 

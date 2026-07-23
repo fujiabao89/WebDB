@@ -73,6 +73,21 @@ type ksBuilder struct {
 }
 
 func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any, args []any, limit int) (string, []any, error) {
+	sql = strings.TrimRight(strings.TrimSpace(sql), ";")
+	// EXPLAIN/DESCRIBE 不适用 keyset 包装：派生表 SELECT * FROM (EXPLAIN ...)
+	// 在 PG/MySQL 均非法。直接透传并附加 LIMIT。
+	if isExplainSQL(sql) {
+		allArgs := make([]any, len(args))
+		copy(allArgs, args)
+		wrapped := sql
+		if engine == EnginePostgreSQL {
+			wrapped += fmt.Sprintf("\nLIMIT $%d", len(allArgs)+1)
+		} else {
+			wrapped += "\nLIMIT ?"
+		}
+		allArgs = append(allArgs, limit)
+		return wrapped, allArgs, nil
+	}
 	orderClause := buildOrderByClause(specs, engine)
 	allArgs := make([]any, len(args))
 	copy(allArgs, args)
@@ -82,7 +97,6 @@ func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any
 		contClause = b.buildContinuation()
 		allArgs = append(allArgs, b.mysqlArgs...)
 	}
-	sql = strings.TrimRight(strings.TrimSpace(sql), ";")
 	wrapped := fmt.Sprintf("SELECT * FROM (\n%s\n) AS webdb_page", sql)
 	if contClause != "" {
 		wrapped += "\nWHERE " + contClause
@@ -96,6 +110,18 @@ func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any
 		allArgs = append(allArgs, limit)
 	}
 	return wrapped, allArgs, nil
+}
+
+var explainPrefixes = []string{"EXPLAIN", "DESCRIBE", "DESC"}
+
+func isExplainSQL(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	for _, p := range explainPrefixes {
+		if strings.HasPrefix(upper, p+" ") || strings.HasPrefix(upper, p+"\t") || strings.HasPrefix(upper, p+"\n") || upper == p {
+			return true
+		}
+	}
+	return false
 }
 
 func (b *ksBuilder) phNull(keyIdx int) string {
