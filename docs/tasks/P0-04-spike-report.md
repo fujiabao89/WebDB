@@ -31,13 +31,15 @@
 
 提案要求验证 semicolon 和 comment-hidden 多语句输入，返回语句数 ≥2 时拒绝。
 
-| 候选 | PG-20 (semicolon) | PG-21 (comment-hidden) | MY-16 (semicolon) | MY-15 (CTE DML) | 结果 |
-|------|:---:|:---:|:---:|:---:|------|
-| pgparser | ✅ n=2 | ✅ n=2 | N/A | N/A | PASS |
-| TiDB Parser | N/A | N/A | ✅ n=2 | ✅ fail-closed | PASS |
-| Vitess | N/A | N/A | ✅ ErrMultipleStatements | ✅ fail-closed | PASS |
-| Omni PG | ✅ n=2 | ✅ n=2 | N/A | N/A | PASS |
-| Omni MySQL | N/A | N/A | ✅ n>1 | ✅ fail-closed | PASS |
+| 候选 | PG-20 (semicolon) | PG-21 (comment-hidden) | MY-16 (semicolon) | 结果 |
+|------|:---:|:---:|:---:|------|
+| pgparser | ✅ n=2 | ✅ n=2 | N/A | PASS |
+| TiDB Parser | N/A | N/A | ✅ n=2 | PASS |
+| Vitess | N/A | N/A | ✅ ErrMultipleStatements | PASS |
+| Omni PG | ✅ n=2 | ✅ n=2 | N/A | PASS |
+| Omni MySQL | N/A | N/A | ✅ n>1 | PASS |
+
+注：CTE DML（如 MY-15 `WITH d AS (DELETE FROM t) SELECT * FROM d`）属于单语句危险分类验证（AST 递归遍历 `WithClause.Ctes`），不在此表范围内，详见各候选 AST 分类章节。
 
 **结论**：所有候选均正确拒绝多语句输入。单语句检测不是本轮阻塞项。
 
@@ -182,9 +184,15 @@ Lexer 源码（lexer.go:1937-1992）：检测 `/*!` → 移除 `/*!NNNNN` 和 `*
 | `github.com/sirupsen/logrus` | v1.9.3 | MIT | ✅ LICENSE 已验证 |
 | `github.com/pkg/errors` | v0.9.1 | BSD-2-Clause | ✅ LICENSE 已验证 |
 | `github.com/shopspring/decimal` | v1.4.0 | MIT | ✅ LICENSE 已验证 |
-| 其余 57 个模块 | — | MIT/Apache 2.0/BSD | ✅ 逐模块 LICENSE 文件已确认存在 |
+| `go.opentelemetry.io/*` | v1.x | Apache 2.0 | ✅ LICENSE 已验证 |
+| `github.com/containerd/*` | v1.x | Apache 2.0 | ✅ LICENSE 已验证 |
+| `github.com/docker/*` | v28.x | Apache 2.0 | ✅ LICENSE 已验证 |
+| `github.com/moby/*` | v0.x | Apache 2.0 | ✅ LICENSE 已验证 |
+| 其余 52 个模块（testcontainers、shirou/gopsutil 等测试/平台依赖） | — | MIT/Apache 2.0/BSD | ✅ 逐模块 `find <GOMODCACHE>/* -name 'LICENSE*'` 已确认存在 |
 
-**结论**：Omni 依赖树无 GPL/AGPL/SSPL 或未知许可证。
+**结论**：Omni 依赖树无 GPL/AGPL/SSPL 或未知许可证。全部 73 模块的 LICENSE 文件均通过脚本逐一读取确认存在。
+
+**已知缺口**（仍在 TiDB Parser 候选范围内）：`modernc.org/parser@v1.1.0` 无 LICENSE 文件（build-time yacc 工具依赖）。该候选已被淘汰，此缺口不进入 Omni 依赖树。
 
 ### 5.2 pgparser（1 模块）
 
