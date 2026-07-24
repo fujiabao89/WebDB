@@ -188,11 +188,91 @@ Lexer 源码（lexer.go:1937-1992）：检测 `/*!` → 移除 `/*!NNNNN` 和 `*
 | `github.com/containerd/*` | v1.x | Apache 2.0 | ✅ LICENSE 已验证 |
 | `github.com/docker/*` | v28.x | Apache 2.0 | ✅ LICENSE 已验证 |
 | `github.com/moby/*` | v0.x | Apache 2.0 | ✅ LICENSE 已验证 |
-| 其余 52 个模块（testcontainers、shirou/gopsutil 等测试/平台依赖） | — | MIT/Apache 2.0/BSD | ✅ 逐模块 `find <GOMODCACHE>/* -name 'LICENSE*'` 已确认存在 |
+### 5.2 完整逐模块清单（按字母序）
 
-**结论**：Omni 依赖树无 GPL/AGPL/SSPL 或未知许可证。全部 73 模块的 LICENSE 文件均通过脚本逐一读取确认存在。
+以下为 `github.com/bytebase/omni v0.0.0-20260720033410` 的完整传递依赖（73 模块，不含自身），来源 `go list -m -json all`，逐模块读取 LICENSE/COPYING/NOTICE 验证。
 
-**已知缺口**（仍在 TiDB Parser 候选范围内）：`modernc.org/parser@v1.1.0` 无 LICENSE 文件（build-time yacc 工具依赖）。该候选已被淘汰，此缺口不进入 Omni 依赖树。
+| 模块 | 精确版本 | 许可证 | LICENSE 验证 |
+|------|----------|--------|-------------|
+| `dario.cat/mergo` | v1.0.2 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `filippo.io/edwards25519` | v1.1.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/Azure/go-ansiterm` | v0.0.0-20250102 | MIT | ✅ LICENSE 读取 |
+| `github.com/Microsoft/go-winio` | v0.6.2 | MIT | ✅ LICENSE 读取 |
+| `github.com/bytebase/omni` | v0.0.0-20260720 | MIT | ✅ LICENSE 读取 |
+| `github.com/cenkalti/backoff/v4` | v4.3.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/cespare/xxhash/v2` | v2.3.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/containerd/errdefs` | v1.0.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/containerd/errdefs/pkg` | v0.3.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/containerd/log` | v0.1.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/containerd/platforms` | v0.2.1 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/cpuguy83/dockercfg` | v0.3.2 | MIT | ✅ LICENSE 读取 |
+| `github.com/davecgh/go-spew` | v1.1.1 | ISC | ✅ LICENSE 读取 |
+| `github.com/distribution/reference` | v0.6.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/docker/docker` | v28.5.2 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/docker/go-connections` | v0.6.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/docker/go-units` | v0.5.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/ebitengine/purego` | v0.10.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/felixge/httpsnoop` | v1.0.4 | MIT | ✅ LICENSE 读取 |
+| `github.com/go-logr/logr` | v1.4.3 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/go-logr/stdr` | v1.2.2 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/go-ole/go-ole` | v1.2.6 | MIT | ✅ LICENSE 读取 |
+| `github.com/go-sql-driver/mysql` | v1.9.3 | MPL 2.0 | ✅ LICENSE 读取 |
+| `github.com/golang-sql/civil` | v0.0.0-20220223 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/golang-sql/sqlexp` | v0.1.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/google/go-cmp` | v0.7.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/grpc-ecosystem/grpc-gateway/v2` | v2.28.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/hjson/hjson-go/v4` | v4.6.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/jackc/pgpassfile` | v1.0.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/jackc/pgservicefile` | v0.0.0-20240606 | MIT | ✅ LICENSE 读取 |
+| `github.com/jackc/pgx/v5` | v5.9.1 | MIT | ✅ LICENSE 读取 |
+| `github.com/jackc/puddle/v2` | v2.2.2 | MIT | ✅ LICENSE 读取 |
+| `github.com/klauspost/compress` | v1.18.2 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/lufia/plan9stats` | v0.0.0-20211012 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/magiconair/properties` | v1.8.10 | BSD-2-Clause | ✅ LICENSE 读取 |
+| `github.com/microsoft/go-mssqldb` | v1.9.8 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/moby/docker-image-spec` | v1.3.1 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/go-archive` | v0.2.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/patternmatcher` | v0.6.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/sys/sequential` | v0.6.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/sys/user` | v0.4.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/sys/userns` | v0.1.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/moby/term` | v0.5.2 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/morikuni/aec` | v1.0.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/opencontainers/go-digest` | v1.0.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/opencontainers/image-spec` | v1.1.1 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/pkg/errors` | v0.9.1 | BSD-2-Clause | ✅ LICENSE 读取 |
+| `github.com/pmezard/go-difflib` | v1.0.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/power-devops/perfstat` | v0.0.0-20240221 | MIT | ✅ LICENSE 读取 |
+| `github.com/shirou/gopsutil/v4` | v4.26.2 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/shopspring/decimal` | v1.4.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/sijms/go-ora/v2` | v2.9.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/sirupsen/logrus` | v1.9.3 | MIT | ✅ LICENSE 读取 |
+| `github.com/stretchr/testify` | v1.11.1 | MIT | ✅ LICENSE 读取 |
+| `github.com/testcontainers/testcontainers-go` | v0.41.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/testcontainers/testcontainers-go/modules/mariadb` | v0.41.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/testcontainers/testcontainers-go/modules/mssql` | v0.41.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/testcontainers/testcontainers-go/modules/mysql` | v0.41.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/testcontainers/testcontainers-go/modules/postgres` | v0.41.0 | MIT | ✅ LICENSE 读取 |
+| `github.com/tklauser/go-sysconf` | v0.3.16 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `github.com/tklauser/numcpus` | v0.11.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `github.com/yusufpapurcu/wmi` | v1.2.4 | MIT | ✅ LICENSE 读取 |
+| `go.opentelemetry.io/auto/sdk` | v1.2.1 | Apache 2.0 | ✅ LICENSE 读取 |
+| `go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp` | v0.49.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `go.opentelemetry.io/otel` | v1.41.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `go.opentelemetry.io/otel/metric` | v1.41.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `go.opentelemetry.io/otel/trace` | v1.41.0 | Apache 2.0 | ✅ LICENSE 读取 |
+| `golang.org/x/crypto` | v0.48.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `golang.org/x/sync` | v0.19.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `golang.org/x/sys` | v0.41.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `golang.org/x/text` | v0.34.0 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `google.golang.org/grpc` | v1.79.1 | Apache 2.0 | ✅ LICENSE 读取 |
+| `google.golang.org/protobuf` | v1.36.11 | BSD-3-Clause | ✅ LICENSE 读取 |
+| `gopkg.in/yaml.v3` | v3.0.1 | MIT | ✅ LICENSE + NOTICE 读取 |
+
+**统计**：75/75 模块 LICENSE 已验证（含 omni 自身）。无 GPL/AGPL/SSPL。无缺失 LICENSE。
+
+**已知缺口（不在 Omni 依赖树内）**：`modernc.org/parser@v1.1.0` 无 LICENSE 文件（仅在已淘汰的 TiDB Parser 候选中出现）。
 
 ### 5.2 pgparser（1 模块）
 
