@@ -3,7 +3,7 @@
 > 状态：ESCALATE — 双方言所有候选均不满足全部验收标准
 > 日期：2026-07-24
 > 任务：P0-04（SQL Safety Policy — 依赖 Spike）
-> PR：#16（提案已合并）
+> PR：[#19](https://github.com/fujiabao89/WebDB/pull/19)（本报告）；提案 PR：[#16](https://github.com/fujiabao89/WebDB/pull/16)（已合并）
 > 分支：`feat/P0-04-parser-spike`
 > 作者：Claude Code
 > 修订：PG 探针类型化 + TiDB Scanner API 源码审计 + Vitess+Omni 替代评估
@@ -24,6 +24,22 @@
 ² ECM token 真阳性 2/9，spliceGaps 未导出
 
 **所有候选均不满足至少一项关键安全要求。** 不得开始 sqlpolicy/ 或 execution/ 实现。
+
+---
+
+### 1.1 单语句检测（所有候选）
+
+提案要求验证 semicolon 和 comment-hidden 多语句输入，返回语句数 ≥2 时拒绝。
+
+| 候选 | PG-20 (semicolon) | PG-21 (comment-hidden) | MY-16 (semicolon) | MY-15 (CTE DML) | 结果 |
+|------|:---:|:---:|:---:|:---:|------|
+| pgparser | ✅ n=2 | ✅ n=2 | N/A | N/A | PASS |
+| TiDB Parser | N/A | N/A | ✅ n=2 | ✅ fail-closed | PASS |
+| Vitess | N/A | N/A | ✅ ErrMultipleStatements | ✅ fail-closed | PASS |
+| Omni PG | ✅ n=2 | ✅ n=2 | N/A | N/A | PASS |
+| Omni MySQL | N/A | N/A | ✅ n>1 | ✅ fail-closed | PASS |
+
+**结论**：所有候选均正确拒绝多语句输入。单语句检测不是本轮阻塞项。
 
 ---
 
@@ -136,13 +152,57 @@ Lexer 源码（lexer.go:1937-1992）：检测 `/*!` → 移除 `/*!NNNNN` 和 `*
 
 | 目录 | 用途 |
 |------|------|
-| `C:\Users\34026\AppData\Local\Temp\p0-04-spike-20260724-143057` | pgparser + TiDB Parser |
-| `C:\Users\34026\AppData\Local\Temp\p0-04-mysql-spike-20260724-151815` | Vitess |
-| `C:\Users\34026\AppData\Local\Temp\p0-04-omni-spike-20260724-171004` | Bytebase Omni |
+| `<TEMP>/p0-04-spike-20260724-143057` | pgparser + TiDB Parser |
+| `<TEMP>/p0-04-mysql-spike-20260724-151815` | Vitess |
+| `<TEMP>/p0-04-omni-spike-20260724-171004` | Bytebase Omni |
 
 ---
 
-## 5. 回滚/清理
+## 5. 传递依赖许可证详细清单
+
+### 5.1 Bytebase Omni（73 模块）
+
+来源：`go mod download all` + `go list -m -json all` + 逐模块 LICENSE 文件读取。
+
+| 模块 | 版本 | 许可证 | 验证 |
+|------|------|--------|------|
+| `github.com/bytebase/omni` | v0.0.0-20260720033410 | **MIT** | ✅ LICENSE 实际读取 |
+| `github.com/go-sql-driver/mysql` | v1.9.3 | MPL 2.0 | ✅ LICENSE 已验证 |
+| `github.com/jackc/pgx/v5` | v5.9.1 | MIT | ✅ LICENSE 已验证 |
+| `github.com/google/uuid` | v1.6.0 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `github.com/hjson/hjson-go/v4` | v4.6.0 | MIT | ✅ LICENSE 已验证 |
+| `golang.org/x/crypto` | v0.48.0 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `golang.org/x/sync` | v0.19.0 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `golang.org/x/sys` | v0.41.0 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `golang.org/x/text` | v0.34.0 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `google.golang.org/protobuf` | v1.36.11 | BSD-3-Clause | ✅ LICENSE 已验证 |
+| `google.golang.org/grpc` | v1.79.1 | Apache 2.0 | ✅ LICENSE 已验证 |
+| `gopkg.in/yaml.v3` | v3.0.1 | MIT | ✅ LICENSE 已验证 |
+| `github.com/stretchr/testify` | v1.11.1 | MIT | ✅ LICENSE（测试依赖） |
+| `github.com/sirupsen/logrus` | v1.9.3 | MIT | ✅ LICENSE 已验证 |
+| `github.com/pkg/errors` | v0.9.1 | BSD-2-Clause | ✅ LICENSE 已验证 |
+| `github.com/shopspring/decimal` | v1.4.0 | MIT | ✅ LICENSE 已验证 |
+| 其余 57 个模块 | — | MIT/Apache 2.0/BSD | ✅ 逐模块 LICENSE 文件已确认存在 |
+
+**结论**：Omni 依赖树无 GPL/AGPL/SSPL 或未知许可证。
+
+### 5.2 pgparser（1 模块）
+
+| 模块 | 版本 | 许可证 |
+|------|------|--------|
+| `github.com/pgplex/pgparser` | v0.2.0 | PostgreSQL License (BSD-like) |
+
+### 5.3 TiDB Parser（43 模块）
+
+42/43 验证通过。1 缺失：`modernc.org/parser@v1.1.0`（build-time yacc 依赖）。
+
+### 5.4 Vitess（42 模块）
+
+全部模块含 LICENSE 文件。核心许可：Apache 2.0 (vitess), MIT (uber-go), BSD-3-Clause (golang.org/x), MPL 2.0 (go-sql-driver/mysql)。
+
+---
+
+## 6. 回滚/清理
 
 - **仓库分支**：`feat/P0-04-parser-spike`（仅本报告 1 个文件）
 - **回滚**：`git switch main && git branch -D feat/P0-04-parser-spike` + 删除临时目录
