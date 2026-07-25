@@ -32,7 +32,9 @@ jobs:
             fi
           done
 
-          if printf '%s' "$PR_BODY" | grep -Eq '<!--|TODO|待填写'; then
+          # 检测未填写的模板占位符。模板占位符特征为 <!-- 后跟中文提示（例如/无则填/Low / Medium/人类或/Codex 链接）。
+          # 显式放行 CodeRabbit 等工具自动生成的 HTML 注释块（<!-- This is an auto-generated comment / <!-- end of auto-generated comment）。
+          if printf '%s' "$PR_BODY" | grep -Ev '<!-- (This is an auto-generated comment|end of auto-generated comment)' | grep -Eq '<!--(例如|无则填|Low / Medium|人类或|Codex 链接)|TODO|待填写'; then
             echo "PR 描述仍包含未填写的模板内容。"
             exit 1
           fi
