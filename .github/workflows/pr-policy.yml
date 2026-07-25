@@ -32,7 +32,16 @@ jobs:
             fi
           done
 
-          if printf '%s' "$PR_BODY" | grep -Eq '<!--|TODO|待填写'; then
+          # 检测未填写的模板占位符。模板占位符特征为 <!-- 后跟中文提示（例如/无则填/Low / Medium/人类或/Codex 链接）。
+          # 完整移除 CodeRabbit 等工具自动生成的 HTML 注释块（从开标记到闭标记之间的所有行），
+          # 避免块内部包含占位符文字时误判。sed 范围删除比 grep -Ev 单行过滤更稳健。
+          # 不检测泛化关键词 TODO/待填写：它们可能出现在 CodeRabbit summary 描述中导致误判，且模板未使用这些词。
+          body_without_generated_comments="$(
+            printf '%s' "$PR_BODY" |
+              sed '/<!-- This is an auto-generated comment/,/<!-- end of auto-generated comment/d'
+          )"
+          if printf '%s' "$body_without_generated_comments" |
+            grep -Eq '<!-- (例如|无则填|Low / Medium|人类或|Codex 链接)'; then
             echo "PR 描述仍包含未填写的模板内容。"
             exit 1
           fi
