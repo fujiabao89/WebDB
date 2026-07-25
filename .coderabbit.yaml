@@ -344,12 +344,8 @@ reviews:
     # ----------------------------------------------------------------------
     # Docker / 部署
     # ----------------------------------------------------------------------
-    - path:
-        - "deploy/**"
-        - "**/Dockerfile"
-        - "**/.dockerignore"
-        - "**/docker-compose*.yml"
-      instructions: |
+    - path: "deploy/**"
+      instructions: &deploy_inst |
         部署与容器化配置审查。
 
         ## 安全检查
@@ -365,15 +361,18 @@ reviews:
         - 卷挂载是否必要且安全
         - 初始化脚本是否幂等（INSERT ... ON CONFLICT DO NOTHING / INSERT IGNORE）
         - 只读验证脚本（verify-readonly.sh）的测试逻辑是否完整
+    - path: "**/Dockerfile"
+      instructions: *deploy_inst
+    - path: "**/.dockerignore"
+      instructions: *deploy_inst
+    - path: "**/docker-compose*.yml"
+      instructions: *deploy_inst
 
     # ----------------------------------------------------------------------
     # CI/CD 配置
     # ----------------------------------------------------------------------
-    - path:
-        - ".github/workflows/**"
-        - ".github/**/*.yml"
-        - ".github/**/*.yaml"
-      instructions: |
+    - path: ".github/workflows/**"
+      instructions: &cicd_inst |
         CI/CD 工作流审查。
 
         ## 检查重点
@@ -383,30 +382,30 @@ reviews:
         - job 的 permissions 是否遵循最小权限原则（contents: read 而非 write）
         - if 条件的逻辑是否正确
         - 是否遗漏了关键检查步骤（如 go.sum 的一致性校验）
+    - path: ".github/**/*.yml"
+      instructions: *cicd_inst
+    - path: ".github/**/*.yaml"
+      instructions: *cicd_inst
 
     # ----------------------------------------------------------------------
     # 文档与设计
     # ----------------------------------------------------------------------
-    - path:
-        - "docs/**"
-        - "**/*.md"
-      instructions: |
+    - path: "docs/**"
+      instructions: &docs_inst |
         文档与设计文件审查。
 
         - ADR 中的技术决策是否有据可查，标题与 docs/adr/README.md 索引一致
         - ADR-009 状态必须标注为"后续评估"，不得与已接受 ADR 混淆
         - 安全约束是否在文档中明确
         - 任务卡是否包含目标、非目标、验收标准
+    - path: "**/*.md"
+      instructions: *docs_inst
 
     # ----------------------------------------------------------------------
     # 根目录配置文件
     # ----------------------------------------------------------------------
-    - path:
-        - "**/go.mod"
-        - "**/package.json"
-        - "**/tsconfig.json"
-        - "**/vite.config.*"
-      instructions: |
+    - path: "**/go.mod"
+      instructions: &config_inst |
         配置文件审查。
 
         ## 检查重点
@@ -414,6 +413,12 @@ reviews:
         - 是否意外引入了新的运行时依赖（go.mod 的 require vs indirect 区分）
         - 配置选项是否与项目的安全策略和 ADR 决策一致
         - Node/Go 版本是否与 CI runner 和 Dockerfile 保持一致
+    - path: "**/package.json"
+      instructions: *config_inst
+    - path: "**/tsconfig.json"
+      instructions: *config_inst
+    - path: "**/vite.config.*"
+      instructions: *config_inst
 
 # ---------------------------------------------------------------------------
 # 自动回复/对话配置
