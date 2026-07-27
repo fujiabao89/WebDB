@@ -22,7 +22,7 @@ P0 明确不包含：登录、实时协作、行编辑、DML/DDL、生产写入�
 
 ## 实现方式
 
-- 一个分支只完成一个 Task：`feat/<task-id>-<slug>`、`fix/<task-id>-<slug>` 或 `chore/<task-id>-<slug>`。
+- 一个分支只完成一个 Task，并使用 Linear Issue ID：`feat/WEB-<issue-number>-<slug>`、`fix/WEB-<issue-number>-<slug>` 或 `chore/WEB-<issue-number>-<slug>`。
 - 使用测试驱动方式：先写/更新能失败的测试，记录失败，再写最小实现，最后重构。
 - 优先模块化单体：前端在 `apps/web`，执行/API 服务在 `apps/api`，共享契约在 `packages/contracts`，部署在 `deploy/compose`。没有明确批准不得拆微服务。
 - 遵循已有依赖与代码风格。新增运行时依赖、许可证或基础设施前，说明理由、替代项与安全影响。
@@ -80,7 +80,14 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
 ### PR 模板与政策检查（强制）
 
 1. 执行 `gh pr create` 前必须读取仓库当前的 `.github/PULL_REQUEST_TEMPLATE.md`，以该文件作为唯一模板来源。不得自行缩写 PR body，也不得只提供摘要。
-2. 创建 Draft PR 时，PR body 必须保留并填写以下精确章节标题：
+2. PR 标题、分支和正文必须使用同一个 Linear Issue ID：
+
+   - PR 标题：`[WEB-14] P0-04 parser spike`
+   - 分支：`feat/WEB-14-P0-04-parser-spike`
+   - PR 正文：`Task / Issue：WEB-14（P0-04）`
+
+   PR 标题不再强制使用 Conventional Commits 格式；commit message 仍须使用 Conventional Commits。Draft、自动化和依赖更新 PR 也不得豁免，必须先创建真实 Linear 任务。
+3. 创建 Draft PR 时，PR body 必须保留并填写以下精确章节标题：
 
    ```markdown
    ## 任务
@@ -90,18 +97,24 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
    ## AI 协作与交接
    ```
 
-   `## 任务` 不得缺失，必须至少填写 Task/Issue、目标和非目标。没有任务卡时明确写明原因，不得删除该章节。
-3. 使用 `--body-file` 从完整模板文件创建 PR，避免 PowerShell/Git Bash 引号或换行导致章节丢失。模板中的验证命令只能填写实际执行过的结果，不得伪造。
-4. PR 创建后立即读取 GitHub 上的实际 body 并逐项检查上述五个标题；不能只检查本地文件：
+   `## 任务` 不得缺失，必须至少填写与标题、分支一致的 Linear `Task / Issue`、目标和非目标，不再允许以“没有任务卡”为由省略 Linear Issue ID。
+4. 使用 `--body-file` 从完整模板文件创建 PR，避免 PowerShell/Git Bash 引号或换行导致章节丢失。模板中的验证命令只能填写实际执行过的结果，不得伪造。
+5. PR 创建后立即读取 GitHub 上的实际标题、head 分支和 body，确认三处 Linear Issue ID 一致，并逐项检查上述五个标题；不能只检查本地文件：
 
    ```powershell
-   $body = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json body --jq '.body'
+   $pr = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json title,headRefName,body | ConvertFrom-Json
+   $gitRoot = Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent
+   $gitBash = Join-Path $gitRoot 'bin\bash.exe'
+   if (-not (Test-Path -LiteralPath $gitBash)) { throw "未找到 Git Bash: $gitBash" }
+   & $gitBash .github/scripts/validate-pr-metadata.sh $pr.title $pr.headRefName $pr.body
+   if ($LASTEXITCODE -ne 0) { throw 'PR Linear 元数据校验失败' }
+   $body = $pr.body
    $required = @('## 任务','## 改动与风险','## 验证证据','## WebDB 安全核对','## AI 协作与交接')
    $missing = @($required | Where-Object { $body -notmatch [regex]::Escape($_) })
    if ($missing.Count -gt 0) { throw "PR 模板缺少章节: $($missing -join ', ')" }
    ```
 
-5. 如果 PR 政策检查报告“缺少 PR 模板章节”，只修正 PR body 并重新验证政策检查；不要通过修改 workflow、ruleset 或删除检查来绕过。模板校验通过前，不得启用自动轮询器，也不得触发 `@codex review`。
+6. 如果 PR 政策检查失败，只修正 PR 标题、分支或 body 并重新验证；不要通过修改 workflow、ruleset 或删除检查来绕过。政策校验通过前，不得启用自动轮询器，也不得触发 `@codex review`。
 
 ### Draft PR 创建后的闭环初始化
 

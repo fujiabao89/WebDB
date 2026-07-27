@@ -136,7 +136,7 @@
 
 ## Git、验证与交接
 
-- 使用短生命周期分支：`feat/<task-id>-<slug>`、`fix/<task-id>-<slug>` 或 `chore/<task-id>-<slug>`；提交使用 Conventional Commits。
+- 使用 Linear 可识别的短生命周期分支：`feat/WEB-<issue-number>-<slug>`、`fix/WEB-<issue-number>-<slug>` 或 `chore/WEB-<issue-number>-<slug>`。PR 标题必须以同一 Issue ID 开头（例如 `[WEB-14] P0-04 parser spike`），且 PR 正文的 `Task / Issue` 必须填写同一 ID。所有 PR（包括 Draft 与自动化 PR）均须先有真实 Linear 任务；提交继续使用 Conventional Commits。
 - 创建 Draft PR 前运行本地可用的格式化、静态检查、测试和构建。不要通过删除/跳过测试使 CI 通过。
 - PR Ready 后由独立 Reviewer（优先 Codex）审查；实现 Agent 不能批准或合并自己的 PR。
 - P0/P1 审查意见必须修复或由 Owner 在 PR 中记录有期限的例外；P2 必须创建有 Owner 的后续任务；P3 不阻断。
