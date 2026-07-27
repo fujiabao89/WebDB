@@ -12,18 +12,20 @@ jobs:
   validate:
     name: PR contract
     runs-on: ubuntu-latest
-    if: github.event.pull_request.draft == false
     steps:
-      - name: Validate title and required PR sections
+      - uses: actions/checkout@v4
+
+      - name: Test PR metadata policy
+        run: bash .github/scripts/test-pr-metadata.sh
+
+      - name: Validate Linear metadata and required PR sections
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_HEAD_REF: ${{ github.head_ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
-          if ! printf '%s' "$PR_TITLE" | grep -Eq '^(feat|fix|chore|docs|test|refactor|build|ci)(\([a-z0-9/_-]+\))?!?: .+'; then
-            echo "PR 标题必须使用 Conventional Commits，例如 feat(api): add read-only query policy"
-            exit 1
-          fi
+          bash .github/scripts/validate-pr-metadata.sh "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
 
           for section in '## 任务' '## 改动与风险' '## 验证证据' '## WebDB 安全核对' '## AI 协作与交接'; do
             if ! printf '%s' "$PR_BODY" | grep -Fq "$section"; then

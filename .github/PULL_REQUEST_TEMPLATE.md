@@ -6,7 +6,7 @@
 
 ## 任务
 
-- Task / Issue：<!-- 例如 P0-03；没有任务卡时说明原因 -->
+- Task / Issue：<!-- 必须填写 Linear Issue ID，例如 WEB-13（P0-04） -->
 - 目标：
 - 非目标：
 
