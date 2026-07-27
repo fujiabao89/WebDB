@@ -4,11 +4,18 @@ set -euo pipefail
 
 validator="$(dirname "$0")/validate-pr-metadata.sh"
 failures=0
+required_sections_suffix='
+## 改动与风险
+## 验证证据
+## WebDB 安全核对
+## AI 协作与交接'
 
 expect_pass() {
   local name=$1
-  shift
-  if ! bash "$validator" "$@" >/dev/null; then
+  local title=$2
+  local head_ref=$3
+  local body=$4
+  if ! bash "$validator" "$title" "$head_ref" "${body}${required_sections_suffix}" >/dev/null; then
     echo "FAIL (expected pass): $name"
     failures=$((failures + 1))
   fi
@@ -16,8 +23,21 @@ expect_pass() {
 
 expect_fail() {
   local name=$1
-  shift
-  if bash "$validator" "$@" >/dev/null 2>&1; then
+  local title=$2
+  local head_ref=$3
+  local body=$4
+  if bash "$validator" "$title" "$head_ref" "${body}${required_sections_suffix}" >/dev/null 2>&1; then
+    echo "FAIL (expected rejection): $name"
+    failures=$((failures + 1))
+  fi
+}
+
+expect_fail_raw() {
+  local name=$1
+  local title=$2
+  local head_ref=$3
+  local body=$4
+  if bash "$validator" "$title" "$head_ref" "$body" >/dev/null 2>&1; then
     echo "FAIL (expected rejection): $name"
     failures=$((failures + 1))
   fi
@@ -138,6 +158,32 @@ expect_fail \
   "[WEB-7] documentation update" \
   "docs/WEB-7-documentation-update" \
   "Task / Issue: WEB-7"
+
+expect_fail_raw \
+  "a tilde fence cannot close a backtick fence" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "\`\`\`text
+~~~
+## 任务
+- Task / Issue：WEB-13
+## 改动与风险
+## 验证证据
+## WebDB 安全核对
+## AI 协作与交接"
+
+expect_fail_raw \
+  "a shorter fence cannot close a longer fence" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "\`\`\`\`text
+\`\`\`
+## 任务
+- Task / Issue：WEB-13
+## 改动与风险
+## 验证证据
+## WebDB 安全核对
+## AI 协作与交接"
 
 workflow="${PR_POLICY_WORKFLOW:-$(dirname "$0")/../workflows/pr-policy.yml}"
 if grep -Fq 'uses: actions/checkout@' "$workflow"; then

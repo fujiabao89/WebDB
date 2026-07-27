@@ -59,13 +59,6 @@ jobs:
           set -euo pipefail
           bash "$RUNNER_TEMP/pr-policy/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
 
-          for section in '## 任务' '## 改动与风险' '## 验证证据' '## WebDB 安全核对' '## AI 协作与交接'; do
-            if ! printf '%s' "$PR_BODY" | grep -Fq "$section"; then
-              echo "缺少 PR 模板章节：$section"
-              exit 1
-            fi
-          done
-
           # 检测未填写的模板占位符。模板占位符特征为 <!-- 后跟中文提示（例如/无则填/Low / Medium/人类或/Codex 链接）。
           # 完整移除 CodeRabbit 等工具自动生成的 HTML 注释块（从开标记到闭标记之间的所有行），
           # 避免块内部包含占位符文字时误判。sed 范围删除比 grep -Ev 单行过滤更稳健。
