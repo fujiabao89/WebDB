@@ -37,6 +37,19 @@ expect_pass \
   "## 任务
 - Task / Issue：WEB-7"
 
+expect_pass \
+  "fenced examples do not override the canonical task field" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 任务
+- Task / Issue：WEB-13（P0-04）
+
+## 验证证据
+
+\`\`\`text
+- Task / Issue：WEB-14
+\`\`\`"
+
 expect_fail \
   "old Conventional-only title" \
   "feat(api): add read-only query policy" \
@@ -68,6 +81,44 @@ expect_fail \
   "## 任务
 - Task / Issue：P0-04
 - Related to WEB-13"
+
+expect_fail \
+  "matching ID in fenced code cannot mask a mismatched task field" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 任务
+- Task / Issue：WEB-14
+
+## 验证证据
+
+\`\`\`text
+- Task / Issue：WEB-13
+\`\`\`"
+
+expect_fail \
+  "matching ID in an HTML comment cannot mask a mismatched task field" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 任务
+- Task / Issue：WEB-14
+<!--
+- Task / Issue：WEB-13
+-->"
+
+expect_fail \
+  "duplicate canonical task fields" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 任务
+- Task / Issue：WEB-13
+- Task / Issue：WEB-13"
+
+expect_fail \
+  "canonical task field outside the task section" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 改动与风险
+- Task / Issue：WEB-13"
 
 expect_fail \
   "invalid zero issue number" \

@@ -26,8 +26,69 @@ if [[ $title_issue != "$branch_issue" ]]; then
   exit 1
 fi
 
-body_issue_pattern="^[[:space:]]*-[[:space:]]*Task[[:space:]]*/[[:space:]]*Issue[：:][[:space:]]*${title_issue}([^A-Z0-9-]|$)"
-if ! printf '%s\n' "$pr_body" | grep -Eq "$body_issue_pattern"; then
-  echo "PR 正文的 Task / Issue 必须包含与标题、分支一致的 ${title_issue}。"
+task_heading_pattern='^##[[:space:]]+任务[[:space:]]*$'
+section_heading_pattern='^##[[:space:]]+'
+fence_pattern='^[[:space:]]*(```|~~~)'
+task_line_pattern='^[[:space:]]*-[[:space:]]*Task[[:space:]]*/[[:space:]]*Issue:[[:space:]]*(WEB-[1-9][0-9]*)(.*)$'
+in_task_section=0
+in_fence=0
+in_html_comment=0
+task_issue_count=0
+body_issue=''
+
+while IFS= read -r line || [[ -n $line ]]; do
+  if (( in_html_comment )); then
+    if [[ $line == *'-->'* ]]; then
+      in_html_comment=0
+    fi
+    continue
+  fi
+
+  if (( in_fence )); then
+    if [[ $line =~ $fence_pattern ]]; then
+      in_fence=0
+    fi
+    continue
+  fi
+
+  if [[ $line == *'<!--'* ]]; then
+    if [[ $line != *'-->'* ]]; then
+      in_html_comment=1
+    fi
+    continue
+  fi
+
+  if [[ $line =~ $fence_pattern ]]; then
+    in_fence=1
+    continue
+  fi
+
+  if [[ $line =~ $task_heading_pattern ]]; then
+    in_task_section=1
+    continue
+  fi
+  if [[ $line =~ $section_heading_pattern ]]; then
+    in_task_section=0
+    continue
+  fi
+
+  normalized_line=${line//：/:}
+  if (( in_task_section )) && [[ $normalized_line =~ $task_line_pattern ]]; then
+    candidate_issue=${BASH_REMATCH[1]}
+    issue_suffix=${BASH_REMATCH[2]}
+    if [[ ! $issue_suffix =~ ^[A-Za-z0-9-] ]]; then
+      task_issue_count=$((task_issue_count + 1))
+      body_issue=$candidate_issue
+    fi
+  fi
+done <<< "$pr_body"
+
+if (( task_issue_count != 1 )); then
+  echo "PR 正文的 ## 任务 区段必须恰好包含一条有效的 Task / Issue。"
+  exit 1
+fi
+
+if [[ $body_issue != "$title_issue" ]]; then
+  echo "PR 正文 Task / Issue 中的 $body_issue 与标题、分支中的 $title_issue 不一致。"
   exit 1
 fi
