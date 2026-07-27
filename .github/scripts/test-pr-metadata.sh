@@ -121,6 +121,13 @@ expect_fail \
 - Task / Issue：WEB-13"
 
 expect_fail \
+  "lowercase suffix cannot extend a valid issue ID" \
+  "[WEB-13] P0-04 SQL safety policy" \
+  "feat/WEB-13-P0-04-sql-safety-policy" \
+  "## 任务
+- Task / Issue：WEB-13foo"
+
+expect_fail \
   "invalid zero issue number" \
   "[WEB-0] repository policy" \
   "chore/WEB-0-repository-policy" \

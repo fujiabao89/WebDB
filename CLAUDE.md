@@ -103,13 +103,11 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
 
    ```powershell
    $pr = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json title,headRefName,body | ConvertFrom-Json
-   if ($pr.title -notmatch '^\[(WEB-[1-9][0-9]*)\]\s+.+') { throw 'PR 标题缺少有效 Linear Issue ID' }
-   $titleIssue = $Matches[1]
-   if ($pr.headRefName -notmatch '^(feat|fix|chore)/(WEB-[1-9][0-9]*)-[A-Za-z0-9][A-Za-z0-9-]*$') { throw 'PR 分支命名不符合 Linear 规则' }
-   $branchIssue = $Matches[2]
-   if ($titleIssue -ne $branchIssue) { throw "PR 标题与分支的 Linear Issue ID 不一致: $titleIssue / $branchIssue" }
-   $bodyIssuePattern = "(?<![A-Z0-9-])$([regex]::Escape($titleIssue))(?![A-Z0-9-])"
-   if ($pr.body -notmatch $bodyIssuePattern) { throw "PR 正文缺少 $titleIssue" }
+   $gitRoot = Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent
+   $gitBash = Join-Path $gitRoot 'bin\bash.exe'
+   if (-not (Test-Path -LiteralPath $gitBash)) { throw "未找到 Git Bash: $gitBash" }
+   & $gitBash .github/scripts/validate-pr-metadata.sh $pr.title $pr.headRefName $pr.body
+   if ($LASTEXITCODE -ne 0) { throw 'PR Linear 元数据校验失败' }
    $body = $pr.body
    $required = @('## 任务','## 改动与风险','## 验证证据','## WebDB 安全核对','## AI 协作与交接')
    $missing = @($required | Where-Object { $body -notmatch [regex]::Escape($_) })
