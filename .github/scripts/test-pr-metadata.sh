@@ -139,6 +139,19 @@ expect_fail \
   "docs/WEB-7-documentation-update" \
   "Task / Issue: WEB-7"
 
+workflow="${PR_POLICY_WORKFLOW:-$(dirname "$0")/../workflows/pr-policy.yml}"
+if grep -Fq 'uses: actions/checkout@' "$workflow"; then
+  echo "FAIL: PR policy must not use checkout because malformed gitlinks can break credential cleanup"
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'permissions:' "$workflow" ||
+  ! grep -Fq 'contents: read' "$workflow" ||
+  ! grep -Fq 'pull-requests: read' "$workflow"; then
+  echo "FAIL: PR policy must keep explicit read-only permissions"
+  failures=$((failures + 1))
+fi
+
 if (( failures > 0 )); then
   exit 1
 fi
