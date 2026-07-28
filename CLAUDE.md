@@ -22,7 +22,7 @@ P0 明确不包含：登录、实时协作、行编辑、DML/DDL、生产写入�
 
 ## 实现方式
 
-- 一个分支只完成一个 Task：`feat/<task-id>-<slug>`、`fix/<task-id>-<slug>` 或 `chore/<task-id>-<slug>`。
+- 一个分支只完成一个 Task，并使用 Linear Issue ID：`feat/WEB-<issue-number>-<slug>`、`fix/WEB-<issue-number>-<slug>` 或 `chore/WEB-<issue-number>-<slug>`。
 - 使用测试驱动方式：先写/更新能失败的测试，记录失败，再写最小实现，最后重构。
 - 优先模块化单体：前端在 `apps/web`，执行/API 服务在 `apps/api`，共享契约在 `packages/contracts`，部署在 `deploy/compose`。没有明确批准不得拆微服务。
 - 遵循已有依赖与代码风格。新增运行时依赖、许可证或基础设施前，说明理由、替代项与安全影响。
@@ -56,7 +56,7 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
 
 创建 Draft PR 时就必须完整使用 `.github/PULL_REQUEST_TEMPLATE.md`，并附上实际命令与结果；不得等到标记 Ready 时才补模板。必须特别说明 SQL 策略、权限隔离、超时/取消、连接归还、审计与密钥脱敏是否受影响。
 
-提交后由独立 Codex Review 审查；Claude Code 不得批准或合并自己实现的 PR。收到 P0/P1 审查意见时先复现并修复，再更新测试与 PR 证据；不能复现或不同意时提交可验证证据并升级给 Owner。
+提交后由独立 Codex Review 审查；Claude Code 不得在 GitHub 等平台批准或合并自己实现的 PR，审查文本中的 `APPROVE` 仅表示结论，不是平台批准动作。收到 P0 审查意见时立即停止自动修复并升级人工；仅对符合自动修复范围的 P1/P2 先复现并修复，再更新测试与 PR 证据。不能复现或不同意时，提交可验证证据并升级给 Owner。
 
 ## Codex-Claude 自动审查闭环（强制）
 
@@ -75,12 +75,19 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
    ```
 
 2. 检查仓库、分支和工作区。不得覆盖、stash、reset、restore 或删除用户已有的未提交改动；工作区不干净时停止并报告。
-3. 一个分支只完成一个任务。完成首个可验证提交后创建 Draft PR；Claude Code 永远不得批准、关闭或合并自己的 PR。
+3. 一个分支只完成一个任务。完成首个可验证提交后创建 Draft PR；Claude Code 永远不得在 GitHub 等平台批准、关闭或合并自己的 PR。
 
 ### PR 模板与政策检查（强制）
 
 1. 执行 `gh pr create` 前必须读取仓库当前的 `.github/PULL_REQUEST_TEMPLATE.md`，以该文件作为唯一模板来源。不得自行缩写 PR body，也不得只提供摘要。
-2. 创建 Draft PR 时，PR body 必须保留并填写以下精确章节标题：
+2. PR 标题、分支和正文必须使用同一个 Linear Issue ID：
+
+   - PR 标题：`[WEB-14] P0-04 parser spike`
+   - 分支：`feat/WEB-14-P0-04-parser-spike`
+   - PR 正文：`Task / Issue：WEB-14（P0-04）`
+
+   PR 标题不再强制使用 Conventional Commits 格式；commit message 仍须使用 Conventional Commits。Draft、自动化和依赖更新 PR 也不得豁免，必须先创建真实 Linear 任务。
+3. 创建 Draft PR 时，PR body 必须保留并填写以下精确章节标题：
 
    ```markdown
    ## 任务
@@ -90,18 +97,24 @@ Compose：docker compose config；相关服务健康检查与演示数据库集�
    ## AI 协作与交接
    ```
 
-   `## 任务` 不得缺失，必须至少填写 Task/Issue、目标和非目标。没有任务卡时明确写明原因，不得删除该章节。
-3. 使用 `--body-file` 从完整模板文件创建 PR，避免 PowerShell/Git Bash 引号或换行导致章节丢失。模板中的验证命令只能填写实际执行过的结果，不得伪造。
-4. PR 创建后立即读取 GitHub 上的实际 body 并逐项检查上述五个标题；不能只检查本地文件：
+   `## 任务` 不得缺失，必须至少填写与标题、分支一致的 Linear `Task / Issue`、目标和非目标，不再允许以“没有任务卡”为由省略 Linear Issue ID。
+4. 使用 `--body-file` 从完整模板文件创建 PR，避免 PowerShell/Git Bash 引号或换行导致章节丢失。模板中的验证命令只能填写实际执行过的结果，不得伪造。
+5. PR 创建后立即读取 GitHub 上的实际标题、head 分支和 body，确认三处 Linear Issue ID 一致，并逐项检查上述五个标题；不能只检查本地文件：
 
    ```powershell
-   $body = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json body --jq '.body'
+   $pr = gh pr view <PR-NUMBER> --repo fujiabao89/WebDB --json title,headRefName,body | ConvertFrom-Json
+   $gitRoot = Split-Path (Split-Path (Get-Command git).Source -Parent) -Parent
+   $gitBash = Join-Path $gitRoot 'bin\bash.exe'
+   if (-not (Test-Path -LiteralPath $gitBash)) { throw "未找到 Git Bash: $gitBash" }
+   & $gitBash .github/scripts/validate-pr-metadata.sh $pr.title $pr.headRefName $pr.body
+   if ($LASTEXITCODE -ne 0) { throw 'PR Linear 元数据校验失败' }
+   $body = $pr.body
    $required = @('## 任务','## 改动与风险','## 验证证据','## WebDB 安全核对','## AI 协作与交接')
    $missing = @($required | Where-Object { $body -notmatch [regex]::Escape($_) })
    if ($missing.Count -gt 0) { throw "PR 模板缺少章节: $($missing -join ', ')" }
    ```
 
-5. 如果 PR 政策检查报告“缺少 PR 模板章节”，只修正 PR body 并重新验证政策检查；不要通过修改 workflow、ruleset 或删除检查来绕过。模板校验通过前，不得启用自动轮询器，也不得触发 `@codex review`。
+6. 如果 PR 政策检查失败，只修正 PR 标题、分支或 body 并重新验证；不要通过修改 workflow、ruleset 或删除检查来绕过。政策校验通过前，不得启用自动轮询器，也不得触发 `@codex review`。
 
 ### Draft PR 创建后的闭环初始化
 
@@ -160,5 +173,5 @@ PR 编号在 PR 创建前不存在。因此，以下步骤必须在 Draft PR 创
 - Claude 只修复列出的 P1/P2，并运行 `config.json` 中的真实验证；验证通过后才允许 commit 和 push。
 - P0、权限、密钥、生产数据、架构或规则变更、连续失败两次、达到三轮时停止自动修复并等待人工审查。
 - Codex bot 针对当前 SHA 返回 `Didn't find any major issues` 时，记录完成评论并等待人工审查。
-- 永远不得自动合并、批准、关闭 PR，或修改 branch protection/ruleset。最终是否通过和合并只能由用户决定。
+- 永远不得在 GitHub 等平台自动合并、批准、关闭 PR，或修改 branch protection/ruleset。最终是否通过和合并只能由用户决定；审查文本中的 `APPROVE` 不属于平台批准动作。
 - 每次任务交接必须报告：PR 编号、分支、当前 SHA、轮次、验证命令与结果、计划任务状态，以及当前是等待 Codex 还是等待人工审查。

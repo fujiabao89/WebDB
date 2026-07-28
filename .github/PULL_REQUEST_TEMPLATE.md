@@ -1,6 +1,12 @@
+<!--
+  维护者提醒：本模板的占位符被 .github/workflows/pr-policy.yml 的关键词清单检测。
+  若修改占位符措辞，必须同步更新该清单，否则未填占位符将漏检。
+  CodeRabbit 自动生成的 HTML 注释块已被显式放行，无需在此处理。
+-->
+
 ## 任务
 
-- Task / Issue：<!-- 例如 P0-03；没有任务卡时说明原因 -->
+- Task / Issue：<!-- 必须填写 Linear Issue ID，例如 WEB-13（P0-04） -->
 - 目标：
 - 非目标：
 
