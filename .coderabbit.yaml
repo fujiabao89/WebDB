@@ -24,8 +24,10 @@ reviews:
 
   review_status: true
   review_details: true
-  review_progress: true
-  commit_status: false
+  # Publish CodeRabbit's legacy commit status so GitHub rulesets can select it
+  # as a required check with CodeRabbit App as the expected source.
+  review_progress: false
+  commit_status: true
   fail_commit_status: true
   collapse_walkthrough: true
   changed_files_summary: true
