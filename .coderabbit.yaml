@@ -18,9 +18,9 @@ reviews:
     明确区分已实现内容与任务卡、设计稿中尚未实现的后续能力。
     若 PR 与任务卡、已接受 ADR 或当前代码不一致，指出具体证据。
   auto_title_instructions: |
-    使用 Conventional Commits：
-    type(optional-scope): concise description
-    type 仅可为 feat、fix、chore、docs、test、refactor、build 或 ci。
+    保留仓库 PR Contract 要求的 Linear Issue ID 前缀，并精炼其后的描述：
+    [WEB-N] concise description
+    不要删除、替换或移动现有的 [WEB-N] 前缀。
 
   review_status: true
   review_details: true
@@ -81,8 +81,11 @@ reviews:
     title:
       mode: error
       requirements: |
-        Must match Conventional Commits:
-        ^(feat|fix|chore|docs|test|refactor|build|ci)(\([a-z0-9/_-]+\))?!?: .+
+        Must match the repository PR Contract exactly:
+        ^\[WEB-[1-9][0-9]*\][[:space:]]+.+
+        The issue ID must match the branch name and the Task / Issue line in
+        the PR description. Conventional Commits applies to commit messages,
+        not to this repository's PR titles.
     description:
       mode: error
     issue_assessment:
