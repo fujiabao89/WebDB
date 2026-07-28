@@ -76,8 +76,8 @@ docs/TRAE-WORK-CODE-REVIEW.md
 4. 指定 PR 编号，要求读取 PR 的实际 base/head、Linear Task、完整 diff 和 CI。
 5. 不提供 GitHub token、数据库凭证、`.env`、生产日志或真实数据。
 
-TRAE Work 的 GitHub 集成用于读取仓库、运行 Code 任务和管理 PR，不代表它会像
-CodeRabbit 一样自动监听每个 PR。每次审查都必须显式发起。
+TRAE Work 的 GitHub 集成用于读取仓库、运行 Code 任务和读取 PR 上下文，不代表
+它会像 CodeRabbit 一样自动监听每个 PR。每次审查都必须显式发起。
 
 ## 发起审查
 
