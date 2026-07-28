@@ -12,4 +12,5 @@ These project rules are a compatibility entry point for TRAE clients. The root
 4. Treat reviews as read-only unless the user separately and explicitly asks
    for fixes or GitHub writes.
 5. Never claim that TRAE Work is a GitHub required status check. GitHub CI,
-   CodeRabbit, and an independent reviewer remain the merge gates.
+   CodeRabbit, and an independent reviewer remain the merge gates. A textual
+   `APPROVE` from TRAE Work is not a GitHub platform approval.

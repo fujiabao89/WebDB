@@ -5,6 +5,7 @@
 本流程适用于 **TRAE Work 桌面版的 Code 模式**。TRAE Work 用于本地变更或
 GitHub Pull Request 的辅助审查，但不会产生可加入 GitHub ruleset 的 required
 status check，也不替代 GitHub CI、CodeRabbit 或独立 Reviewer。
+TRAE Work 输出的文本 `APPROVE` 不是 GitHub 平台 approval。
 
 | 配置 | 职责 | 权威性 |
 | --- | --- | --- |
