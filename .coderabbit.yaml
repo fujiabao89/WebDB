@@ -1,0 +1,341 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+# Repository-owned policy. Do not merge implicit organization defaults into this
+# security-sensitive repository; organization global overrides can still win.
+language: zh-CN
+tone_instructions: "简洁、直接、基于证据；只报告本次变更引入且可操作的问题，给出文件位置、影响、触发条件和最小修复方向。"
+early_access: false
+inheritance: false
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+
+  high_level_summary: true
+  high_level_summary_in_walkthrough: true
+  high_level_summary_instructions: |
+    用中文概括目标、行为变化、数据/权限/SQL/部署影响、测试证据和剩余风险。
+    明确区分已实现内容与任务卡、设计稿中尚未实现的后续能力。
+    若 PR 与任务卡、已接受 ADR 或当前代码不一致，指出具体证据。
+  auto_title_instructions: |
+    使用 Conventional Commits：
+    type(optional-scope): concise description
+    type 仅可为 feat、fix、chore、docs、test、refactor、build 或 ci。
+
+  review_status: true
+  review_details: true
+  review_progress: true
+  commit_status: false
+  fail_commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+
+  # Avoid non-review noise and unsolicited repository mutations.
+  suggested_labels: false
+  auto_apply_labels: false
+  suggested_reviewers: false
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+  abort_on_close: true
+  disable_cache: false
+
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    ignore_title_keywords: []
+    drafts: false
+    base_branches:
+      - ".*"
+    ignore_usernames: []
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+    custom: []
+
+  pre_merge_checks:
+    # This is a single-maintainer repository today, so the author must retain an
+    # emergency override. P0/P1 findings still require an independent reviewer
+    # or a time-bounded Owner exception under AGENTS.md.
+    override_requested_reviewers_only: false
+    docstrings:
+      mode: "off"
+    title:
+      mode: error
+      requirements: |
+        Must match Conventional Commits:
+        ^(feat|fix|chore|docs|test|refactor|build|ci)(\([a-z0-9/_-]+\))?!?: .+
+    description:
+      mode: error
+    issue_assessment:
+      mode: warning
+    custom_checks:
+      - name: "Task scope and authority"
+        mode: error
+        instructions: |
+          Pass only when the PR identifies exactly one Task/Issue (or explains
+          why a documentation-only maintenance change has no task), states goal
+          and non-goals, and does not implement a blocked or unapproved
+          architecture choice. Fail if the diff expands scope, contradicts an
+          accepted ADR, or silently chooses an option that AGENTS.md requires
+          the Owner to approve.
+      - name: "WebDB security boundaries"
+        mode: error
+        instructions: |
+          Pass only when changed behavior preserves every applicable P0
+          boundary: browser never receives or uses DB credentials/KEK/plaintext
+          keys; target DB access stays server-side and least-privileged;
+          workspace, connection, environment policy and native DB permission
+          denials fail closed; SQL safety is single-statement and
+          dialect-AST-based with unknown/parse failure denied; timeout, row
+          limit, cancellation and bounded concurrency remain enforced; secrets,
+          raw sensitive results/tokens and unsanitized errors do not enter APIs,
+          logs, audit bodies or metrics; audit remains append-only. Trusted
+          metadata migrations and synthetic local fixtures may contain DDL, but
+          must not create a user-facing P0 DDL/DML execution path.
+      - name: "Tests, docs and handoff evidence"
+        mode: error
+        instructions: |
+          Pass only when behavior changes have focused regression tests,
+          security-sensitive paths include negative/adversarial cases, and the
+          PR description contains actual validation evidence, risks, and a
+          rollback or forward-fix plan. If API, schema, permissions, SQL policy,
+          deployment, audit, or another accepted contract changes, require the
+          matching Task/ADR/design documentation and tests in the same PR.
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Follow AGENTS.md and .github/coderabbit-review-guidelines.md. Establish
+        the linked task, accepted ADRs, current implementation, and exact diff
+        before commenting. Report only issues introduced by this PR. Prioritize
+        correctness, security, tenant isolation, bounded resource use, failure
+        cleanup, compatibility and missing tests. Do not report style-only
+        preferences already enforced by formatters/linters. Do not describe
+        future roadmap items as missing bugs unless the active task requires
+        them. Use P0/P1/P2/P3 severity semantics from the review guidelines.
+
+    - path: "apps/api/**/*.go"
+      instructions: |
+        Trace untrusted input through authorization, policy, adapter, database
+        and audit paths. Check context propagation, timeout/cancellation,
+        rows/connection/permit cleanup on success, error, panic and client
+        disconnect, stable sanitized error mapping, bounded collections and
+        concurrency safety. Verify workspace_id and connection_id are bound
+        together and cannot be supplied as unrelated identifiers. Require
+        table-driven negative tests for changed security decisions.
+
+    - path: "apps/api/internal/adapter/**"
+      instructions: |
+        Treat adapters as resource and dialect boundaries, not as the SQL
+        authorization boundary. Check PostgreSQL and MySQL behavior separately,
+        pool generation/lifecycle, acquire timeout, admission release,
+        rows.Close and rows.Err, cancellation mapping and page-size/max-row
+        enforcement. Keyset pagination must use a server-verified unique sort
+        plan; never trust a client Unique flag. Continuation state must follow
+        ADR-014/015 and fail closed on stale identity, policy or generation.
+
+    - path: "apps/api/internal/metadata/**"
+      instructions: |
+        Verify tenant-scoped composite keys/foreign keys, non-null semantics,
+        transaction atomicity, sanitized execution errors and metadata-only
+        audit content. Audit events must be append-only; normal application
+        paths must not update/delete/truncate them. Credentials must be
+        ciphertext envelopes/references only, never plaintext or KEK material.
+
+    - path: "apps/api/internal/migrate/**"
+      instructions: |
+        Compare migrations with ADR-013 and later accepted schema ADRs. Check
+        forward migration from every supported prior version, constraints,
+        composite tenant isolation, indexes, idempotent migration tooling and
+        append-only audit enforcement. DDL is expected here; review it as trusted
+        WebDB metadata migration, not as target-database user SQL.
+
+    - path: "apps/web/**"
+      instructions: |
+        The browser must never connect directly to target databases or receive
+        DB passwords, KEK/plaintext keys, continuation internals or unredacted
+        sensitive results/errors. Check TypeScript contract drift, unsafe HTML,
+        XSS/URL injection, secret persistence in storage, cancellation/race
+        handling, bounded rendering and accessible loading/error states.
+
+    - path: "packages/contracts/**"
+      instructions: |
+        Treat exported types and error codes as cross-layer API contracts.
+        Detect breaking or ambiguous changes, optional fields that weaken
+        fail-closed behavior, secret-bearing fields, client-controlled security
+        claims and divergence from Go models or task acceptance criteria.
+        Require contract tests for changed discriminated unions or mappings.
+
+    - path: "deploy/**"
+      instructions: |
+        P0 Compose is local development only. Check loopback-only host exposure,
+        least-privileged/read-only demo DB users, health checks, bounded
+        resources, non-root containers, synthetic fixtures and cleanup. Reject
+        embedded real credentials/KEK, production claims, broad network
+        exposure, privileged containers or writable target-DB grants.
+
+    - path: ".github/**"
+      instructions: |
+        Check least-privilege workflow permissions, untrusted PR execution,
+        shell injection, secret exposure, action provenance, deterministic
+        checks and branch-policy compatibility. Do not recommend skipping or
+        deleting tests to make CI pass. Review CODEOWNERS and templates against
+        the single-Task and independent-review rules.
+
+    - path: "**/*.sql"
+      instructions: |
+        Determine whether the file is a trusted metadata migration, a synthetic
+        local fixture, or target-database query-policy test data before judging
+        DDL/DML. For policy fixtures, require adversarial multi-statement,
+        comment, string literal, executable-comment and dialect-specific cases.
+        Never accept prefix/regex matching as the execution safety boundary.
+
+    - path: "docs/**"
+      instructions: |
+        Verify documentation against current code, migrations, tests, Task
+        status and accepted ADRs. Flag claims that blocked/future work is
+        complete, stale paths/links, schema/constraint drift, weakened security
+        wording, missing handoff evidence, secrets, real user data or
+        unsanitized logs. Avoid pure prose/style preferences.
+
+    - path: "superpowers/**"
+      instructions: |
+        This is imported tooling rather than the WebDB product. Report only
+        concrete security, supply-chain, licensing or repository-integration
+        regressions introduced by the PR; do not apply WebDB product scope rules
+        to its internal feature set.
+
+    - path: "ecc/**"
+      instructions: |
+        This is imported tooling rather than the WebDB product. Report only
+        concrete security, supply-chain, licensing or repository-integration
+        regressions introduced by the PR; do not apply WebDB product scope rules
+        to its internal feature set.
+
+  tools:
+    ast-grep:
+      essential_rules: true
+    shellcheck:
+      enabled: true
+    markdownlint:
+      enabled: true
+    github-checks:
+      enabled: true
+    # Most prose is Chinese; English grammar feedback is low-signal here.
+    languagetool:
+      enabled: false
+    hadolint:
+      enabled: true
+    golangci-lint:
+      enabled: true
+    yamllint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    checkov:
+      enabled: true
+    eslint:
+      enabled: true
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    opengrep:
+      enabled: true
+    # Avoid duplicate findings with OpenGrep unless a repository Semgrep policy
+    # is added in a dedicated task.
+    semgrep:
+      enabled: false
+    # The repository intentionally contains PostgreSQL and MySQL SQL; a single
+    # implicit SQLFluff dialect would create misleading feedback.
+    sqlfluff:
+      enabled: false
+    squawk:
+      enabled: true
+    trivy:
+      enabled: true
+    oxc:
+      enabled: true
+    dotenvLint:
+      enabled: true
+    osvScanner:
+      enabled: true
+    reactDoctor:
+      enabled: true
+    presidio:
+      enabled: true
+    skillspector:
+      enabled: true
+    psscriptanalyzer:
+      enabled: true
+
+chat:
+  art: false
+  allow_non_org_members: false
+  auto_reply: true
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - ".github/coderabbit-review-guidelines.md"
+      - "webdb-design-draft.md"
+      - "docs/adr/*.md"
+  learnings:
+    scope: local
+    approval_delay: 7
+  issues:
+    scope: local
+  jira:
+    usage: disabled
+  linear:
+    usage: disabled
+  pull_requests:
+    scope: local
+  mcp:
+    usage: disabled
+  automatic_repository_linking: false
+  linked_repositories: []
+
+# CodeRabbit is a reviewer in this repository, not an autonomous issue/plan
+# author. These write-oriented features stay off unless a dedicated Task and
+# permission review explicitly enables them.
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
+    auto_planning:
+      enabled: false
+  labeling:
+    labeling_instructions: []
+    auto_apply_labels: false
