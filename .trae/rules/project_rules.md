@@ -9,8 +9,9 @@ These project rules are a compatibility entry point for TRAE clients. The root
    AGENTS.md in context**. Do not rely on this compatibility file alone.
 3. For code or pull-request review, use the project skill at
    `.trae/skills/webdb-code-review/SKILL.md`.
-4. Treat reviews as read-only unless the user separately and explicitly asks
-   for fixes or GitHub writes.
+4. Keep review execution strictly read-only. Fixes or GitHub writes require a
+   separately authorized post-review implementation action and must not be
+   performed through the review skill.
 5. Never claim that TRAE Work is a GitHub required status check. GitHub CI,
    CodeRabbit, and an independent reviewer remain the merge gates. A textual
    `APPROVE` from TRAE Work is not a GitHub platform approval.

@@ -34,6 +34,10 @@ TRAE Work 审查默认只读。除非用户在审查结束后明确要求修复�
 Web 版和移动版不能作为本流程的完整配置入口。需要读取本地 `AGENTS.md`、本地
 分支或执行验证命令时，使用桌面版 Code 模式。
 
+完成 Connector 配置或选择仓库不等于批准外部网络访问。每次通过 GitHub、Linear
+或其他 Connector 读取前，都必须按 `AGENTS.md` 先取得明确的人工批准；获批后仅
+限只读访问本次审查明确指定的仓库、PR 和 Task。
+
 ## 仓库配置
 
 以下文件必须跟随仓库版本控制：
@@ -57,7 +61,10 @@ docs/TRAE-WORK-CODE-REVIEW.md
 1. 在 TRAE Work 桌面版创建 **Code** 任务。
 2. 运行环境选择 **本地（电脑）**。
 3. 选择当前 Task 的独立 worktree，避免混入其他分支改动。
-4. 确认当前分支和目标基线，随后调用 `webdb-code-review`。
+4. 在取得本次外部网络访问的明确人工批准后，运行
+   `git fetch --prune origin main`，记录更新后的 `origin/main` SHA；无法刷新或
+   通过获批的远程读取确认基线 SHA 时，停止并输出 `ESCALATE`。
+5. 使用 `origin/main...HEAD` 调用 `webdb-code-review`。
 
 ### GitHub 云端任务
 
@@ -78,6 +85,8 @@ CodeRabbit 一样自动监听每个 PR。每次审查都必须显式发起。
 
 ```text
 使用 webdb-code-review 审查 WebDB PR #<number>。
+在任何 GitHub、Linear 或其他 Connector 读取前，先取得明确的人工批准；
+获批后只读访问本次指定的 PR 和 Task。
 先读取根目录和适用目录的 AGENTS.md、真实 Linear Task、相关 ADR/设计、
 PR 的实际 base/head、完整 diff、测试、CI 和未解决审查对话。
 本轮只输出审查意见，不修改文件，不提交、推送、评论、批准或合并。
@@ -86,7 +95,8 @@ PR 的实际 base/head、完整 diff、测试、CI 和未解决审查对话。
 如果审查本地分支，将第一行改为：
 
 ```text
-使用 webdb-code-review 审查当前分支相对最新 origin/main 的完整差异。
+使用 webdb-code-review 审查 origin/main...HEAD 的完整差异。
+开始前按批准流程刷新 origin/main 并记录其 SHA；无法确认基线新鲜度时输出 ESCALATE。
 ```
 
 TRAE Work 必须先确认 Task、审查范围和可读取的证据。Task 不存在、refs 无法确认、
@@ -112,7 +122,8 @@ TRAE Work 的文字 `APPROVE` 不是 GitHub 平台批准。只有 GitHub CI、Co
 
 ```markdown
 - TRAE Work 模式：Code / 本地或云端
-- 审查目标：PR #<number> 或 `<head>...<base>`
+- 审查目标：PR #<number> 或 `<base>...<head>`
+- 已验证基线：`<base-ref>@<base-sha>`（刷新或远程确认方式）
 - 审查时 HEAD：`<commit-sha>`
 - 使用 Skill：`webdb-code-review`
 - `AGENTS.md` 导入：已确认 / 未确认

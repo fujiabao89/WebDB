@@ -13,11 +13,14 @@ weaken it here.
 
 1. Identify the real Linear Task, acceptance criteria, non-goals, base ref, and
    head ref.
-2. For a GitHub PR, use its actual base and head refs. For a local task branch,
-   compare it with the current `origin/main` using three-dot diff semantics.
-3. Treat the selected WebDB repository or PR and a user-supplied Linear Task ID
-   as authorization to read only those exact resources through configured
-   connectors. Ask before accessing any other network resource.
+2. Before any connector or other network access, stop and obtain explicit human
+   approval as required by the root `AGENTS.md`. After approval, restrict reads
+   to the exact named WebDB repository or PR and Linear Task.
+3. For a GitHub PR, use its actual base and head refs. For a local task branch,
+   establish base freshness after approval by running
+   `git fetch --prune origin main` or by recording a base SHA confirmed through
+   an approved remote read. Compare `<base>...<head>` using three-dot semantics.
+   If freshness cannot be established, stop with `ESCALATE`.
 4. Stop with `ESCALATE` if the Task is missing, the refs cannot be verified, the
    acceptance criteria are unclear, or the selected environment lacks access.
    Never substitute the PR description for direct Task evidence.
