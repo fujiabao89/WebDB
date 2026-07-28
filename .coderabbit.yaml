@@ -19,8 +19,9 @@ reviews:
     若 PR 与任务卡、已接受 ADR 或当前代码不一致，指出具体证据。
   auto_title_instructions: |
     保留仓库 PR Contract 要求的 Linear Issue ID 前缀，并精炼其后的描述：
-    [WEB-N] concise description
-    不要删除、替换或移动现有的 [WEB-N] 前缀。
+    [WEB-123] concise description
+    其中 123 必须替换为 PR 当前真实的纯数字 Issue 编号；不要删除、替换或移动
+    现有的 [WEB-<数字>] 前缀。
 
   review_status: true
   review_details: true
@@ -74,10 +75,9 @@ reviews:
     custom: []
 
   pre_merge_checks:
-    # This is a single-maintainer repository today, so the author must retain an
-    # emergency override. P0/P1 findings still require an independent reviewer
-    # or a time-bounded Owner exception under AGENTS.md.
-    override_requested_reviewers_only: false
+    # Keep overrides independent and auditable: the PR author cannot ignore
+    # failed pre-merge checks; only explicitly requested reviewers may do so.
+    override_requested_reviewers_only: true
     docstrings:
       mode: "off"
     title:
@@ -308,7 +308,9 @@ chat:
 knowledge_base:
   opt_out: false
   web_search:
-    enabled: true
+    # AGENTS.md requires explicit human escalation before external network
+    # access. Repository and configured guideline context remain available.
+    enabled: false
   code_guidelines:
     enabled: true
     filePatterns:

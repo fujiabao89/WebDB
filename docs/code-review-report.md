@@ -1,6 +1,8 @@
 # WebDB 项目代码审查报告
 
-> 审查分支：`feat/P0-04-sql-safety-policy`
+> 本文是 2026-07-26 审查环境的时间点归档；后续修复可能使其中结论失效。
+>
+> 审查分支：`feat/WEB-13-P0-04-sql-safety-policy`
 > 审查日期：2026-07-26
 > 审查依据：`AGENTS.md`、`CLAUDE.md`、`webdb-design-draft.md`、ADR-001/002/005/006/007/008/009/010/013、P0-02/03/04 任务卡
 > 审查范围：初始基线全量审查（98 个文件，约 11,353 行）
@@ -11,15 +13,15 @@
 
 | 项目 | 详情 |
 | ---- | ---- |
-| 当前分支 | `feat/P0-04-sql-safety-policy` |
-| 对比目标分支 | 无 `main`/`master`/`develop` 分支可比较（仓库为浅克隆，且仅含一个提交） |
+| 当前分支 | `feat/WEB-13-P0-04-sql-safety-policy` |
+| 对比目标分支 | 当时的浅克隆审查环境未获取基础分支 ref，因此无法生成分支差异；这不表示仓库不存在 `main` |
 | 最新提交 | `d335a74 docs(p0-04): address second-round CodeRabbit review` |
 | 审查文件 | 全部 98 个文件、约 11,353 行（视为初始基线审查） |
 | 未提交修改 | 无（`working tree clean`） |
 | 重点审查模块 | `apps/api/internal/adapter/`、`apps/api/internal/metadata/`、`apps/api/internal/migrate/`、`apps/api/cmd/server/`、`deploy/compose/`、`.github/workflows/`、`apps/web/`、`packages/contracts/` |
 | 未能审查内容 | `go.sum` 完整传递依赖哈希、`apps/web/package-lock.json`（1,724 行）、`WebDB项目AI协作开发体系方案.md`（非约束文件） |
 
-> 说明：仓库中仅存在当前分支的单个初始提交，无法做分支间差异审查。本次按"初始基线全量审查"对待，重点对照 `AGENTS.md`、ADRs 与 `webdb-design-draft.md` 的 P0 安全边界。
+> 说明：当时的审查环境仅获取当前分支的单个初始提交，无法做分支间差异审查。本次按"初始基线全量审查"对待，重点对照 `AGENTS.md`、ADRs 与 `webdb-design-draft.md` 的 P0 安全边界。
 
 ## 2. 已读取的项目约束
 
@@ -388,7 +390,7 @@
 | 2 | `apps/api/internal/adapter/manager.go:251-252` | `MaxConnIdleTime`、`HealthCheckPeriod` 硬编码不可配 |
 | 3 | `apps/api/internal/metadata/postgres_repo.go:352,532` | `res.RowsAffected()` 错误被吞 |
 | 4 | `apps/api/internal/migrate/migrate.go:22` | `Run` 不强制 ctx 超时，调用方可能传入无超时 context |
-| 5 | `.github/workflows/pr-policy.yml:35` | `grep -Eq 'TODO|待填写'` 误报风险高，合法 ADR 链接含 TODO 会被拒 |
+| 5 | `.github/workflows/pr-policy.yml:35` | `grep -Eq 'TODO\|待填写'` 误报风险高，合法 ADR 链接含 TODO 会被拒 |
 | 6 | `apps/api/internal/adapter/postgres.go:9` | `pgSchemas` 未过滤 `pg_toast`、`pg_temp_*` 等系统 schema |
 
 ## 5. 测试建议
