@@ -39,6 +39,7 @@
 | 许可证 GPL/AGPL/SSPL | 0/75 | 0/75 |
 | Cross-platform build | ✅ | ✅ |
 | [历史 v7 处置] | **PG TABLE 决策已关闭（Owner 批准等价 Select）** | **[历史] FAIL（ECM recognition）** |
+
 **[历史 v7]** PG TABLE 不再是 parser/依赖阻塞项；MySQL ECM recognition 是 v7 结束时唯一未解决的依赖 Gate。**[Round 3]** 该 Gate 已由 WebDB ECM lexer 验证关闭。**[历史 Gate]** 当时在 Owner 正式依赖批准前不得修改生产依赖或开始 `sqlpolicy`/`execution` 实现；Owner 已于 2026-07-30 正式批准，见文末批准记录。
 详见 §6。
 
@@ -299,8 +300,8 @@ PostgreSQL SQL → 官方 Omni PG AST → 策略判定
 |------|-----|
 | Omni | `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` |
 | Fork/Replace | 无（官方上游） |
-| Harness | `C:/Users/34026/AppData/Local/Temp/p0-04-round3-spike/harness` |
-| 证据 | `C:/Users/34026/AppData/Local/Temp/p0-04-round3-spike/evidence` |
+| Harness | `<TEMP_DIR>/p0-04-round3-spike/harness` |
+| 证据 | `<TEMP_DIR>/p0-04-round3-spike/evidence` |
 
 ### RED → GREEN 修复
 | Bug | 修复 |
@@ -409,7 +410,7 @@ apps/api/go.sum: 4e9ec26c1f1c94b45346be31473faaf615429141ff684df4685f3065d7fae24
 | round3-license-recheck.tsv | 3c952718cb119408191092399e395c2e7775643788d6bae080ecd350475af8fd |
 | round3-license-recheck.log | a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce |
 
-证据目录：`C:/Users/34026/AppData/Local/Temp/p0-04-round3-spike/evidence`
+证据目录：`<TEMP_DIR>/p0-04-round3-spike/evidence`
 
 ### Owner 正式依赖与实施批准（2026-07-30）
 
