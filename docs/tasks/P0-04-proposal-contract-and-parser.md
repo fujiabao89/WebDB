@@ -33,7 +33,7 @@
 
 **`apps/api/internal/adapter/errors.go`**：
 
-```
+```text
 unsupported_engine, unsupported_capability, invalid_config,
 connection_failed, connection_busy, rate_limited,
 query_timeout, query_cancelled, invalid_page_token,
@@ -41,7 +41,7 @@ database_error, pool_closed, stale_config, config_conflict,
 unsupported_query, result_too_large, pagination_capacity_exhausted
 ```
 
-P0-04 需要新增 SQL 解析/策略层面的错误码。`unsupported_query` 目前用于 keyset 分页问题，语义与 P0-04 的"不支持语句类型"不同。
+P0-04 需要新增 SQL 解析/策略层面的错误码。`unsupported_query` 已是 Adapter 的稳定 keyset 分页错误码；P0-04 Service 复用同一稳定字符串表示"请求需要分页但缺少可验证的唯一排序计划"，但必须在 Service 阶段 C 自行构造，不能伪装成 Adapter 返回。P0-04 的"不支持语句类型"仍使用独立的 `unsupported_statement`。
 
 ### 1.3 Metadata 模型
 
@@ -63,9 +63,9 @@ P0-04 需要新增 SQL 解析/策略层面的错误码。`unsupported_query` 目
 
 **`apps/api/internal/metadata/postgres_repo.go:540-586`**：
 
-`sanitizeAuditMetadata()` 当前允许列表：`rows_affected`/`row_count`（仅 0..2^31-1 整数）、`cached`（仅 bool）。非法 JSON/null/非对象返回错误，未知字段丢弃。`looksLikeSQL()`/`looksLikeCredential()` 已移除。自由文本 `summary` 已移除。
+当前仓库实现仍允许 `summary`、`rows_affected`、`cached`，且三个键均接受 string/float64/bool；字符串最多保留 500 字节，并通过 `looksLikeSQL()`/`looksLikeCredential()` 启发式脱敏。非法 JSON/null/非对象不会在 sanitizer 层返回 Go 错误，而是原样交给持久化约束；未知字段丢弃。`row_count` 尚未进入允许列表。
 
-P0-04 扩展方案（Owner 待决，当前未实现）：statement_hash（64 字符 hex）、error_code/reason_code（稳定枚举）、engine/environment（稳定枚举）、duration_ms（非负整数）。禁止重新引入自由文本 summary 或通用字符串白名单。
+P0-04 必须先完成尚未实现的基线收紧：移除自由文本 `summary` 及两项启发式函数；`rows_affected`/`row_count` 仅允许 0..2^31-1 整数，`cached` 仅允许 bool；非法 JSON/null/非对象直接返回错误。之后才可按 Owner 批准结果扩展 statement_hash（64 字符 hex）、error_code/reason_code（稳定枚举）、engine/environment（稳定枚举）、duration_ms（非负整数）。不得把计划行为描述为当前实现。
 
 ### 1.5 当前 API 与身份
 
@@ -396,13 +396,13 @@ type AuthorizedExecution struct {
    - requested PageSize > effectiveMaxRows 时，effectivePageSize 等于 effectiveMaxRows，属于单页请求。
    - 不允许使用未经规范化的原始 PageSize 进行分页安全判断。
    - 若 `requiresPagination` 为 true（见 ADR-014）：执行前必须取得有效 `VerifiedSortPlan`。无法证明唯一排序时在访问目标数据库前拒绝，不执行第一页。
-   - 若 `requiresPagination` 为 false：属于单页受限请求，可不创建 continuation，但行数、字节、超时限制不变；不得发放 token。不允许先执行第一页后静默截断。
+   - 若 `requiresPagination` 为 false：属于单页受限请求，可不创建 continuation，但行数、字节、超时限制不变；不得发放 token。执行层必须最多读取 `effectiveMaxRows + 1` 行（额外一行仅作 overflow sentinel）；读到 sentinel 时返回 `result_too_large`，丢弃结果且不生成 token。未读到 sentinel 时才可成功返回最多 `effectiveMaxRows` 行。
 
 10. **权限撤销即时生效**
 
 ### 4.3 执行流拆分（关键修订）
 
-```
+```text
 请求进入
   │
   ├─ 阶段 A：身份与授权（前置）
@@ -471,6 +471,8 @@ type AuthorizedExecution struct {
 ### 4.3.1 Adapter 错误码 → 业务错误码 + 审计 outcome 映射
 
 `invalid_page_token` 在 NextPage 前置校验中处理。`rate_limited` 和 `connection_busy` 的来源和语义见 ADR-016——准入保持在 Adapter 内部，不存在独立的"Service 前置准入层"。
+
+`unsupported_query` 是例外的 **Service 阶段 C 前置错误**：当 `requiresPagination=true` 且缺少或无法验证 `VerifiedSortPlan` 时，Service 在调用 Adapter 前返回该稳定业务错误码。此路径必须断言 `Adapter.Query=0` 和目标数据库访问次数为 0；它复用稳定字符串，不表示 Adapter 实际返回了错误。
 
 | Adapter 错误码 | 触发位置 | Execution 状态 | Audit Outcome | 备注 |
 |---|---|---|---|---|
@@ -568,6 +570,7 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 | `multiple_statements` | 检测到多条语句 | C | |
 | `statement_not_allowed` | 语句类型不允许 | C | DML/DDL/管理语句等 |
 | `unsupported_statement` | 不支持该语句类型 | C | 解析器无法识别 AST 节点 |
+| `unsupported_query` | 分页请求缺少或无法验证唯一排序计划 | C | Service 前置拒绝；复用 Adapter 稳定字符串，但 `Adapter.Query=0` |
 | `query_timeout` | 查询超时 | D | statement_timeout_ms 到期 |
 | `query_cancelled` | 查询已取消 | D | 客户端取消或断开 |
 | `rate_limited` | 速率限制 | D | 令牌桶耗尽 |
@@ -591,6 +594,7 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 | `sql_parse_error` | 422 | |
 | `multiple_statements` | 422 | |
 | `unsupported_statement` | 422 | |
+| `unsupported_query` | 422 | 分页前置条件不满足；不是数据库执行错误 |
 | `invalid_page_token` | 400 | |
 | `query_timeout` | 504 | 上游超时（非客户端请求超时） |
 | `query_cancelled` | 499 | 非标准但广泛使用（nginx 惯例） |
@@ -639,7 +643,7 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 
 ### 8.2 Execution 状态转换
 
-```
+```text
 阶段 B：INSERT → pending
 阶段 C 拒绝：pending → failed（error_code=拒绝原因码）
 阶段 D 开始：pending → running
@@ -683,18 +687,25 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 
 ### 8.5 `sanitizeAuditMetadata()` 允许列表
 
-当前实现（逐字段精确校验，非通用白名单）：
+当前仓库实现（P0-04 尚未修改）：
 
+- 允许键为 `summary` / `rows_affected` / `cached`；三个键均接受 string/float64/bool
+- string 最多保留 500 字节，并通过 `looksLikeSQL()` / `looksLikeCredential()` 启发式脱敏
+- 非法 JSON / null / 非对象在 sanitizer 层原样返回，不产生 Go error；未知字段丢弃
+- `row_count` 尚未允许
+
+P0-04 必须先完成的基线收紧（**计划行为，当前未实现**）：
+
+- 移除自由文本 `summary` 和所有通用 string 白名单
 - `rows_affected` / `row_count`：仅 0..2^31-1 整数（`toNonNegInt`）
 - `cached`：仅 bool
-- 非法 JSON / null / 非对象 → error
-- 未知字段 → 丢弃
-- 无字符串类型白名单字段；`summary` 已移除，`looksLikeSQL()`/`looksLikeCredential()` 已删除
+- 非法 JSON / null / 非对象 → error；未知字段 → 丢弃
+- 删除 `looksLikeSQL()` / `looksLikeCredential()`，改为逐字段精确格式或枚举校验
 
-P0-04 扩展方案（**Owner 待决，当前未实现**）：
+完成上述基线收紧后，P0-04 扩展方案仍需 Owner 最终批准：
 
 ```go
-// 当前实现使用逐字段精确校验（非通用白名单 map），示例如下：
+// P0-04 计划中的严格基线；截至本提案修订日尚未实现：
 // rows_affected/row_count: 仅 0..maxAuditCount 整数（toNonNegInt）
 // cached: 仅 bool
 //
@@ -711,7 +722,8 @@ P0-04 扩展方案（**Owner 待决，当前未实现**）：
 - `statement_hash` 必须是 64 字符 hex 格式（单元测试验证）
 - `error_code` 必须是稳定业务错误码，不得包含 `pq:` 或 `MySQL Error` 前缀
 - `engine`/`environment` 必须是已知枚举值
-- 新增字符串字段需各自实现精确格式校验（如 statement_hash 为 64 字符 hex），不依赖通用启发式扫描。`looksLikeSQL()`/`looksLikeCredential()` 已从代码中移除
+- 新增字符串字段需各自实现精确格式校验（如 statement_hash 为 64 字符 hex），不依赖通用启发式扫描
+- 实施时必须删除 `looksLikeSQL()`/`looksLikeCredential()` 并增加回归测试，不能在删除前声称严格基线已经生效
 - 实施时需同步更新 `sanitizeAuditMetadata()`：为 error_code/reason_code 添加白名单前缀（如 `invalid_`、`sql_`、`query_`、`connection_`、`rate_`、`result_`、`database_`、`audit_`、`internal_`、`statement_`、`multiple_`、`unsupported_`、`read_`、`policy_`、`forbidden`、`unauthorized`、`stale_`、`config_`、`pagination_`），或改用精确枚举匹配
 - SQL 正文、Args、结果、原始数据库错误、密码、secret_ref 仍被拒绝
 
@@ -908,14 +920,14 @@ Round 3 必须原样重跑 Spike v7 的 MySQL AST base 43 条和 ECM 12 positive
 
 | ID | 场景 | 预期 |
 |---|---|---|
-| PAGE-01 | `effectiveMaxRows > effectivePageSize`，缺少或无效 `VerifiedSortPlan` | `unsupported_query`；Execution failed；Audit denied；`Adapter.Query=0`；目标数据库未访问 |
-| PAGE-02 | `effectiveMaxRows = effectivePageSize`，无 `VerifiedSortPlan` | 允许单页受限执行；`Adapter.Query=1`；最多返回 `effectiveMaxRows` 行；不得返回 continuation token |
-| PAGE-03 | requested `PageSize > effectiveMaxRows` | `effectivePageSize` 钳制为 `effectiveMaxRows`；允许单页执行；不得返回 continuation token |
+| PAGE-01 | `effectiveMaxRows > effectivePageSize`，缺少或无效 `VerifiedSortPlan` | Service 阶段 C 返回稳定业务错误码 `unsupported_query`；Execution failed；Audit denied；`Adapter.Query=0`；目标数据库未访问 |
+| PAGE-02 | `effectiveMaxRows = effectivePageSize`，无 `VerifiedSortPlan` | 允许单页受限执行；`Adapter.Query=1`；最多读取 `effectiveMaxRows+1` 行；无 overflow sentinel 时最多返回 `effectiveMaxRows` 行；不得返回 continuation token |
+| PAGE-03 | requested `PageSize > effectiveMaxRows` | `effectivePageSize` 钳制为 `effectiveMaxRows`；按 PAGE-02/PAGE-08 的 sentinel 规则执行；不得返回 continuation token |
 | PAGE-04 | `effectiveMaxRows > effectivePageSize`，`VerifiedSortPlan` 有效，结果确有后续页 | 允许执行；通过 Service Registry 返回 continuation token |
 | PAGE-05 | `PageSize <= 0` | 使用默认值 100 后再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-06 | `PageSize > 500` | 先钳制为 500，再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-07 | nil/typed-nil/`Valid()=false` 的 `VerifiedSortPlan` | fail-closed；Adapter 不执行目标查询 |
-| PAGE-08 | 单页查询实际结果超过限制 | 只获取限制所需的有界行数；不静默提供不完整 continuation；不得生成 token |
+| PAGE-08 | 单页查询实际结果超过限制 | 最多读取 `effectiveMaxRows+1` 行；检测到第 `effectiveMaxRows+1` 行即返回 `result_too_large`，Execution failed、Audit failed，丢弃结果且不得生成 continuation token；数据库读取和内存均保持有界 |
 
 ---
 
@@ -941,7 +953,7 @@ Round 3 必须原样重跑 Spike v7 的 MySQL AST base 43 条和 ECM 12 positive
 3. `go get` 安装已批准的官方 Omni 版本，验证无 fork/`replace` 并重新构建
 4. 更新 `docs/DEPENDENCY-LICENSES.md`
 5. 创建 `apps/api/internal/sqlpolicy/` 包，先以 TDD 实现 MySQL lexical gate，再接入 Omni AST
-6. 扩展 `sanitizeAuditMetadata()` 允许列表（含逐字段单元测试 + 泄漏 canary）
+6. 先按 §8.5 收紧 `sanitizeAuditMetadata()` 基线，再扩展获批字段（含逐字段单元测试 + 泄漏 canary）
 7. TDD：双方言分类及 lexer→AST 调用顺序测试（RED → GREEN）
 8. Fuzz 测试
 9. 创建 `apps/api/internal/execution/` 包

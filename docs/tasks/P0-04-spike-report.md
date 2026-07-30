@@ -64,7 +64,7 @@
 
 **PG-18 详细证据**：
 
-```
+```text
 TABLE t:
   SelectStmt: TargetList!=nil FromClause!=nil ValuesLists=nil IntoClause=nil LockingClause=nil
 
@@ -148,18 +148,19 @@ Lexer 源码（lexer.go:1937-1992）：检测 `/*!` → 移除 `/*!NNNNN` 和 `*
 
 ---
 
-## 4. 所有隔离目录
+## 4. 隔离 harness 逻辑标识
 
-| 目录 | 用途 |
+| 逻辑标识（非本机绝对路径） | 用途 |
 |------|------|
-| `C:\Users\34026\AppData\Local\Temp\p0-04-spike-20260724-143057` | pgparser + TiDB Parser |
-| `C:\Users\34026\AppData\Local\Temp\p0-04-mysql-spike-20260724-151815` | Vitess |
-| `C:\Users\34026\AppData\Local\Temp\p0-04-omni-spike-20260724-171004` | Bytebase Omni |
+| `external-temp/p0-04-spike-20260724-143057` | pgparser + TiDB Parser |
+| `external-temp/p0-04-mysql-spike-20260724-151815` | Vitess |
+| `external-temp/p0-04-omni-spike-20260724-171004` | Bytebase Omni |
 
+`external-temp/` 表示仓库外临时根目录；实际用户目录不属于可复现证据，也不持久化到仓库。
 
 ## 5. 清理与持久化
 
-Round 1 临时目录可由系统清理。Round 2 harness 位于 `C:\Users\34026\AppData\Local\Temp\p0-04-spike-round2-20260729`；许可证证据已持久化至仓库 `docs/tasks/P0-04-spike-licenses.tsv`。
+Round 1 临时目录可由系统清理。Round 2 harness 的逻辑标识为 `external-temp/p0-04-spike-round2-20260729`；其可复核身份由 §6.1 的源码清单哈希、固定依赖版本和 §6.2 命令共同确定。许可证证据已持久化至仓库 `docs/tasks/P0-04-spike-licenses.tsv`。
 
 ---
 
@@ -173,13 +174,26 @@ Round 1 临时目录可由系统清理。Round 2 harness 位于 `C:\Users\34026\
 | 项目 | 值 |
 |------|-----|
 | 固定 Omni | `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` |
-| Harness 目录 | `C:\Users\34026\AppData\Local\Temp\p0-04-spike-round2-20260729` |
+| Harness 逻辑标识 | `external-temp/p0-04-spike-round2-20260729` |
+| Harness 源码清单 SHA-256 | `d988094b0dc6a75b67f53205e88152f99cc78bca76b82454dbc59d8fc75fa895` |
 | License TSV | `docs/tasks/P0-04-spike-licenses.tsv` (仓库持久化, 75 ext modules) |
 | go.mod/go.sum | Untouched: `1594595d...a16b0c` / `4e9ec26c...fae24f` |
 
+源码清单哈希算法：对下列六个源文件/依赖锁定文件按相对路径排序，生成 UTF-8（无 BOM）行
+`<file_sha256>\t<relative_path>\n`，再对完整清单计算 SHA-256。清单不包含平台二进制和临时生成的许可证输出。
+
+| 相对路径 | SHA-256 |
+|---|---|
+| `go.mod` | `aaca62cec26e6f18f68e902fdf64d6e69ffa4de39a48a9f188a5e4270179ce24` |
+| `go.sum` | `cfec1e8f4ba263324c94a71eaff8a3b7c472ab815f6d0d204680e67c00b15687` |
+| `main_test.go` | `1f255e12881b0c915ba5fc2c3c4035c64018293385609c9ebbd6b103730e9905` |
+| `my_classify_test.go` | `edc288c51bc7d3443e02ab2d2957f4fcbe55550feb6f4f5683e98584a9be470f` |
+| `pg_classify_test.go` | `3843bf4acde624fa5c584b2343cf133e3f2b97ff889ff85e0c5d6136a6b3fdf3` |
+| `tools/licensegen/main.go` | `036b02f39f8dabf3151862417863d8ed99aff557669cd4d526d28ac1eeaf3361` |
+
 ### 6.2 验证命令与退出码
 
-```
+```text
 go test -count=1 -v ./...                              EXIT 1 (gate failures only)
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...  EXIT 0
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...    EXIT 0
@@ -220,18 +234,27 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 
 | Type | Count |
 |------|-------|
-| Apache-2.0 | 28 |
-| MIT | 26 |
-| BSD-3-Clause | 17 |
-| BSD-2-Clause | 2 |
+| Apache-2.0 | 25 |
+| MIT | 25 |
+| BSD-3-Clause | 15 |
+| BSD-2-Clause | 3 |
 | MPL-2.0 | 1 |
 | ISC | 1 |
+| Apache-2.0 AND BSD-3-Clause | 3 |
+| Apache-2.0 AND BSD-3-Clause AND MIT | 1 |
+| Apache-2.0 AND MIT | 1 |
 | UNKNOWN | 0 |
 | NOT_FOUND | 0 |
 | GPL/AGPL/SSPL | 0 |
 | **Total external** | **75** |
 
-Method: GOPROXY=off, read LICENSE file first 800 bytes, exact phrase matching (SSPL > AGPL > GPL > MPL, ISC, Apache, BSD-3, BSD-2, MIT, BSD generic → clause count).
+复核方法（`GOPROXY=off`）：
+
+1. 从 `go list -m all` 得到 75 个外部模块；以 module + version 解析模块缓存目录。
+2. 完整读取每个 LICENSE 文件（不再截取前 800 字节），计算 SHA-256，并与 TSV 核对：75/75 存在、75/75 哈希一致、75/75 `detection_basis` 非空；其中 69 项为可在全文直接定位的原文，6 项为下述多许可证/条款纠正的人工复核摘要。
+3. 对全文匹配 SSPL/AGPL/GPL 等受限标记和 Apache/MIT/BSD/MPL/ISC 许可证块。无法识别或存在歧义的结果先标记 `REVIEW_REQUIRED`；人工复核仍无法判定才记为 `UNKNOWN`。
+4. 本次全文扫描触发 6 项人工复核并全部留痕：`github.com/pmezard/go-difflib` 修正为 BSD-2-Clause；`github.com/klauspost/compress` 保留 BSD-3-Clause、Apache-2.0、MIT 三组文件级许可证；三个 `go.opentelemetry.io/otel*` 模块保留 Apache-2.0 主许可证和随附 BSD-3-Clause notice；`gopkg.in/yaml.v3` 保留 MIT 与 Apache-2.0 两组文件级许可证。
+5. 最终结果：`UNKNOWN=0`、`NOT_FOUND=0`、GPL/AGPL/SSPL 标记为 0。组合许可证使用 `AND` 表示同一模块的不同文件受不同许可证约束。
 
 ### 6.6 最终结论：ESCALATE
 
