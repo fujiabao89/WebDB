@@ -300,8 +300,8 @@ PostgreSQL SQL → 官方 Omni PG AST → 策略判定
 |------|-----|
 | Omni | `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` |
 | Fork/Replace | 无（官方上游） |
-| Harness | `<TEMP_DIR>/p0-04-round3-spike/harness` |
-| 证据 | `<TEMP_DIR>/p0-04-round3-spike/evidence` |
+| Harness 证据索引 | [`docs/tasks/P0-04-spike-report.md`](P0-04-spike-report.md)（本节命令、退出码与完整 SHA256） |
+| 许可证证据 | [`docs/tasks/P0-04-spike-licenses.tsv`](P0-04-spike-licenses.tsv) |
 
 ### RED → GREEN 修复
 | Bug | 修复 |
@@ -345,7 +345,8 @@ go test -run=^$ -fuzz=FuzzPGPipeline -fuzztime=30s   EXIT 0
 go vet ./...                                        EXIT 0
 GOOS=windows GOARCH=amd64 go build ./...             EXIT 0
 GOOS=linux GOARCH=amd64 go build ./...               EXIT 0
-GOPROXY=off go list -m all                          76 lines
+GOPROXY=off go list -m all
+# EXIT 0; output: 76 lines (1 main + 75 external modules)
 ```
 
 ### 许可证 75/75 复核
@@ -410,12 +411,13 @@ apps/api/go.sum: 4e9ec26c1f1c94b45346be31473faaf615429141ff684df4685f3065d7fae24
 | round3-license-recheck.tsv | 3c952718cb119408191092399e395c2e7775643788d6bae080ecd350475af8fd |
 | round3-license-recheck.log | a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce |
 
-证据目录：`<TEMP_DIR>/p0-04-round3-spike/evidence`
+仓库内持久化证据：[`docs/tasks/P0-04-spike-report.md`](P0-04-spike-report.md)（命令、退出码、完整 SHA256）与 [`docs/tasks/P0-04-spike-licenses.tsv`](P0-04-spike-licenses.tsv)（许可证清单）。隔离 harness 与原始日志未提交到仓库；其内容标识由上述 SHA256 固定。
 
 ### Owner 正式依赖与实施批准（2026-07-30）
 
 - **批准人**：`fujiabao89`（WebDB Owner）
 - **批准日期**：2026-07-30
+- **批准来源**：[Linear WEB-13](https://linear.app/webdb/issue/WEB-13/p0-04sql-安全执行策略)、[ADR-007](../adr/ADR-007-dialect-aware-sql-parsing.md) 与 [证据 PR #26](https://github.com/fujiabao89/WebDB/pull/26)。
 - **正式依赖**：批准 `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` 用于 P0-04。
 - **生产依赖授权**：授权在 P0-04 正式实施分支中修改 `apps/api/go.mod` 与 `apps/api/go.sum`。
 - **实施授权**：授权按照已接受的 ADR-007、P0-04 契约与本报告 Round 3 证据，开始 `sqlpolicy/` 与 `execution/` 的 TDD 实现。
