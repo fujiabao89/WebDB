@@ -300,8 +300,10 @@ PostgreSQL SQL → 官方 Omni PG AST → 策略判定
 |------|-----|
 | Omni | `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` |
 | Fork/Replace | 无（官方上游） |
-| Harness 证据索引 | [`docs/tasks/P0-04-spike-report.md`](P0-04-spike-report.md)（本节命令、退出码与完整 SHA256） |
-| 许可证证据 | [`docs/tasks/P0-04-spike-licenses.tsv`](P0-04-spike-licenses.tsv) |
+| Harness | [`docs/tasks/evidence/P0-04-round3/harness/`](evidence/P0-04-round3/harness/) |
+| 原始输出（脱敏） | [`docs/tasks/evidence/P0-04-round3/raw/`](evidence/P0-04-round3/raw/) |
+| 证据清单 | [`archive-sha256.txt`](evidence/P0-04-round3/archive-sha256.txt)，SHA256 `e0cad3add8c062779e42ef01edcaf7dfc769aa98db56de7f940db5c7660ee74e` |
+| 许可证复算工具 | [`verify_licenses.go`](evidence/P0-04-round3/verify_licenses.go) |
 
 ### RED → GREEN 修复
 | Bug | 修复 |
@@ -364,8 +366,8 @@ GOPROXY=off go list -m all
 | NOT_FOUND | 0 |
 | result | PASS |
 
-Recheck TSV: `evidence/round3-license-recheck.tsv` (SHA256: 3c952718cb119408191092399e395c2e7775643788d6bae080ecd350475af8fd)
-Recheck LOG: `evidence/round3-license-recheck.log` (SHA256: a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce)
+Recheck TSV: [`raw/round3-license-recheck.tsv`](evidence/P0-04-round3/raw/round3-license-recheck.tsv)（路径脱敏副本 SHA256：`9293f81472bd8b1dc1ce116b1122eaf1760ca1086767dd48f1685895581f474f`）
+Recheck LOG: [`raw/round3-license-recheck.log`](evidence/P0-04-round3/raw/round3-license-recheck.log)（SHA256：`a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce`）
 
 ### Harness SHA256
 | File | SHA256 |
@@ -396,22 +398,29 @@ apps/api/go.mod: 1594595d7c6e123b9c91e6fbe72b7a378dff5aa8656b41c4fee92a6448a16b0
 apps/api/go.sum: 4e9ec26c1f1c94b45346be31473faaf615429141ff684df4685f3065d7fae24f
 ```
 
-### 证据文件
+### 仓库证据文件
 
 | 文件 | SHA256 |
 |------|--------|
-| harness-sha256.txt | 4e124f8f6aa8778fa1bc1fb2f5ba8f5320b19905a7ca9601ed28aeecdf32c912 |
-| go-test-full.log | 4dd101ed4f92f38bd2a6cdc383bb5c31af5586b2a601b96de209da12e69ecf62 |
-| fuzz-ecm.log | 6d4f6b9aa0eac0c8962fd03356db0b173c54c731c94f636f52a5dec558768b51 |
-| fuzz-mysql-pipeline.log | 0d56cdc6aa70ce1c1281932bb8d929eb8d608e6b352f435f19d19aecddc9eb1d |
-| fuzz-pg-pipeline.log | 7f69ed88c3e959bd491bdbf1dcfbc7c61d6f379453362b2a96eaabedecf8b12c |
-| exit-codes.txt | da7c9bb46c01ffe68f5d5fdc03f16496cbbd2e7943f26895e4ffcb00808ed9be |
-| module-list.txt | 15d1e397a2a222fd90b05399553e8c0f5d83c69bb6fa4f1179c836e86b003579 |
-| module-list.json | ea390d9c8dc4ef4b7f2f9666e45863070294c35c6f5ef6df3319ed1fb7414910 |
-| round3-license-recheck.tsv | 3c952718cb119408191092399e395c2e7775643788d6bae080ecd350475af8fd |
-| round3-license-recheck.log | a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce |
+| `raw/go-test-full.log` | 4dd101ed4f92f38bd2a6cdc383bb5c31af5586b2a601b96de209da12e69ecf62 |
+| `raw/fuzz-ecm.log` | 6d4f6b9aa0eac0c8962fd03356db0b173c54c731c94f636f52a5dec558768b51 |
+| `raw/fuzz-mysql-pipeline.log` | 0d56cdc6aa70ce1c1281932bb8d929eb8d608e6b352f435f19d19aecddc9eb1d |
+| `raw/fuzz-pg-pipeline.log` | 7f69ed88c3e959bd491bdbf1dcfbc7c61d6f379453362b2a96eaabedecf8b12c |
+| `raw/exit-codes.txt` | da7c9bb46c01ffe68f5d5fdc03f16496cbbd2e7943f26895e4ffcb00808ed9be |
+| `raw/module-list.txt` | 15d1e397a2a222fd90b05399553e8c0f5d83c69bb6fa4f1179c836e86b003579 |
+| `raw/module-list.json`（路径脱敏） | 31f7d8d084037d3e26acb68735236fb356c25e6fc736e91fe27305089b9c4283 |
+| `raw/round3-license-recheck.tsv`（路径脱敏） | 9293f81472bd8b1dc1ce116b1122eaf1760ca1086767dd48f1685895581f474f |
+| `raw/round3-license-recheck.log` | a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce |
+| `archive-sha256.txt` | e0cad3add8c062779e42ef01edcaf7dfc769aa98db56de7f940db5c7660ee74e |
 
-仓库内持久化证据：[`docs/tasks/P0-04-spike-report.md`](P0-04-spike-report.md)（命令、退出码、完整 SHA256）与 [`docs/tasks/P0-04-spike-licenses.tsv`](P0-04-spike-licenses.tsv)（许可证清单）。隔离 harness 与原始日志未提交到仓库；其内容标识由上述 SHA256 固定。
+仓库内持久化证据包括完整
+[`harness/`](evidence/P0-04-round3/harness/)、脱敏后的
+[`raw/`](evidence/P0-04-round3/raw/)、复核说明与命令
+[`README.md`](evidence/P0-04-round3/README.md)、许可证复算工具
+[`verify_licenses.go`](evidence/P0-04-round3/verify_licenses.go) 及完整
+[`archive-sha256.txt`](evidence/P0-04-round3/archive-sha256.txt)。构建二进制和 Go
+module cache 未提交；脱敏仅替换 harness/module cache 的本机路径，不修改测试结果、
+模块版本、许可证类型或许可证哈希。
 
 ### Owner 正式依赖与实施批准（2026-07-30）
 

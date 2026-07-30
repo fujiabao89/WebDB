@@ -1,0 +1,17 @@
+=== License Recheck Summary ===
+external_modules=75
+tsv_rows=75
+recheck_rows=75
+graph_match=75
+license_exists=75
+sha256_match=75
+detection_basis_nonempty=75
+duplicates=0
+stale=0
+missing=0
+unknown=0
+not_found=0
+gpl=0
+agpl=0
+sspl=0
+result=PASS
