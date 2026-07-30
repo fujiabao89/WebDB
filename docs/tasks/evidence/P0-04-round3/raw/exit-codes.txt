@@ -1,0 +1,8 @@
+go_test=0
+fuzz_ecm=0
+fuzz_mysql_pipeline=0
+fuzz_pg_pipeline=0
+go_vet=0
+build_windows=0
+build_linux=0
+module_list=0

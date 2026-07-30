@@ -1,0 +1,467 @@
+{
+	"Path": "p0-04-round3-spike",
+	"Main": true,
+	"Dir": "<HARNESS_DIR>",
+	"GoMod": "<HARNESS_DIR>\\go.mod",
+	"GoVersion": "1.26.5"
+}
+{
+	"Path": "dario.cat/mergo",
+	"Version": "v1.0.2",
+	"Time": "2025-05-07T20:15:06Z",
+	"Indirect": true
+}
+{
+	"Path": "filippo.io/edwards25519",
+	"Version": "v1.1.0",
+	"Time": "2023-12-10T19:13:24Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/Azure/go-ansiterm",
+	"Version": "v0.0.0-20250102033503-faa5f7b0171c",
+	"Time": "2025-01-02T03:35:03Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/Microsoft/go-winio",
+	"Version": "v0.6.2",
+	"Time": "2024-04-09T20:07:04Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/bytebase/omni",
+	"Version": "v0.0.0-20260728103305-d2f82de1b468",
+	"Time": "2026-07-28T10:33:05Z",
+	"Indirect": true,
+	"Dir": "<GOMODCACHE>\\github.com\\bytebase\\omni@v0.0.0-20260728103305-d2f82de1b468",
+	"GoMod": "<GOMODCACHE>\\cache\\download\\github.com\\bytebase\\omni\\@v\\v0.0.0-20260728103305-d2f82de1b468.mod",
+	"GoVersion": "1.25.7",
+	"Sum": "h1:p5Nm8fUYDwTyDHzv3GqzA1MZAFnDGhgrUWH49LYWgj8=",
+	"GoModSum": "h1:Gp5RN3FM07f9/FFOTZCeu8duTAIMeuinkjjBCrs2Dw4="
+}
+{
+	"Path": "github.com/cenkalti/backoff/v4",
+	"Version": "v4.3.0",
+	"Time": "2024-01-02T22:56:19Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/cespare/xxhash/v2",
+	"Version": "v2.3.0",
+	"Time": "2024-04-04T20:00:10Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/containerd/errdefs",
+	"Version": "v1.0.0",
+	"Time": "2024-10-08T13:10:09Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/containerd/errdefs/pkg",
+	"Version": "v0.3.0",
+	"Time": "2024-10-08T13:10:09Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/containerd/log",
+	"Version": "v0.1.0",
+	"Time": "2023-09-09T00:27:15Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/containerd/platforms",
+	"Version": "v0.2.1",
+	"Time": "2024-06-10T21:45:32Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/cpuguy83/dockercfg",
+	"Version": "v0.3.2",
+	"Time": "2024-09-25T14:42:59Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/davecgh/go-spew",
+	"Version": "v1.1.1",
+	"Time": "2018-02-21T23:26:28Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/distribution/reference",
+	"Version": "v0.6.0",
+	"Time": "2024-03-20T17:09:59Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/docker/docker",
+	"Version": "v28.5.2+incompatible",
+	"Time": "2025-11-05T14:19:32Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/docker/go-connections",
+	"Version": "v0.6.0",
+	"Time": "2025-08-06T15:47:19Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/docker/go-units",
+	"Version": "v0.5.0",
+	"Time": "2022-05-17T10:43:04Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/ebitengine/purego",
+	"Version": "v0.10.0",
+	"Time": "2026-02-23T08:46:21Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/felixge/httpsnoop",
+	"Version": "v1.0.4",
+	"Time": "2023-03-12T10:31:09Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/go-logr/logr",
+	"Version": "v1.4.3",
+	"Time": "2025-05-19T04:56:57Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/go-logr/stdr",
+	"Version": "v1.2.2",
+	"Time": "2021-12-14T08:00:35Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/go-ole/go-ole",
+	"Version": "v1.2.6",
+	"Time": "2021-09-15T00:35:42Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/go-sql-driver/mysql",
+	"Version": "v1.9.3",
+	"Time": "2025-06-13T06:20:32Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/golang-sql/civil",
+	"Version": "v0.0.0-20220223132316-b832511892a9",
+	"Time": "2022-02-23T13:23:16Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/golang-sql/sqlexp",
+	"Version": "v0.1.0",
+	"Time": "2022-05-18T15:21:26Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/google/go-cmp",
+	"Version": "v0.7.0",
+	"Time": "2025-01-14T18:15:44Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/google/uuid",
+	"Version": "v1.6.0",
+	"Time": "2024-01-23T18:54:04Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/grpc-ecosystem/grpc-gateway/v2",
+	"Version": "v2.28.0",
+	"Time": "2026-02-17T16:59:59Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/hjson/hjson-go/v4",
+	"Version": "v4.6.0",
+	"Time": "2026-01-25T20:19:40Z",
+	"Indirect": true,
+	"Dir": "<GOMODCACHE>\\github.com\\hjson\\hjson-go\\v4@v4.6.0",
+	"GoMod": "<GOMODCACHE>\\cache\\download\\github.com\\hjson\\hjson-go\\v4\\@v\\v4.6.0.mod",
+	"GoVersion": "1.12",
+	"Sum": "h1:16e6ViyVfAANKsXo/46h8szUADez7FJs67xl/l+KHS4=",
+	"GoModSum": "h1:4zx6c7Y0vWcm8IRyVoQJUHAPJLXLvbG6X8nk1RLigSo="
+}
+{
+	"Path": "github.com/jackc/pgpassfile",
+	"Version": "v1.0.0",
+	"Time": "2019-03-30T16:09:02Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/jackc/pgservicefile",
+	"Version": "v0.0.0-20240606120523-5a60cdf6a761",
+	"Time": "2024-06-06T12:05:23Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/jackc/pgx/v5",
+	"Version": "v5.9.1",
+	"Time": "2026-03-22T14:22:44Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/jackc/puddle/v2",
+	"Version": "v2.2.2",
+	"Time": "2024-09-10T11:12:31Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/klauspost/compress",
+	"Version": "v1.18.2",
+	"Time": "2025-12-01T09:04:34Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/lufia/plan9stats",
+	"Version": "v0.0.0-20211012122336-39d0f177ccd0",
+	"Time": "2021-10-12T12:23:36Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/magiconair/properties",
+	"Version": "v1.8.10",
+	"Time": "2025-04-09T19:30:57Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/microsoft/go-mssqldb",
+	"Version": "v1.9.8",
+	"Time": "2026-03-02T17:27:51Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/docker-image-spec",
+	"Version": "v1.3.1",
+	"Time": "2024-02-09T17:17:29Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/go-archive",
+	"Version": "v0.2.0",
+	"Time": "2025-12-19T16:24:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/patternmatcher",
+	"Version": "v0.6.0",
+	"Time": "2023-08-22T20:52:28Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/sys/sequential",
+	"Version": "v0.6.0",
+	"Time": "2024-07-16T17:21:58Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/sys/user",
+	"Version": "v0.4.0",
+	"Time": "2025-02-27T19:37:07Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/sys/userns",
+	"Version": "v0.1.0",
+	"Time": "2024-08-07T23:23:49Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/moby/term",
+	"Version": "v0.5.2",
+	"Time": "2025-01-02T15:40:12Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/morikuni/aec",
+	"Version": "v1.0.0",
+	"Time": "2017-01-13T03:34:06Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/opencontainers/go-digest",
+	"Version": "v1.0.0",
+	"Time": "2020-05-14T01:46:00Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/opencontainers/image-spec",
+	"Version": "v1.1.1",
+	"Time": "2025-02-24T17:26:57Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/pkg/errors",
+	"Version": "v0.9.1",
+	"Time": "2020-01-14T19:47:44Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/pmezard/go-difflib",
+	"Version": "v1.0.0",
+	"Time": "2016-01-10T10:55:54Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/power-devops/perfstat",
+	"Version": "v0.0.0-20240221224432-82ca36839d55",
+	"Time": "2024-02-21T22:44:32Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/shirou/gopsutil/v4",
+	"Version": "v4.26.2",
+	"Time": "2026-02-27T12:05:12Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/shopspring/decimal",
+	"Version": "v1.4.0",
+	"Time": "2024-04-12T14:15:38Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/sijms/go-ora/v2",
+	"Version": "v2.9.0",
+	"Time": "2025-06-09T21:19:12Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/sirupsen/logrus",
+	"Version": "v1.9.3",
+	"Time": "2023-05-21T12:59:35Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/stretchr/testify",
+	"Version": "v1.11.1",
+	"Time": "2025-08-27T10:46:31Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/testcontainers/testcontainers-go",
+	"Version": "v0.41.0",
+	"Time": "2026-03-10T16:51:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/testcontainers/testcontainers-go/modules/mariadb",
+	"Version": "v0.41.0",
+	"Time": "2026-03-10T16:51:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/testcontainers/testcontainers-go/modules/mssql",
+	"Version": "v0.41.0",
+	"Time": "2026-03-10T16:51:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/testcontainers/testcontainers-go/modules/mysql",
+	"Version": "v0.41.0",
+	"Time": "2026-03-10T16:51:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/testcontainers/testcontainers-go/modules/postgres",
+	"Version": "v0.41.0",
+	"Time": "2026-03-10T16:51:17Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/tklauser/go-sysconf",
+	"Version": "v0.3.16",
+	"Time": "2025-11-12T12:31:00Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/tklauser/numcpus",
+	"Version": "v0.11.0",
+	"Time": "2025-11-12T12:13:05Z",
+	"Indirect": true
+}
+{
+	"Path": "github.com/yusufpapurcu/wmi",
+	"Version": "v1.2.4",
+	"Time": "2024-01-28T14:29:43Z",
+	"Indirect": true
+}
+{
+	"Path": "go.opentelemetry.io/auto/sdk",
+	"Version": "v1.2.1",
+	"Time": "2025-09-15T16:53:44Z",
+	"Indirect": true
+}
+{
+	"Path": "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp",
+	"Version": "v0.49.0",
+	"Time": "2024-02-23T17:23:36Z",
+	"Indirect": true
+}
+{
+	"Path": "go.opentelemetry.io/otel",
+	"Version": "v1.41.0",
+	"Time": "2026-03-02T18:39:57Z",
+	"Indirect": true
+}
+{
+	"Path": "go.opentelemetry.io/otel/metric",
+	"Version": "v1.41.0",
+	"Time": "2026-03-02T18:39:57Z",
+	"Indirect": true
+}
+{
+	"Path": "go.opentelemetry.io/otel/trace",
+	"Version": "v1.41.0",
+	"Time": "2026-03-02T18:39:57Z",
+	"Indirect": true
+}
+{
+	"Path": "golang.org/x/crypto",
+	"Version": "v0.48.0",
+	"Time": "2026-02-09T16:37:10Z",
+	"Indirect": true
+}
+{
+	"Path": "golang.org/x/sync",
+	"Version": "v0.19.0",
+	"Time": "2025-12-04T00:24:39Z",
+	"Indirect": true
+}
+{
+	"Path": "golang.org/x/sys",
+	"Version": "v0.41.0",
+	"Time": "2026-02-08T05:32:41Z",
+	"Indirect": true
+}
+{
+	"Path": "golang.org/x/text",
+	"Version": "v0.34.0",
+	"Time": "2026-02-09T16:14:29Z",
+	"Indirect": true
+}
+{
+	"Path": "google.golang.org/grpc",
+	"Version": "v1.79.1",
+	"Time": "2026-02-13T06:52:36Z",
+	"Indirect": true
+}
+{
+	"Path": "google.golang.org/protobuf",
+	"Version": "v1.36.11",
+	"Time": "2025-12-12T08:48:31Z",
+	"Indirect": true
+}
+{
+	"Path": "gopkg.in/yaml.v3",
+	"Version": "v3.0.1",
+	"Time": "2022-05-27T08:35:30Z",
+	"Indirect": true
+}

@@ -1,0 +1,15 @@
+fuzz: elapsed: 0s, gathering baseline coverage: 0/1745 completed
+fuzz: elapsed: 1s, gathering baseline coverage: 1745/1745 completed, now fuzzing with 24 workers
+fuzz: elapsed: 3s, execs: 299374 (99763/sec), new interesting: 6 (total: 1751)
+fuzz: elapsed: 6s, execs: 688595 (129762/sec), new interesting: 17 (total: 1762)
+fuzz: elapsed: 9s, execs: 1067030 (126076/sec), new interesting: 27 (total: 1772)
+fuzz: elapsed: 12s, execs: 1455039 (129299/sec), new interesting: 41 (total: 1786)
+fuzz: elapsed: 15s, execs: 1876803 (140697/sec), new interesting: 53 (total: 1798)
+fuzz: elapsed: 18s, execs: 2272629 (131795/sec), new interesting: 59 (total: 1804)
+fuzz: elapsed: 21s, execs: 2683581 (137087/sec), new interesting: 80 (total: 1825)
+fuzz: elapsed: 24s, execs: 3080207 (132151/sec), new interesting: 86 (total: 1831)
+fuzz: elapsed: 27s, execs: 3501651 (140599/sec), new interesting: 92 (total: 1837)
+fuzz: elapsed: 30s, execs: 3903011 (133772/sec), new interesting: 108 (total: 1853)
+fuzz: elapsed: 31s, execs: 3903011 (0/sec), new interesting: 108 (total: 1853)
+PASS
+ok  	p0-04-round3-spike	32.440s

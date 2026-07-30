@@ -1,16 +1,18 @@
 # P0-04 依赖 Spike 报告（最终版）
 
-> 状态：ESCALATE — PG TABLE 归一化已由 Owner 接受；MySQL WebDB 自有 ECM lexer 的 Round 3 证据待完成
-> 日期：2026-07-29（v7 原始结果；Owner 处置更新于 2026-07-30）
+> 状态：APPROVED — Owner 已批准正式依赖、生产 go.mod/go.sum 修改及 TDD 实现
+> 日期：2026-07-30（v7 原始 + Round 3 技术闭环 + Owner 正式批准）
 > 任务：P0-04（SQL Safety Policy — 依赖 Spike）
 > Issue：WEB-13
-> 分支：`feat/WEB-13-P0-04-sql-safety-policy`
+> 历史分支：`feat/WEB-13-P0-04-sql-safety-policy`（PR #25 已合并）
+> Round 3 基线：merge commit `c912a5a0dc1a33ec010af91a91b857661a0ab400`
+> 固定 Omni：`github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468`
 > 作者：Claude Code
-> 修订：v7 AST feature oracle + assignment walk + reproducible license evidence
+> 修订：v7 AST feature oracle + assignment walk + Round 3 ECM lexer + reproducible license evidence
 
 ---
 
-## 1. 最终结论：ESCALATE
+## 1. [历史 v7] 最终结论：ESCALATE（Round 3 已通过；见 §Round 3）
 
 下表 §1.1 为历史候选探索汇总（来自 Round 1）。当前唯一待批准候选 Bytebase Omni 的 v7 实测结果见 §1.2。
 
@@ -36,9 +38,9 @@
 | ECM semantic (multi-node) | — | 4/4 |
 | 许可证 GPL/AGPL/SSPL | 0/75 | 0/75 |
 | Cross-platform build | ✅ | ✅ |
-| 当前处置 | **PG TABLE 决策已关闭；进入 Round 3 回归** | **FAIL（ECM recognition；待 WebDB lexer Round 3）** |
+| [历史 v7 处置] | **PG TABLE 决策已关闭（Owner 批准等价 Select）** | **[历史] FAIL（ECM recognition）** |
 
-**PG TABLE 不再是 parser/依赖阻塞项；MySQL ECM recognition 是当前唯一未解决的依赖 Gate。Round 3 全部门禁通过并获得正式依赖批准前，不得修改生产依赖或开始 sqlpolicy/execution 实现。**
+**[历史 v7]** PG TABLE 不再是 parser/依赖阻塞项；MySQL ECM recognition 是 v7 结束时唯一未解决的依赖 Gate。**[Round 3]** 该 Gate 已由 WebDB ECM lexer 验证关闭。**[历史 Gate]** 当时在 Owner 正式依赖批准前不得修改生产依赖或开始 `sqlpolicy`/`execution` 实现；Owner 已于 2026-07-30 正式批准，见文末批准记录。
 详见 §6。
 
 ---
@@ -258,7 +260,7 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 4. 本次全文扫描触发 6 项人工复核并全部留痕：`github.com/pmezard/go-difflib` 修正为 BSD-2-Clause；`github.com/klauspost/compress` 保留 BSD-3-Clause、Apache-2.0、MIT 三组文件级许可证；三个 `go.opentelemetry.io/otel*` 模块保留 Apache-2.0 主许可证和随附 BSD-3-Clause notice；`gopkg.in/yaml.v3` 保留 MIT 与 Apache-2.0 两组文件级许可证。
 5. 最终结果：`UNKNOWN=0`、`NOT_FOUND=0`、GPL/AGPL/SSPL 标记为 0。组合许可证使用 `AND` 表示同一模块的不同文件受不同许可证约束。
 
-### 6.6 最终结论：ESCALATE
+### 6.6 [历史 v7] 最终结论：ESCALATE
 
 **v7 原始 harness：89 PASS / 20 FAIL / 109 total，Exit 1。当前处置：8 个 PG TABLE 原始失败已由 Owner 决策关闭；剩余 12 个未解决失败全部为 ECM recognition。**
 
@@ -275,12 +277,158 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 | License GPL/AGPL/SSPL | 0 | 0 |
 | Build (win+linux) | ✅ | ✅ |
 
-**20 个原始失败均来自 parser/API 能力差异而非 harness bug；其中 8 个 PG TABLE 失败已转为明确的已接受策略决策，当前唯一未解决依赖 Gate 是 12 个 ECM recognition 正例。**
+**[历史 v7]** 20 个原始失败均来自 parser/API 能力差异而非 harness bug；其中 8 个 PG TABLE 失败已转为明确的已接受策略决策，v7 结束时唯一未解决依赖 Gate 是 12 个 ECM recognition 正例。**[Round 3]** 该 Gate 已由 WebDB ECM lexer 验证关闭（12/12 ECM positive）。
 
-**在 WebDB 自有 ECM lexer 的 Round 3 全部门禁通过并获得 Owner 对精确 Omni 版本的正式依赖批准前，不得修改生产依赖或开始 sqlpolicy/execution 实现。**
+**[历史 Gate]** 在 WebDB 自有 ECM lexer 的 Round 3 全部门禁通过并获得 Owner 对精确 Omni 版本的正式依赖批准前，不得修改生产依赖或开始 `sqlpolicy`/`execution` 实现。该 Gate 已于 2026-07-30 关闭。
 
 ### 6.7 Owner 决策（2026-07-30，报告后更新）
 
 1. PG TABLE：接受 Omni 归一化后的等价 `Select` AST；继续应用全部 `Select` 安全门禁。
 2. ECM recognition：必须由 WebDB 自有、方言感知、fail-closed 的 lexer 在 Omni AST 前识别。semantic multi-node 检测仅是纵深防御，不能替代 ECM lexer 门禁。
 3. Omni 上游 issue/PR 仅作为可选协作项，不再是 Round 3 或正式实施的前置条件。
+
+---
+
+## Round 3：WebDB ECM Lexer + 官方 Omni AST（2026-07-30, 技术闭环）
+
+### 架构
+原始 MySQL SQL → WebDB ECM Lexer → ECM hit/error → 拒绝（Omni=0, Adapter=0）
+PostgreSQL SQL → 官方 Omni PG AST → 策略判定
+
+### 版本
+| 项目 | 值 |
+|------|-----|
+| Omni | `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` |
+| Fork/Replace | 无（官方上游） |
+| Harness | [`docs/tasks/evidence/P0-04-round3/harness/`](evidence/P0-04-round3/harness/) |
+| 原始输出（脱敏） | [`docs/tasks/evidence/P0-04-round3/raw/`](evidence/P0-04-round3/raw/) |
+| 证据清单 | [`archive-sha256.txt`](evidence/P0-04-round3/archive-sha256.txt)，SHA256 `e0cad3add8c062779e42ef01edcaf7dfc769aa98db56de7f940db5c7660ee74e` |
+| 许可证复算工具 | [`verify_licenses.go`](evidence/P0-04-round3/verify_licenses.go) |
+
+### RED → GREEN 修复
+| Bug | 修复 |
+|-----|------|
+| `-/*!` 绕过 ECM（stDash1 吞掉 `/`） | stNormal 原子判断合法 `-- ` 行注释 |
+| `--\n` 跳过换行导致下一行 ECM 漏检 | `i+=2` → `i+=1`，让 stLineComment 处理换行 |
+| 未知 ECMMode 静默通过 | default → `return error` |
+| EOF backslash state 未检查 | 新增 `stBackslashSingle/Double` EOF error |
+| 危险 SELECT（locking/INTO/assignment/CTE）调用 Adapter | 实现 `allowMySQL()` 检查全部危险 feature |
+| PG EXPLAIN ANALYZE 未拒绝 | 从 `ExplainStmt.Options` 读取真实 analyze option |
+
+### 验收矩阵
+
+| Gate | 计数 | |
+|------|------|------|
+| PG base (feature oracle: locking, select_into, has_cte, dml_cte, dml, ddl) | 25/25 | |
+| PG EXPLAIN (explain, explain_select, explain_analyze, explain_dml, explain_ddl, explain_target_detectable, nested_explain) | 7/7 | |
+| PG EXPLAIN ANALYZE → Adapter=0 | | |
+| PG TABLE 6-item allow/deny | 6/6 | |
+| MY base (feature oracle: locking, for_update, for_share, lock_in_share_mode, nowait, skip_locked, into_outfile, into_dumpfile, into_vars, user_var_assign, has_cte, dml_cte, dml, ddl, is_replace, insert_select, multi_node, multi_node_danger, is_table, unknown_node) | 43/43 | |
+| MY EXPLAIN (explain, explain_select, explain_dml, explain_target_detectable) | 5/5 | |
+| MY dangerous SELECT → Adapter=0 | 9/9 | |
+| MY safe SELECT → Adapter=1 | 3/3 | |
+| MY EXPLAIN deny (6) + allow (1) | 7/7 | |
+| ECM positive (v7 original) | 12/12 | |
+| ECM negative (v7 original) | 5/5 | |
+| ECM quote boundary (single/double/backtick/block/hint/hash/dash) | all | |
+| ECM --\n bypass, --\r\n bypass, dash bypass, unterm, unclosed, mode | all | |
+| SQL mode diff (Default vs NoBackslashEscapes) | | |
+| Adapter counters (ECM→0, error→0, unknown→0, parse→0, multi→0, DML→0, clean→1) | 7/7 | |
+| FuzzECMLexer 30s | PASS, 4,828,049 execs, 0 crash |
+| FuzzMySQLPipeline 30s + invariants | PASS, 3,903,011 execs, 0 crash |
+| FuzzPGPipeline 30s + invariants | PASS, 4,663,516 execs, 0 crash |
+
+### 命令与退出码
+```
+go test -count=1 -v ./...                        EXIT 0
+go test -run=^$ -fuzz=FuzzECMLexer -fuzztime=30s  EXIT 0
+go test -run=^$ -fuzz=FuzzMySQLPipeline -fuzztime=30s EXIT 0
+go test -run=^$ -fuzz=FuzzPGPipeline -fuzztime=30s   EXIT 0
+go vet ./...                                        EXIT 0
+GOOS=windows GOARCH=amd64 go build ./...             EXIT 0
+GOOS=linux GOARCH=amd64 go build ./...               EXIT 0
+GOPROXY=off go list -m all
+# EXIT 0; output: 76 lines (1 main + 75 external modules)
+```
+
+### 许可证 75/75 复核
+| 指标 | 值 |
+|------|-----|
+| external_modules | 75 |
+| tsv_rows | 75 |
+| recheck_rows | 75 |
+| graph_match | 75 |
+| license_exists | 75 |
+| sha256_match | 75 |
+| detection_basis_nonempty | 75 |
+| GPL/AGPL/SSPL | 0 |
+| UNKNOWN | 0 |
+| NOT_FOUND | 0 |
+| result | PASS |
+
+Recheck TSV: [`raw/round3-license-recheck.tsv`](evidence/P0-04-round3/raw/round3-license-recheck.tsv)（路径脱敏副本 SHA256：`9293f81472bd8b1dc1ce116b1122eaf1760ca1086767dd48f1685895581f474f`）
+Recheck LOG: [`raw/round3-license-recheck.log`](evidence/P0-04-round3/raw/round3-license-recheck.log)（SHA256：`a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce`）
+
+### Harness SHA256
+| File | SHA256 |
+|------|--------|
+| ecm_lexer.go | a57d031d69b34bec1607b423a89c03d4137b0bff9531374f439a969142f861d4 |
+| round3_test.go | 342471f785cf7e05707c1fe4d7aa6b9ae0efa2af9fe9056b57767728912b8bdc |
+| regression_test.go | 47f78cbfd0fafc8de393b196422d9e9adee99e04a82ccc1543f838c75995a28c |
+| red_policy_test.go | c0ca19797ca16318803546565bb787d804eecf7725991a8934e8322f4e9fb57d |
+| main.go | 8e72a1b15c5bdab6c8a332658444694bb91f81e2ee7478674b57508969b7e6a6 |
+| go.mod | 4c7f29628b3cb445e0a97381c2b65beed2544b941980a98e6553b1f179f26d1b |
+| go.sum | cfec1e8f4ba263324c94a71eaff8a3b7c472ab815f6d0d204680e67c00b15687 |
+
+### 生产依赖（Round 3 未修改）
+
+**隔离 repo 基线**（merge commit `c912a5a0dc1a33ec010af91a91b857661a0ab400`）：
+
+```
+apps/api/go.mod: 2a617f6f5311db782a5a4a6f77422d8d0efb9dac9e164c9eed26a8b6ddb6034c
+apps/api/go.sum: 5f8ba9dd1e1bee0b7b5f0656f8b7b2daaf9ade48125e6b038372e20fcc0d9bf5
+```
+
+git status/diff 证明 Round 3 未修改隔离 repo 的 `apps/api/go.mod` 或 `apps/api/go.sum`。
+
+**原始用户工作区快照哈希**（存在其他任务的既有未提交改动，不作为隔离 repo 基线；Round 3 未触碰）：
+
+```
+apps/api/go.mod: 1594595d7c6e123b9c91e6fbe72b7a378dff5aa8656b41c4fee92a6448a16b0c
+apps/api/go.sum: 4e9ec26c1f1c94b45346be31473faaf615429141ff684df4685f3065d7fae24f
+```
+
+### 仓库证据文件
+
+| 文件 | SHA256 |
+|------|--------|
+| `raw/go-test-full.log` | 4dd101ed4f92f38bd2a6cdc383bb5c31af5586b2a601b96de209da12e69ecf62 |
+| `raw/fuzz-ecm.log` | 6d4f6b9aa0eac0c8962fd03356db0b173c54c731c94f636f52a5dec558768b51 |
+| `raw/fuzz-mysql-pipeline.log` | 0d56cdc6aa70ce1c1281932bb8d929eb8d608e6b352f435f19d19aecddc9eb1d |
+| `raw/fuzz-pg-pipeline.log` | 7f69ed88c3e959bd491bdbf1dcfbc7c61d6f379453362b2a96eaabedecf8b12c |
+| `raw/exit-codes.txt` | da7c9bb46c01ffe68f5d5fdc03f16496cbbd2e7943f26895e4ffcb00808ed9be |
+| `raw/module-list.txt` | 15d1e397a2a222fd90b05399553e8c0f5d83c69bb6fa4f1179c836e86b003579 |
+| `raw/module-list.json`（路径脱敏） | 31f7d8d084037d3e26acb68735236fb356c25e6fc736e91fe27305089b9c4283 |
+| `raw/round3-license-recheck.tsv`（路径脱敏） | 9293f81472bd8b1dc1ce116b1122eaf1760ca1086767dd48f1685895581f474f |
+| `raw/round3-license-recheck.log` | a16cd3cb267c4da9eff9720a02b07dce72a5112162311b1851cba542fd33a3ce |
+| `archive-sha256.txt` | e0cad3add8c062779e42ef01edcaf7dfc769aa98db56de7f940db5c7660ee74e |
+
+仓库内持久化证据包括完整
+[`harness/`](evidence/P0-04-round3/harness/)、脱敏后的
+[`raw/`](evidence/P0-04-round3/raw/)、复核说明与命令
+[`README.md`](evidence/P0-04-round3/README.md)、许可证复算工具
+[`verify_licenses.go`](evidence/P0-04-round3/verify_licenses.go) 及完整
+[`archive-sha256.txt`](evidence/P0-04-round3/archive-sha256.txt)。构建二进制和 Go
+module cache 未提交；脱敏仅替换 harness/module cache 的本机路径，不修改测试结果、
+模块版本、许可证类型或许可证哈希。
+
+### Owner 正式依赖与实施批准（2026-07-30）
+
+- **批准人**：`fujiabao89`（WebDB Owner）
+- **批准日期**：2026-07-30
+- **批准来源**：[Linear WEB-13](https://linear.app/webdb/issue/WEB-13/p0-04sql-安全执行策略)、[ADR-007](../adr/ADR-007-dialect-aware-sql-parsing.md) 与 [证据 PR #26](https://github.com/fujiabao89/WebDB/pull/26)。
+- **正式依赖**：批准 `github.com/bytebase/omni v0.0.0-20260728103305-d2f82de1b468` 用于 P0-04。
+- **生产依赖授权**：授权在 P0-04 正式实施分支中修改 `apps/api/go.mod` 与 `apps/api/go.sum`。
+- **实施授权**：授权按照已接受的 ADR-007、P0-04 契约与本报告 Round 3 证据，开始 `sqlpolicy/` 与 `execution/` 的 TDD 实现。
+- **安全边界不变**：本批准不授权扩大 P0 范围，不授权 DML/DDL、字符串前缀安全判断、客户端侧策略、fork 或 `replace`；无法可靠判定时仍必须 fail-closed。
+- **任务状态**：WEB-13 保持 `In Progress`；正式依赖批准和 Round 3 证据完成不代表 P0-04 工程实现已经完成。
