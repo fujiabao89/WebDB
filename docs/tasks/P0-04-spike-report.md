@@ -1,7 +1,7 @@
 # P0-04 依赖 Spike 报告（最终版）
 
-> 状态：ESCALATE — PG TABLE 无法与 SELECT 区分；MySQL ECM 无可靠公开识别 API
-> 日期：2026-07-29 (v7 最终)
+> 状态：ESCALATE — PG TABLE 归一化已由 Owner 接受；MySQL WebDB 自有 ECM lexer 的 Round 3 证据待完成
+> 日期：2026-07-29（v7 原始结果；Owner 处置更新于 2026-07-30）
 > 任务：P0-04（SQL Safety Policy — 依赖 Spike）
 > Issue：WEB-13
 > 分支：`feat/WEB-13-P0-04-sql-safety-policy`
@@ -31,14 +31,14 @@
 |------|-----|-------|
 | 基础分类 | 25/25 | 43/43 |
 | EXPLAIN Gate | 7/7 | 5/5 |
-| TABLE 区分 | **0/4 + 0/4 fp** | — |
+| TABLE 源语法区分（原始 harness） | **0/4 + 0/4 fp**；Owner 已接受等价 `Select` AST，不再是 Gate | — |
 | ECM reliable recognition | — | **0/12 positive** / 5/5 negative |
 | ECM semantic (multi-node) | — | 4/4 |
 | 许可证 GPL/AGPL/SSPL | 0/75 | 0/75 |
 | Cross-platform build | ✅ | ✅ |
-| 总体 | **FAIL (TABLE gate)** | **FAIL (ECM recognition)** |
+| 当前处置 | **PG TABLE 决策已关闭；进入 Round 3 回归** | **FAIL（ECM recognition；待 WebDB lexer Round 3）** |
 
-**两者各有一项 Gate 阻塞。不得批准正式依赖、不得开始 sqlpolicy/ 或 execution/ 实现。**
+**PG TABLE 不再是 parser/依赖阻塞项；MySQL ECM recognition 是当前唯一未解决的依赖 Gate。Round 3 全部门禁通过并获得正式依赖批准前，不得修改生产依赖或开始 sqlpolicy/execution 实现。**
 详见 §6。
 
 ---
@@ -194,7 +194,7 @@ Round 1 临时目录可由系统清理。Round 2 harness 的逻辑标识为 `ext
 ### 6.2 验证命令与退出码
 
 ```text
-go test -count=1 -v ./...                              EXIT 1 (gate failures only)
+go test -count=1 -v ./...                              EXIT 1 (v7 raw gates: 8 TABLE later accepted; 12 ECM unresolved)
 GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build ./...  EXIT 0
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build ./...    EXIT 0
 GOPROXY=off go list -m all                              76 lines (1 main + 75 ext)
@@ -202,16 +202,18 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 
 ### 6.3 PG 结果
 
-| 组 | Pass | Fail |
-|----|------|------|
-| base (SELECT/DML/DDL/SET/OTHER/MULTI) | 25 | 0 |
-| EXPLAIN gate (target + analyze + nested) | 7 | 0 |
-| TABLE gate (distinguish TABLE from SELECT) | 0 | **4** |
-| TABLE fingerprint (AST field comparison) | 0 | **4** |
+以下保留 v7 harness 原始计数；Owner 决策不篡改原始结果，而是记录其当前验收处置。
+
+| 组 | Raw Pass | Raw Fail | 当前处置 |
+|----|----------|----------|----------|
+| base (SELECT/DML/DDL/SET/OTHER/MULTI) | 25 | 0 | 通过 |
+| EXPLAIN gate (target + analyze + nested) | 7 | 0 | 通过 |
+| TABLE source-form observation (distinguish TABLE from SELECT) | 0 | **4** | 已接受归一化 `Select` AST；不再是 Gate |
+| TABLE fingerprint observation (AST field comparison) | 0 | **4** | 已接受 fingerprint 相同；不再是 Gate |
 
 **通过**: locking, select_into, has_cte, dml_cte, explain, explain_analyze, explain_select, explain_dml, explain_ddl, explain_target_detectable, nested_explain fail-closed.
 
-**TABLE gate**: Omni PG AST 将 `TABLE t` 归一化为 `*ast.SelectStmt`，与 `SELECT * FROM t` 产生相同 AST fingerprint。4/4 对全部 IDENTICAL。PostgreSQL 语义中 TABLE 是 SELECT * FROM 的等价形式；失败源于 Omni AST 归一化，非 harness bug。
+**TABLE 原始观察与处置**：Omni PG AST 将 `TABLE t` 归一化为 `*ast.SelectStmt`，与 `SELECT * FROM t` 产生相同 AST fingerprint，4/4 对全部 IDENTICAL。PostgreSQL 语义中 TABLE 是 SELECT * FROM 的等价形式；8 个原始失败源于 Omni AST 归一化，非 harness bug。Owner 已接受按等价 `Select` AST 处理，故它们不再构成 parser/依赖 Gate；锁定子句、修改型 CTE、多语句、未知节点和解析失败仍须 fail-closed。
 
 ### 6.4 MySQL 结果
 
@@ -258,7 +260,7 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 
 ### 6.6 最终结论：ESCALATE
 
-**89 PASS / 20 FAIL / 109 total. Exit 1 from gate failures only.**
+**v7 原始 harness：89 PASS / 20 FAIL / 109 total，Exit 1。当前处置：8 个 PG TABLE 原始失败已由 Owner 决策关闭；剩余 12 个未解决失败全部为 ECM recognition。**
 
 | Gate | PG | MySQL |
 |------|-----|-------|
@@ -267,15 +269,15 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 | @x:= assignment | — | ✅ |
 | INTO clauses | — | ✅ |
 | Locking | ✅ | ✅ |
-| TABLE distinguish | **❌ 0/4 + 0/4 fp** | ✅ |
+| TABLE distinguish | 原始 0/4 + 0/4 fp；**✅ Owner 已接受等价 `Select` AST，不再是 Gate** | ✅ |
 | ECM recognition | — | **❌ 0/12 positive** |
 | ECM semantic | — | ✅ 4/4 |
 | License GPL/AGPL/SSPL | 0 | 0 |
 | Build (win+linux) | ✅ | ✅ |
 
-**20 failures all from parser/API gaps, not harness bugs.**
+**20 个原始失败均来自 parser/API 能力差异而非 harness bug；其中 8 个 PG TABLE 失败已转为明确的已接受策略决策，当前唯一未解决依赖 Gate 是 12 个 ECM recognition 正例。**
 
-**Do not approve production dependency. Do not start sqlpolicy/ or execution/.**
+**在 WebDB 自有 ECM lexer 的 Round 3 全部门禁通过并获得 Owner 对精确 Omni 版本的正式依赖批准前，不得修改生产依赖或开始 sqlpolicy/execution 实现。**
 
 ### 6.7 Owner 决策（2026-07-30，报告后更新）
 

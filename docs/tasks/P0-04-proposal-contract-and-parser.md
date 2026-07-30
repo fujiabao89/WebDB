@@ -372,12 +372,13 @@ type AuthorizedExecution struct {
 5. **缺失或无效连接策略默认拒绝**：
    - `ConnectionPolicy` 不存在 → `policy_not_configured`
    - `AllowRead != true` → `read_not_allowed`
-   - `policy.MaxRows <= 0` → `policy_not_configured`；即使数据库约束通常阻止该状态，Service 仍须在计算 `effectiveMaxRows` 和调用 Adapter 前 fail-closed，`Adapter.Query=0`、目标数据库访问次数为 0
+   - 定义正数服务常量 `MaxRowsSafetyCap`，且该常量不得大于 `math.MaxInt-1` 或 Adapter/驱动可安全表示上限中的较小值；它是所有来源（数据库、测试替身及未来策略源）共同适用的有限上界
+   - `policy.MaxRows <= 0` 或 `policy.MaxRows > MaxRowsSafetyCap` → `policy_not_configured`；即使数据库约束通常阻止部分无效状态，Service 仍须在计算 `effectiveMaxRows`、构造 Adapter request 和调用 Adapter 前 fail-closed，`Adapter.Query=0`、目标数据库访问次数为 0、Audit outcome=`denied`
 6. **客户端不能提高策略上限 — MaxRows**：
-   - 仅在确认 `policy.MaxRows > 0` 后计算有效上限；不得把非正策略值传给 Adapter 触发其默认值回退
+   - 仅在确认 `0 < policy.MaxRows <= MaxRowsSafetyCap` 后计算有效上限；不得把无效策略值传给 Adapter 触发其默认值回退
    - 客户端 RequestMaxRows ≤ 0 → 使用 `policy.MaxRows`
    - 客户端 RequestMaxRows > 0 → `effectiveMaxRows = min(policy.MaxRows, RequestMaxRows)`
-   - 0、负数或超大值均不得绕过策略上限
+   - 结果必须满足 `0 < effectiveMaxRows <= MaxRowsSafetyCap`；0、负数或超大值均不得绕过策略上限
 7. **客户端不能提高策略上限 — Timeout**：
    - 客户端 RequestTimeout ≤ 0 → 使用 `policy.StatementTimeoutMs`
    - 客户端 RequestTimeout > 0 → `effectiveTimeout = min(policy.StatementTimeoutMs, RequestTimeout)`
@@ -396,11 +397,12 @@ type AuthorizedExecution struct {
    requiresPagination = effectiveMaxRows > effectivePageSize
    ```
 
-   - effectiveMaxRows 必须是策略上限和请求上限求交后的正数。
+   - effectiveMaxRows 必须是策略上限和请求上限求交后的正数，且不得超过 `MaxRowsSafetyCap`。
    - requested PageSize > effectiveMaxRows 时，effectivePageSize 等于 effectiveMaxRows，属于单页请求。
    - 不允许使用未经规范化的原始 PageSize 进行分页安全判断。
    - 若 `requiresPagination` 为 true（见 ADR-014）：执行前必须取得有效 `VerifiedSortPlan`。无法证明唯一排序时在访问目标数据库前拒绝，不执行第一页。
-   - 若 `requiresPagination` 为 false：属于单页受限请求，可不创建 continuation，但行数、字节、超时限制不变；不得发放 token。执行层必须最多读取 `effectiveMaxRows + 1` 行（额外一行仅作 overflow sentinel）；读到 sentinel 时返回 `result_too_large`，丢弃结果且不生成 token。未读到 sentinel 时才可成功返回最多 `effectiveMaxRows` 行。
+   - 若 `requiresPagination` 为 false：属于单页受限请求，可不创建 continuation，但行数、字节、超时限制不变；不得发放 token。执行层必须先以 checked-add 计算 `readLimit = effectiveMaxRows + 1`，再最多读取 `readLimit` 行（额外一行仅作 overflow sentinel）；读到 sentinel 时返回 `result_too_large`，丢弃结果且不生成 token。未读到 sentinel 时才可成功返回最多 `effectiveMaxRows` 行。
+   - 若有限上界校验失败或 checked-add 无法表示结果，返回 `policy_not_configured` 并 fail-closed：不构造或传递 Adapter `MaxRows`/`readLimit`，`Adapter.Query=0`、目标数据库访问次数为 0、Audit outcome=`denied`。
 
 10. **权限撤销即时生效**
 
@@ -931,8 +933,9 @@ Round 3 必须原样重跑 Spike v7 的 MySQL AST base 43 条和 ECM 12 positive
 | PAGE-05 | `PageSize <= 0` | 使用默认值 100 后再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-06 | `PageSize > 500` | 先钳制为 500，再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-07 | nil/typed-nil/`Valid()=false` 的 `VerifiedSortPlan` | fail-closed；Adapter 不执行目标查询 |
-| PAGE-08 | 单页查询实际结果超过限制 | 最多读取 `effectiveMaxRows+1` 行；检测到第 `effectiveMaxRows+1` 行即返回 `result_too_large`，Execution status=`failed`、Execution error_code=`result_too_large`、Audit outcome=`failed`，丢弃结果且不得生成 continuation token；数据库读取和内存均保持有界 |
-| PAGE-09 | `policy.MaxRows <= 0`（损坏数据、测试替身或未来非数据库策略源） | 阶段 A 返回 `policy_not_configured`；不计算/传递 Adapter `MaxRows`；`Adapter.Query=0`；目标数据库访问次数为 0；Audit outcome=`denied` |
+| PAGE-08 | 单页查询实际结果超过限制 | 在 `effectiveMaxRows <= MaxRowsSafetyCap` 已验证后，以 checked-add 得到 `readLimit=effectiveMaxRows+1`；最多读取 `readLimit` 行；检测到 sentinel 即返回 `result_too_large`，Execution status=`failed`、Execution error_code=`result_too_large`、Audit outcome=`failed`，丢弃结果且不得生成 continuation token；数据库读取和内存均保持有界 |
+| PAGE-09 | `policy.MaxRows <= 0` 或 `policy.MaxRows > MaxRowsSafetyCap`（损坏数据、测试替身或未来非数据库策略源） | 阶段 A 返回 `policy_not_configured`；不计算 `effectiveMaxRows`，不构造/传递 Adapter `MaxRows`；`Adapter.Query=0`；目标数据库访问次数为 0；Audit outcome=`denied` |
+| PAGE-10 | `effectiveMaxRows+1` checked-add 失败（边界测试替身） | 返回 `policy_not_configured`；不构造/传递 Adapter `MaxRows`/`readLimit`；`Adapter.Query=0`；目标数据库访问次数为 0；Audit outcome=`denied` |
 
 ---
 
@@ -978,3 +981,4 @@ Round 3 必须原样重跑 Spike v7 的 MySQL AST base 43 条和 ECM 12 positive
 | 2026-07-23 | 回应 CodeRabbit 审查：ASTFeatures 扩展 HasModifyingCTE/HasExplainDMLDDL/HasNestedExplain；continuation token 安全属性（绑定 Principal/Connection/策略版本/过期时间/防篡改/防重放）；ExecuteFirstPageRequest 重命名 + Adapter 字段映射契约；授权错误码拆分 policy_not_configured vs read_not_allowed；Adapter→业务错误码+审计 outcome 映射表；审计失败重试与结果恢复策略；MySQL 可执行注释反例（字符串字面量/普通注释/非法版本号）；AUDIT-08 拆分为 workspace 存在/不存在两条独立路径 |
 | 2026-07-30 | Owner `fujiabao89` 批准 PostgreSQL `TABLE` 按解析器归一化后的等价 `Select` AST 处理；更新 PG-18 为 allowed。锁定子句、修改型 CTE、多语句、未知节点和解析失败继续 fail-closed；`VALUES` 仍默认拒绝。 |
 | 2026-07-30 | Owner `fujiabao89` 批准 MySQL 使用 WebDB 自有方言 lexer 前置识别 ECM，随后使用官方未修改 Omni AST。上游 ECM API/PR 不再阻塞；新增 Round 3 组合、mode、fuzz、官方来源和许可证门禁。 |
+| 2026-07-30 | 回应 CodeRabbit 审查：为 `MaxRows` 增加有限服务上界和 `effectiveMaxRows+1` checked-add 契约；无效上界或溢出在 Adapter/目标数据库访问前以 `policy_not_configured` fail-closed。 |
