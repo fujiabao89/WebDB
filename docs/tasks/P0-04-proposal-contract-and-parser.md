@@ -369,8 +369,12 @@ type AuthorizedExecution struct {
 2. **内部使用 `uuid.UUID`**：传输边界解析字符串 UUID，解析失败 → `invalid_scope`
 3. **Workspace/Actor 从可信 Principal 派生**：不信任客户端提交的归属
 4. **TraceID 由服务端生成或校验**：不接受客户端原始值
-5. **缺失连接策略默认拒绝**：`ConnectionPolicy` 不存在或 `AllowRead != true` → 拒绝
+5. **缺失或无效连接策略默认拒绝**：
+   - `ConnectionPolicy` 不存在 → `policy_not_configured`
+   - `AllowRead != true` → `read_not_allowed`
+   - `policy.MaxRows <= 0` → `policy_not_configured`；即使数据库约束通常阻止该状态，Service 仍须在计算 `effectiveMaxRows` 和调用 Adapter 前 fail-closed，`Adapter.Query=0`、目标数据库访问次数为 0
 6. **客户端不能提高策略上限 — MaxRows**：
+   - 仅在确认 `policy.MaxRows > 0` 后计算有效上限；不得把非正策略值传给 Adapter 触发其默认值回退
    - 客户端 RequestMaxRows ≤ 0 → 使用 `policy.MaxRows`
    - 客户端 RequestMaxRows > 0 → `effectiveMaxRows = min(policy.MaxRows, RequestMaxRows)`
    - 0、负数或超大值均不得绕过策略上限
@@ -563,7 +567,7 @@ HTTP 映射等公开路由任务确定后再最终批准。P0-04 先冻结业务
 | `unauthorized` | 未认证 | A | 无有效 Principal |
 | `forbidden` | 非工作区成员 | A | |
 | `connection_not_found` | 连接不存在 | A | 统一不存在/跨工作区/不可见，防枚举 |
-| `policy_not_configured` | 策略未配置 | A | ConnectionPolicy 行不存在 |
+| `policy_not_configured` | 策略缺失或关键安全上限无效 | A | ConnectionPolicy 行不存在，或 `policy.MaxRows <= 0`；均在 Adapter 前拒绝 |
 | `read_not_allowed` | 禁止读取 | A | ConnectionPolicy 存在但 AllowRead != true |
 | `invalid_page_token` | 分页 token 无效 | D | |
 | `sql_parse_error` | SQL lexer/parser 无法可靠判定 | C | lexer error、mode 不可信或 AST 语法错误；原始错误不外泄 |
@@ -927,7 +931,8 @@ Round 3 必须原样重跑 Spike v7 的 MySQL AST base 43 条和 ECM 12 positive
 | PAGE-05 | `PageSize <= 0` | 使用默认值 100 后再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-06 | `PageSize > 500` | 先钳制为 500，再与 `effectiveMaxRows` 求 min，并据此决定是否要求 `VerifiedSortPlan` |
 | PAGE-07 | nil/typed-nil/`Valid()=false` 的 `VerifiedSortPlan` | fail-closed；Adapter 不执行目标查询 |
-| PAGE-08 | 单页查询实际结果超过限制 | 最多读取 `effectiveMaxRows+1` 行；检测到第 `effectiveMaxRows+1` 行即返回 `result_too_large`，Execution failed、Audit failed，丢弃结果且不得生成 continuation token；数据库读取和内存均保持有界 |
+| PAGE-08 | 单页查询实际结果超过限制 | 最多读取 `effectiveMaxRows+1` 行；检测到第 `effectiveMaxRows+1` 行即返回 `result_too_large`，Execution status=`failed`、Execution error_code=`result_too_large`、Audit outcome=`failed`，丢弃结果且不得生成 continuation token；数据库读取和内存均保持有界 |
+| PAGE-09 | `policy.MaxRows <= 0`（损坏数据、测试替身或未来非数据库策略源） | 阶段 A 返回 `policy_not_configured`；不计算/传递 Adapter `MaxRows`；`Adapter.Query=0`；目标数据库访问次数为 0；Audit outcome=`denied` |
 
 ---
 

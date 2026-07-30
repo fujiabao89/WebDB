@@ -277,8 +277,8 @@ GOPROXY=off go list -m all                              76 lines (1 main + 75 ex
 
 **Do not approve production dependency. Do not start sqlpolicy/ or execution/.**
 
-### 6.7 Owner 决策
+### 6.7 Owner 决策（2026-07-30，报告后更新）
 
-1. PG TABLE: require upstream fix or accept TABLE normalization?
-2. ECM recognition: require upstream API export or limit to semantic multi-node coverage?
-3. Authorize contributing both capabilities to Omni upstream?
+1. PG TABLE：接受 Omni 归一化后的等价 `Select` AST；继续应用全部 `Select` 安全门禁。
+2. ECM recognition：必须由 WebDB 自有、方言感知、fail-closed 的 lexer 在 Omni AST 前识别。semantic multi-node 检测仅是纵深防御，不能替代 ECM lexer 门禁。
+3. Omni 上游 issue/PR 仅作为可选协作项，不再是 Round 3 或正式实施的前置条件。
