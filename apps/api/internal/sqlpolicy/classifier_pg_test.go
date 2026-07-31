@@ -80,15 +80,13 @@ func TestClassifyPG(t *testing.T) {
 			if tt.wantKind != "" && result.StatementKind != tt.wantKind {
 				t.Errorf("StatementKind: got %q, want %q", result.StatementKind, tt.wantKind)
 			}
-			// [CR #3] wantDeny 通过 Decide() 验证 Allowed 和 ReasonCode
-			if tt.wantDeny {
-				dec := Decide(DialectPostgreSQL, tt.sql, MySQLLexerMode{})
-				if dec.Allowed {
-					t.Errorf("%s: Decide() should deny but allowed", tt.id)
-				}
-				if tt.wantCode != "" && dec.ReasonCode != tt.wantCode {
-					t.Errorf("%s: ReasonCode got %q want %q", tt.id, dec.ReasonCode, tt.wantCode)
-				}
+			// [CR #3] 每个用例都通过 Decide() 验证 Allowed 与 !wantDeny 一致
+			dec := Decide(DialectPostgreSQL, tt.sql, MySQLLexerMode{})
+			if dec.Allowed != !tt.wantDeny {
+				t.Errorf("%s: Decide().Allowed=%v, wantDeny=%v", tt.id, dec.Allowed, tt.wantDeny)
+			}
+			if tt.wantDeny && tt.wantCode != "" && dec.ReasonCode != tt.wantCode {
+				t.Errorf("%s: ReasonCode got %q want %q", tt.id, dec.ReasonCode, tt.wantCode)
 			}
 			// [CR #3] 双向特征比较
 			checkFeaturesBidi(t, result.ASTFeatures, tt.features)
