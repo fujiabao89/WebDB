@@ -1,18 +1,22 @@
 # WebDB P0 依赖许可证清单
 
-> 状态：P0（Go/Docker 已完成，npm 包待补充）｜更新日期：2026-07-21
+> 状态：P0（Go/Docker 已完成，npm 包待补充）｜更新日期：2026-07-31
 >
 > 本项目采用 Apache License 2.0。以下列出 Go 后端和 Docker 镜像依赖，均与 AL2.0 兼容。npm 前端依赖未包含。
+>
+> WEB-13 (P0-04) 新增 Omni SQL 解析器依赖（MIT），完整传递依赖许可证清单见 `docs/tasks/P0-04-spike-licenses.tsv`（75 个外部模块，无 GPL/AGPL/SSPL）。
 
 ## Go 依赖（apps/api）
 
 | 包 | 版本 | 许可证 | 类型 |
 |---|---|---|---|
+| github.com/bytebase/omni | v0.0.0-20260728103305-d2f82de1b468 | MIT | direct (WEB-13) |
 | github.com/google/uuid | v1.6.0 | BSD 3-Clause | direct |
 | github.com/jackc/pgx/v5 | v5.10.0 | MIT | direct |
 | github.com/pressly/goose/v3 | v3.27.2 | MIT | direct |
 | github.com/go-sql-driver/mysql | v1.10.0 | MPL-2.0 | direct |
 | filippo.io/edwards25519 | v1.2.0 | BSD 3-Clause | indirect |
+| github.com/hjson/hjson-go/v4 | v4.6.0 | MIT | indirect |
 | github.com/jackc/pgpassfile | v1.0.0 | MIT | indirect |
 | github.com/jackc/pgservicefile | v0.0.0 | MIT | indirect |
 | github.com/jackc/puddle/v2 | v2.2.2 | MIT | indirect |

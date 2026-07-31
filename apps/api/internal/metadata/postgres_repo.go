@@ -550,11 +550,18 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 
-	// P0 允许列表：仅保留明确安全的键，且值必须为 string/float64/bool
+	// P0 允许列表（WEB-13 扩展字段）
 	allowed := map[string]bool{
-		"summary":       true,
-		"rows_affected": true,
-		"cached":        true,
+		"summary":        true,
+		"rows_affected":  true,
+		"row_count":      true,
+		"cached":         true,
+		"statement_hash": true,
+		"duration_ms":    true,
+		"error_code":     true,
+		"reason_code":    true,
+		"engine":         true,
+		"environment":    true,
 	}
 
 	filtered := make(map[string]any, len(m))
@@ -562,19 +569,49 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		if !allowed[k] {
 			continue
 		}
-		// 仅允许安全的标量类型（string、float64、bool），字符串截断防 SQL 泄露
 		switch val := v.(type) {
 		case string:
-			if len(val) > 500 {
-				val = val[:500]
+			switch k {
+			case "statement_hash":
+				if isHex64(val) {
+					filtered[k] = val
+				}
+			case "error_code", "reason_code":
+				if isValidStableCode(val) {
+					filtered[k] = val
+				}
+			case "engine":
+				if val == "postgresql" || val == "mysql" {
+					filtered[k] = val
+				}
+			case "environment":
+				if val == "development" || val == "staging" || val == "production" {
+					filtered[k] = val
+				}
+			default:
+				if len(val) > 255 {
+					val = val[:255]
+				}
+				if looksLikeSQL(val) || looksLikeCredential(val) {
+					filtered[k] = "[redacted: sensitive content]"
+				} else {
+					filtered[k] = val
+				}
 			}
-			if looksLikeSQL(val) || looksLikeCredential(val) {
-				filtered[k] = "[redacted: sensitive content]"
-			} else {
+		case float64:
+			// [Qodo #4] 仅数字类型字段接受 float64
+			if k == "duration_ms" || k == "row_count" || k == "rows_affected" {
+				if val >= 0 && val == float64(int64(val)) && val <= 1<<31-1 {
+					filtered[k] = val
+				}
+			}
+			// 其他 key 不接受 float64（静默丢弃）
+		case bool:
+			// [Qodo #4] 仅 cached 接受 bool
+			if k == "cached" {
 				filtered[k] = val
 			}
-		case float64, bool:
-			filtered[k] = val
+			// 其他 key 不接受 bool（静默丢弃）
 		}
 	}
 
@@ -707,4 +744,34 @@ func looksLikeCredential(s string) bool {
 		}
 	}
 	return false
+}
+
+// isHex64 验证字符串是否为 64 字符小写 hex（SHA-256 摘要格式）。
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidStableCode 精确白名单验证稳定错误码 [CR #2]。
+func isValidStableCode(s string) bool {
+	codes := map[string]bool{
+		"allowed": true, "sql_parse_error": true, "multiple_statements": true,
+		"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
+		"executable_comment_detected": true, "invalid_scope": true, "unauthorized": true,
+		"forbidden": true, "connection_not_found": true, "policy_not_configured": true,
+		"read_not_allowed": true, "query_timeout": true, "query_cancelled": true,
+		"rate_limited": true, "connection_busy": true, "result_too_large": true,
+		"database_error": true, "audit_failed": true, "internal_error": true,
+		"unsupported_engine": true, "invalid_page_token": true,
+		"pagination_capacity_exhausted": true, "unsupported_query": true,
+		"stale_config": true, "config_conflict": true,
+	}
+	return codes[s]
 }
