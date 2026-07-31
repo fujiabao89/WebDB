@@ -66,6 +66,11 @@ func TestClassifyPG(t *testing.T) {
 		// [CR #20] schema 限定危险函数（确保 fcBaseName 只取最后一段）
 		{id: "PG-53", sql: "SELECT pg_catalog.nextval('s')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 		{id: "PG-54", sql: "SELECT pg_catalog.lo_unlink(1)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		// [CR #23] 补充大对象写函数
+		{id: "PG-55", sql: "SELECT lo_creat(0)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-56", sql: "SELECT lo_from_bytea(0, '')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-57", sql: "SELECT lowrite(0, '')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-58", sql: "SELECT lo_truncate(0, 0)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 	}
 
 	for _, tt := range tests {

@@ -6,17 +6,18 @@ import (
 )
 
 func TestSanitizeAuditMetadata_NumericTypes(t *testing.T) {
-	// [CR #19] 表驱动测试：duration_ms / row_count / rows_affected 类型边界
+	// [CR #19, CR #22] 表驱动测试：duration_ms / row_count / rows_affected 类型边界 + 值校验
 	tests := []struct {
-		name    string
-		input   map[string]any
-		wantKey string
-		wantOk  bool // key 应存在于过滤结果中
+		name      string
+		input     map[string]any
+		wantKey   string
+		wantOk    bool // key 应存在于过滤结果中
+		wantValue any  // [CR #22] 期望值（wantOk=true 时校验）
 	}{
 		// 正常整数值
-		{name: "duration_ms valid", input: map[string]any{"duration_ms": 42.0}, wantKey: "duration_ms", wantOk: true},
-		{name: "row_count valid", input: map[string]any{"row_count": 100.0}, wantKey: "row_count", wantOk: true},
-		{name: "rows_affected valid", input: map[string]any{"rows_affected": 0.0}, wantKey: "rows_affected", wantOk: true},
+		{name: "duration_ms valid", input: map[string]any{"duration_ms": 42.0}, wantKey: "duration_ms", wantOk: true, wantValue: 42.0},
+		{name: "row_count valid", input: map[string]any{"row_count": 100.0}, wantKey: "row_count", wantOk: true, wantValue: 100.0},
+		{name: "rows_affected valid", input: map[string]any{"rows_affected": 0.0}, wantKey: "rows_affected", wantOk: true, wantValue: 0.0},
 
 		// 负数 → 丢弃
 		{name: "duration_ms negative", input: map[string]any{"duration_ms": -1.0}, wantKey: "duration_ms", wantOk: false},
@@ -44,27 +45,34 @@ func TestSanitizeAuditMetadata_NumericTypes(t *testing.T) {
 			if err := json.Unmarshal(filtered, &m); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			_, exists := m[tt.wantKey]
+			val, exists := m[tt.wantKey]
 			if tt.wantOk && !exists {
 				t.Errorf("key %q should exist but was filtered out", tt.wantKey)
 			}
 			if !tt.wantOk && exists {
-				t.Errorf("key %q should be filtered out but exists with value %v", tt.wantKey, m[tt.wantKey])
+				t.Errorf("key %q should be filtered out but exists with value %v", tt.wantKey, val)
+			}
+			// [CR #22] 对保留的 key 校验实际值
+			if tt.wantOk && exists {
+				if val != tt.wantValue {
+					t.Errorf("key %q: got value %v (%T), want %v (%T)", tt.wantKey, val, val, tt.wantValue, tt.wantValue)
+				}
 			}
 		})
 	}
 }
 
 func TestSanitizeAuditMetadata_BoolTypes(t *testing.T) {
-	// [CR #19] cached 接受 bool，其他 key 拒绝 bool
+	// [CR #19, CR #22] cached 接受 bool，其他 key 拒绝 bool + 值校验
 	tests := []struct {
-		name    string
-		input   map[string]any
-		wantKey string
-		wantOk  bool
+		name      string
+		input     map[string]any
+		wantKey   string
+		wantOk    bool
+		wantValue any // [CR #22] 期望值（wantOk=true 时校验）
 	}{
-		{name: "cached true", input: map[string]any{"cached": true}, wantKey: "cached", wantOk: true},
-		{name: "cached false", input: map[string]any{"cached": false}, wantKey: "cached", wantOk: true},
+		{name: "cached true", input: map[string]any{"cached": true}, wantKey: "cached", wantOk: true, wantValue: true},
+		{name: "cached false", input: map[string]any{"cached": false}, wantKey: "cached", wantOk: true, wantValue: false},
 		{name: "engine as bool", input: map[string]any{"engine": true}, wantKey: "engine", wantOk: false},
 		{name: "environment as bool", input: map[string]any{"environment": false}, wantKey: "environment", wantOk: false},
 		{name: "error_code as bool", input: map[string]any{"error_code": true}, wantKey: "error_code", wantOk: false},
@@ -79,12 +87,18 @@ func TestSanitizeAuditMetadata_BoolTypes(t *testing.T) {
 			if err := json.Unmarshal(filtered, &m); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			_, exists := m[tt.wantKey]
+			val, exists := m[tt.wantKey]
 			if tt.wantOk && !exists {
 				t.Errorf("key %q should exist but was filtered out", tt.wantKey)
 			}
 			if !tt.wantOk && exists {
-				t.Errorf("key %q should be filtered out but exists with value %v", tt.wantKey, m[tt.wantKey])
+				t.Errorf("key %q should be filtered out but exists with value %v", tt.wantKey, val)
+			}
+			// [CR #22] 对保留的 key 校验实际值
+			if tt.wantOk && exists {
+				if val != tt.wantValue {
+					t.Errorf("key %q: got value %v (%T), want %v (%T)", tt.wantKey, val, val, tt.wantValue, tt.wantValue)
+				}
 			}
 		})
 	}

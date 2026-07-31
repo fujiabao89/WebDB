@@ -217,15 +217,20 @@ func hasModifyingCTEPG(ctes *pgast.List) bool {
 	return false
 }
 
-// dangerousPGFuncs 危险函数名单 — 仅按函数名最后一段匹配，忽略 schema 限定 [CR #20]。
+// dangerousPGFuncs 危险函数名单 — 仅按函数名最后一段匹配，忽略 schema 限定 [CR #20, CR #23]。
 var dangerousPGFuncs = map[string]struct{}{
-	"setval":    {},
-	"nextval":   {},
-	"lo_create": {},
-	"lo_import": {},
-	"lo_export": {},
-	"lo_unlink": {},
-	"lo_put":    {},
+	"setval":        {},
+	"nextval":       {},
+	"lo_create":     {},
+	"lo_creat":      {}, // 旧式大对象创建
+	"lo_import":     {},
+	"lo_export":     {},
+	"lo_unlink":     {},
+	"lo_put":        {},
+	"lo_from_bytea": {},
+	"lowrite":       {}, // 服务端大对象写入 (非客户端 lo_write)
+	"lo_truncate":   {},
+	"lo_truncate64": {},
 }
 
 // hasDangerousPGFunc 递归检测 PG AST 中的危险函数调用 [CR #6, CR #20]。
