@@ -506,7 +506,8 @@ func hasAssignmentInExprs(exprs []mysqlast.ExprNode) bool {
 	return false
 }
 
-// hasAssignmentInExpr 递归检查单个表达式树中的 BinOpAssign。
+// hasAssignmentInExpr 递归检查单个表达式树中的 BinOpAssign [CR #18]。
+// 覆盖：ParenExpr / BinaryExpr / FuncCallExpr.Args / CaseExpr 各分支 / SubqueryExpr。
 func hasAssignmentInExpr(e mysqlast.ExprNode) bool {
 	if e == nil {
 		return false
@@ -521,6 +522,28 @@ func hasAssignmentInExpr(e mysqlast.ExprNode) bool {
 			return true
 		}
 		if hasAssignmentInExpr(bin.Left) || hasAssignmentInExpr(bin.Right) {
+			return true
+		}
+	}
+	// [CR #18] FuncCallExpr: 递归检查函数参数（如 IF(@x:=1, ...)、COALESCE(@x:=1, ...)）
+	if fc, ok := e.(*mysqlast.FuncCallExpr); ok {
+		for _, arg := range fc.Args {
+			if hasAssignmentInExpr(arg) {
+				return true
+			}
+		}
+	}
+	// [CR #18] CaseExpr: 检查 Operand / Whens(Cond, Result) / Default
+	if ce, ok := e.(*mysqlast.CaseExpr); ok {
+		if hasAssignmentInExpr(ce.Operand) {
+			return true
+		}
+		for _, wh := range ce.Whens {
+			if hasAssignmentInExpr(wh.Cond) || hasAssignmentInExpr(wh.Result) {
+				return true
+			}
+		}
+		if hasAssignmentInExpr(ce.Default) {
 			return true
 		}
 	}
@@ -543,15 +566,55 @@ func hasAssignmentInOrderBy(items []*mysqlast.OrderByItem) bool {
 	return false
 }
 
-// hasAssignmentInFrom 检查 FROM 子句 JOIN ON 条件。
+// hasAssignmentInFrom 检查 FROM 子句中的 JOIN ON 条件、派生表子查询及嵌套 JOIN [CR #18]。
 func hasAssignmentInFrom(from []mysqlast.TableExpr) bool {
 	for _, te := range from {
 		if jc, ok := te.(*mysqlast.JoinClause); ok {
-			if on, ok := jc.Condition.(*mysqlast.OnCondition); ok && on != nil {
-				if hasAssignmentInExpr(on.Expr) {
-					return true
-				}
+			if hasAssignmentInJoinClause(jc) {
+				return true
 			}
+		}
+		// [CR #18] 派生表: (SELECT @x:=1 ...) AS t
+		if sub, ok := te.(*mysqlast.SubqueryExpr); ok && sub.Select != nil {
+			_, feat := classifyMySQLSelect(sub.Select)
+			if feat.HasAssignment {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hasAssignmentInJoinClause 递归检查 JOIN 子树的 ON 条件和嵌套 JOIN [CR #18]。
+func hasAssignmentInJoinClause(jc *mysqlast.JoinClause) bool {
+	if jc == nil {
+		return false
+	}
+	// ON 条件
+	if on, ok := jc.Condition.(*mysqlast.OnCondition); ok && on != nil {
+		if hasAssignmentInExpr(on.Expr) {
+			return true
+		}
+	}
+	// 递归检查嵌套 JOIN (Left/Right 可以是另一个 JoinClause)
+	if left, ok := jc.Left.(*mysqlast.JoinClause); ok {
+		if hasAssignmentInJoinClause(left) {
+			return true
+		}
+	} else if leftSub, ok := jc.Left.(*mysqlast.SubqueryExpr); ok && leftSub.Select != nil {
+		_, feat := classifyMySQLSelect(leftSub.Select)
+		if feat.HasAssignment {
+			return true
+		}
+	}
+	if right, ok := jc.Right.(*mysqlast.JoinClause); ok {
+		if hasAssignmentInJoinClause(right) {
+			return true
+		}
+	} else if rightSub, ok := jc.Right.(*mysqlast.SubqueryExpr); ok && rightSub.Select != nil {
+		_, feat := classifyMySQLSelect(rightSub.Select)
+		if feat.HasAssignment {
+			return true
 		}
 	}
 	return false

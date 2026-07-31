@@ -89,21 +89,41 @@ func TestEvaluateSQL_UnknownEngine(t *testing.T) {
 	}
 }
 
-// [CR round2] 非默认 mode 下保守拒绝（Omni 不支持 mode-aware 解析）
-func TestEvaluateSQL_MySQL_NoBackslashEscapes_Rejected(t *testing.T) {
-	sql := "SELECT 'test\\' /*!50000' FROM t"
-	mode := sqlpolicy.MySQLLexerMode{NoBackslashEscapes: true}
-	decision, _ := EvaluateSQL(EngineMySQL, sql, mode)
-	// 非默认 mode → Omni parser 语义不一致 → fail-closed 拒绝
-	if decision.ReasonCode != sqlpolicy.ReasonParseError {
-		t.Errorf("expected ReasonParseError for NoBackslashEscapes, got %s", decision.ReasonCode)
+// [CR #17] 非默认 mode 下保守拒绝 — 表驱动负例，完整断言 Allowed/ReasonCode/StableErrorCode
+func TestEvaluateSQL_MySQL_NonDefaultMode_Rejected(t *testing.T) {
+	tests := []struct {
+		name     string
+		sql      string
+		mode     sqlpolicy.MySQLLexerMode
+		wantCode sqlpolicy.StableReasonCode
+	}{
+		{
+			name:     "NoBackslashEscapes",
+			sql:      "SELECT 'test\\' /*!50000' FROM t",
+			mode:     sqlpolicy.MySQLLexerMode{NoBackslashEscapes: true},
+			wantCode: sqlpolicy.ReasonParseError,
+		},
+		{
+			name:     "ANSIQuotes",
+			sql:      "SELECT 1",
+			mode:     sqlpolicy.MySQLLexerMode{ANSIQuotes: true},
+			wantCode: sqlpolicy.ReasonParseError,
+		},
 	}
-}
 
-func TestEvaluateSQL_MySQL_ANSIQuotes_Rejected(t *testing.T) {
-	decision, _ := EvaluateSQL(EngineMySQL, "SELECT 1", sqlpolicy.MySQLLexerMode{ANSIQuotes: true})
-	if decision.ReasonCode != sqlpolicy.ReasonParseError {
-		t.Errorf("expected ReasonParseError for ANSI_QUOTES, got %s", decision.ReasonCode)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision, stableCode := EvaluateSQL(EngineMySQL, tt.sql, tt.mode)
+			if decision.Allowed {
+				t.Errorf("decision.Allowed should be false")
+			}
+			if decision.ReasonCode != tt.wantCode {
+				t.Errorf("decision.ReasonCode = %s, want %s", decision.ReasonCode, tt.wantCode)
+			}
+			if stableCode != StableErrorCode(tt.wantCode) {
+				t.Errorf("stableErrorCode = %s, want %s", stableCode, tt.wantCode)
+			}
+		})
 	}
 }
 

@@ -55,6 +55,14 @@ func TestClassifyMySQL(t *testing.T) {
 		{id: "MY-44", sql: "SELECT * FROM t WHERE (@x := id) > 0", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
 		// [CR round2] CTE 内部的赋值检测
 		{id: "MY-45", sql: "WITH cte AS (SELECT @x := 1 FROM t) SELECT * FROM cte", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasCTE: true, HasAssignment: true}},
+		// [CR #18] 函数参数中的赋值检测
+		{id: "MY-46", sql: "SELECT IF(@x := 1, a, b) FROM t", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
+		// [CR #18] CASE 表达式中的赋值检测
+		{id: "MY-47", sql: "SELECT CASE WHEN (@x := id) > 0 THEN 1 ELSE 0 END FROM t", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
+		// [CR #18] 派生表子查询中的赋值检测
+		{id: "MY-48", sql: "SELECT * FROM (SELECT @x := id FROM t) AS dt", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
+		// [CR #18] 嵌套 JOIN ON 条件中的赋值检测
+		{id: "MY-49", sql: "SELECT * FROM t1 JOIN t2 ON (@x := t1.id) = t2.id", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
 	}
 
 	for _, tt := range tests {
