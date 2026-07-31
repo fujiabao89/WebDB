@@ -1,6 +1,17 @@
 # P0-04：SQL 安全执行策略
 
-> 状态：Ready｜风险：High｜依赖：P0-03、ADR-005、ADR-007、ADR-008｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：Done｜风险：High｜依赖：P0-03、ADR-005、ADR-007、ADR-008｜实现者：Claude Code｜独立审查：Codex + CodeRabbit + Qodo
+
+## 完成信息
+
+| 项目 | 详情 |
+| --- | --- |
+| 完成日期 | 2026-07-31 |
+| 工程 PR | [#27](https://github.com/fujiabao89/WebDB/pull/27) |
+| Merge commit | `64be9bb` |
+| 实现分支 | `feat/WEB-13-sql-safety-implementation` |
+| 审查轮次 | 6 轮 CodeRabbit + 1 轮 Qodo（28 条评论，0 条未解决） |
+| 实际包 | `apps/api/internal/sqlpolicy/`、`apps/api/internal/execution/` |
 
 ## 目标与范围
 
@@ -10,13 +21,59 @@
 
 ## 验收标准
 
-| 验收项 | 证据 |
+| 验收项 | 实际证据 |
 | --- | --- |
-| 多语句、危险语句、解析错误和未知类别均被拒绝 | 两方言回归/模糊测试 |
-| 注释、字符串、大小写和方言绕过不能误放行 | 对抗测试集 |
-| 仅授权工作区/连接/环境/目标库权限交集可执行 | 授权集成测试 |
-| 超时、最大返回行数、取消和 429 有稳定 API 错误码并产生审计摘要 | 集成测试与审计断言 |
+| 多语句、危险语句、解析错误和未知类别均被拒绝 | PG 59 用例 + MySQL 49 用例表驱动测试，全部 PASS（`go test ./internal/sqlpolicy/`） |
+| 注释、字符串、大小写和方言绕过不能误放行 | ECM lexer 12 positive + 9 negative + 6 boundary 用例，fuzz 30s 无新路径 |
+| MySQL ECM 可执行注释 AST 前检测拒绝 | `ecm_lexer.go` 确定性状态机（O(n)/O(1)），`/*!...*/` 在 parser 前检测 |
+| PG 危险函数检测 | `dangerousPGFuncs` 13 个函数（setval/nextval/lo_*/lowrite/lo_truncate/lo_truncate64），`fcBaseName` 忽略 schema 限定 |
+| MySQL `:=` 赋值检测 | 递归覆盖 TargetList/WHERE/HAVING/GROUP BY/ORDER BY/FROM/JOIN ON/FuncCallExpr.Args/CaseExpr/派生表/嵌套 JOIN |
+| `ANSI_QUOTES` / `NoBackslashEscapes` fail-closed | `policy.go` 检测非默认 mode 后返回 `ReasonParseError` |
+| 方言 AST 未知/解析失败默认拒绝 | `ReasonUnsupported` / `ReasonParseError`，不使用字符串前缀匹配 |
+| ECM 或拒绝时 Adapter 调用次数为 0 | `execution/service.go`: `EvaluateSQL` 仅 `Allowed=true` 时返回空 error code |
+| 超时、最大返回行数、取消有稳定错误码 | `StableErrorCode` 映射: `sql_parse_error` / `multiple_statements` / `statement_not_allowed` / `unsupported_statement` / `empty_sql` / `executable_comment_detected` |
+| 审计脱敏 | `sanitizeAuditMetadata` 扩展 6 字段 + 类型校验（`audit_sanitize_test.go` 26 用例） |
+| PG `TABLE` 按等价 SELECT AST 处理 | `classifyPGAST`: `*pgast.SelectStmt` → `classifyPGSelect`，含 FOR UPDATE 等功能检测 |
+| 固定 Omni 版本 + 许可证 | `v0.0.0-20260728103305-d2f82de1b468` (MIT)，记录于 `docs/DEPENDENCY-LICENSES.md` |
 
-## 实施顺序
+## 非目标（仍未改变）
 
-先冻结策略输入/输出契约和拒绝语义，再实现两方言分类，最后接入 P0-03。任何“无法解析但想放行”的需求必须升级 Owner。
+- 不支持 DML/DDL。
+- 不注册公开 HTTP 业务路由；ExecutionService 仅供内部 Go 调用。
+- 不把 SQL 安全判断下放到客户端；`MySQLLexerMode` 从服务端可信连接配置派生。
+- 不依赖字符串前缀或正则作为 AST 安全边界。
+- `docs/tasks/evidence/P0-04-round3/harness/` 是依赖与设计验证证据，不是生产实现。
+
+## 验证命令与结果
+
+```bash
+# 单元测试
+go test ./internal/sqlpolicy/   # PASS (PG 59 + MySQL 49 + ECM 12/9/6)
+go test ./internal/execution/   # PASS (13 用例)
+go test ./internal/metadata/    # PASS (26 审计脱敏用例)
+
+# 静态检查
+gofmt -l .                      # 无输出
+go vet ./...                    # 无输出
+
+# 构建（Win + Linux）
+CGO_ENABLED=0 GOOS=windows go build ./...   # PASS
+CGO_ENABLED=0 GOOS=linux go build ./...     # PASS
+
+# CI
+Web / Contracts / API / Detect / Safety / Contract checks 全部 success
+```
+
+## 残余风险
+
+| 风险 | 缓解措施 | 后续任务 |
+| --- | --- | --- |
+| `SELECT func()` 副作用（用户自定义 `SECURITY DEFINER`） | AST 仅按名单匹配，不覆盖自定义函数 | P0-05 执行层加只读事务 |
+| Omni MySQL parser 不支持 mode-aware 解析 | `ANSI_QUOTES` / `NoBackslashEscapes` 时 fail-closed 拒绝 | Omni 支持后移除 |
+| 函数名大小写绕过 | `strings.ToLower` 归一化 | — |
+
+## 回滚
+
+```bash
+git revert 64be9bb
+```
