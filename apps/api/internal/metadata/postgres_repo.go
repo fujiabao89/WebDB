@@ -550,11 +550,18 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		return raw
 	}
 
-	// P0 允许列表：仅保留明确安全的键，且值必须为 string/float64/bool
+	// P0 允许列表（WEB-13 扩展字段）
 	allowed := map[string]bool{
-		"summary":       true,
-		"rows_affected": true,
-		"cached":        true,
+		"summary":        true,
+		"rows_affected":  true,
+		"row_count":      true,
+		"cached":         true,
+		"statement_hash": true,
+		"duration_ms":    true,
+		"error_code":     true,
+		"reason_code":    true,
+		"engine":         true,
+		"environment":    true,
 	}
 
 	filtered := make(map[string]any, len(m))
@@ -562,18 +569,44 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 		if !allowed[k] {
 			continue
 		}
-		// 仅允许安全的标量类型（string、float64、bool），字符串截断防 SQL 泄露
 		switch val := v.(type) {
 		case string:
-			if len(val) > 500 {
-				val = val[:500]
+			switch k {
+			case "statement_hash":
+				if isHex64(val) {
+					filtered[k] = val
+				}
+			case "error_code", "reason_code":
+				if isValidStableCode(val) {
+					filtered[k] = val
+				}
+			case "engine":
+				if val == "postgresql" || val == "mysql" {
+					filtered[k] = val
+				}
+			case "environment":
+				if val == "development" || val == "staging" || val == "production" {
+					filtered[k] = val
+				}
+			default:
+				if len(val) > 255 {
+					val = val[:255]
+				}
+				if looksLikeSQL(val) || looksLikeCredential(val) {
+					filtered[k] = "[redacted: sensitive content]"
+				} else {
+					filtered[k] = val
+				}
 			}
-			if looksLikeSQL(val) || looksLikeCredential(val) {
-				filtered[k] = "[redacted: sensitive content]"
+		case float64:
+			if k == "duration_ms" || k == "row_count" || k == "rows_affected" {
+				if val >= 0 && val == float64(int64(val)) && val <= 1<<31-1 {
+					filtered[k] = val
+				}
 			} else {
 				filtered[k] = val
 			}
-		case float64, bool:
+		case bool:
 			filtered[k] = val
 		}
 	}
@@ -703,6 +736,41 @@ func looksLikeCredential(s string) bool {
 	}
 	for _, pattern := range []string{"password", "secret", "token", "key=", "pass="} {
 		if strings.Contains(strings.ToLower(s), pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isHex64 验证字符串是否为 64 字符小写 hex（SHA-256 摘要格式）。
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isValidStableCode 验证字符串是否为稳定错误码。
+// 仅允许以特定前缀开头，防原始数据库错误泄露。
+func isValidStableCode(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	allowedPrefixes := []string{
+		"sql_", "multiple_", "statement_", "unsupported_",
+		"invalid_", "unauthorized", "forbidden",
+		"connection_", "policy_", "read_",
+		"query_", "rate_", "result_", "database_", "audit_", "internal_",
+		"stale_", "config_", "pagination_", "allowed", "empty_",
+		"executable_",
+	}
+	for _, p := range allowedPrefixes {
+		if len(s) >= len(p) && s[:len(p)] == p {
 			return true
 		}
 	}
