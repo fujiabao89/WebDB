@@ -1,5 +1,7 @@
 package sqlpolicy
 
+import "fmt"
+
 // Decide 根据方言对 SQL 进行完整安全策略判断（ADR-007）。
 //
 // 残余风险（Owner 已接受，见 P0-04 提案 §5.3）：
@@ -28,6 +30,19 @@ func decidePG(sql string) PolicyDecision {
 }
 
 func decideMySQL(sql string, mode MySQLLexerMode) PolicyDecision {
+	// [CR round2] Omni MySQL parser 目前不支持 mode-aware 解析；
+	// 当连接配置了 ANSI_QUOTES 或 NO_BACKSLASH_ESCAPES 时，
+	// 当前 parser 的分词语义与 MySQL server 不一致，
+	// 因此保守拒绝。
+	// TODO(WEB-13): Omni 支持 mode-aware parsing 后移除此限制。
+	if mode.ANSIQuotes || mode.NoBackslashEscapes {
+		return PolicyDecision{Allowed: false, ReasonCode: ReasonParseError,
+			Classification: ClassificationResult{
+				LexError: fmt.Errorf("mysql parser does not support session mode: ANSI_QUOTES=%v NO_BACKSLASH_ESCAPES=%v",
+					mode.ANSIQuotes, mode.NoBackslashEscapes),
+			}}
+	}
+
 	l := newECMLexer(sql, mode)
 	hasECM, err := l.scan()
 	if err != nil {

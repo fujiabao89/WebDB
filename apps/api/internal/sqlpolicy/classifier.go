@@ -382,9 +382,13 @@ func classifyMySQLSelect(n *mysqlast.SelectStmt) (StatementKind, ASTFeatures) {
 			if cte.Recursive {
 				features.HasRecursiveCTE = true
 			}
+			// [CR round2] 递归检查 CTE 内部 SELECT 的赋值
+			if cte.Select != nil {
+				_, cteFeat := classifyMySQLSelect(cte.Select)
+				features = mergeMySQLFeatures(features, cteFeat)
+			}
 		}
-		// [CR #10] MySQL DML CTE (WITH d AS (DELETE...)) 被 Omni parser
-		// 拒绝为 parse error → fail-closed，无需额外检查。
+		// [CR #10] MySQL DML CTE 被 Omni parser 拒绝为 parse error → fail-closed
 	}
 
 	if n.SetOp != mysqlast.SetOpNone {
@@ -412,7 +416,13 @@ func classifyMySQLSelect(n *mysqlast.SelectStmt) (StatementKind, ASTFeatures) {
 		}
 	}
 
-	if hasAssignmentInTargets(n.TargetList) {
+	// [CR round2] 递归检测赋值：TargetList + WHERE + HAVING + GROUP BY + ORDER BY + FROM 条件
+	if hasAssignmentInExprs(n.TargetList) ||
+		hasAssignmentInExpr(n.Where) ||
+		hasAssignmentInExpr(n.Having) ||
+		hasAssignmentInExprs(n.GroupBy) ||
+		hasAssignmentInOrderBy(n.OrderBy) ||
+		hasAssignmentInFrom(n.From) {
 		features.HasAssignment = true
 	}
 
@@ -442,15 +452,66 @@ func classifyMySQLExplain(n *mysqlast.ExplainStmt) (StatementKind, ASTFeatures) 
 }
 
 func hasModifyingCTEMySQL(ctes []*mysqlast.CommonTableExpr) bool {
-	// [CR #10] MySQL 修改型 CTE 被 Omni parser 拒绝（parse error），
-	// 此函数保留作为结构完整性占位。参见 classifyMySQLSelect 中的注释。
+	// [CR #10] 修改型 CTE 由 Omni parser parse error 兜底，本函数仅占位。
 	return false
 }
 
-func hasAssignmentInTargets(targets []mysqlast.ExprNode) bool {
-	for _, t := range targets {
-		if bin, ok := t.(*mysqlast.BinaryExpr); ok && bin.Op == mysqlast.BinOpAssign {
+// hasAssignmentInExprs 检查表达式列表中是否有 BinOpAssign [CR round2]。
+func hasAssignmentInExprs(exprs []mysqlast.ExprNode) bool {
+	for _, e := range exprs {
+		if hasAssignmentInExpr(e) {
 			return true
+		}
+	}
+	return false
+}
+
+// hasAssignmentInExpr 递归检查单个表达式树中的 BinOpAssign。
+func hasAssignmentInExpr(e mysqlast.ExprNode) bool {
+	if e == nil {
+		return false
+	}
+	if paren, ok := e.(*mysqlast.ParenExpr); ok {
+		if hasAssignmentInExpr(paren.Expr) {
+			return true
+		}
+	}
+	if bin, ok := e.(*mysqlast.BinaryExpr); ok {
+		if bin.Op == mysqlast.BinOpAssign {
+			return true
+		}
+		if hasAssignmentInExpr(bin.Left) || hasAssignmentInExpr(bin.Right) {
+			return true
+		}
+	}
+	if sub, ok := e.(*mysqlast.SubqueryExpr); ok && sub.Select != nil {
+		_, feat := classifyMySQLSelect(sub.Select)
+		if feat.HasAssignment {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAssignmentInOrderBy 检查 ORDER BY 项。
+func hasAssignmentInOrderBy(items []*mysqlast.OrderByItem) bool {
+	for _, item := range items {
+		if item != nil && hasAssignmentInExpr(item.Expr) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasAssignmentInFrom 检查 FROM 子句 JOIN ON 条件。
+func hasAssignmentInFrom(from []mysqlast.TableExpr) bool {
+	for _, te := range from {
+		if jc, ok := te.(*mysqlast.JoinClause); ok {
+			if on, ok := jc.Condition.(*mysqlast.OnCondition); ok && on != nil {
+				if hasAssignmentInExpr(on.Expr) {
+					return true
+				}
+			}
 		}
 	}
 	return false

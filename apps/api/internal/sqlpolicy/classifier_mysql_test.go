@@ -51,6 +51,10 @@ func TestClassifyMySQL(t *testing.T) {
 		{id: "MY-41", sql: "EXPLAIN FORMAT=JSON SELECT * FROM t", wantKind: StmtExplain},
 		{id: "MY-42", sql: "TABLE t", wantKind: StmtSelect},
 		{id: "MY-43", sql: "", wantDeny: true, wantCode: ReasonEmptySQL},
+		// [CR round2] WHERE 子句中的赋值检测
+		{id: "MY-44", sql: "SELECT * FROM t WHERE (@x := id) > 0", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasAssignment: true}},
+		// [CR round2] CTE 内部的赋值检测
+		{id: "MY-45", sql: "WITH cte AS (SELECT @x := 1 FROM t) SELECT * FROM cte", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasCTE: true, HasAssignment: true}},
 	}
 
 	for _, tt := range tests {

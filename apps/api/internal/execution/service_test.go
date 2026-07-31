@@ -89,13 +89,21 @@ func TestEvaluateSQL_UnknownEngine(t *testing.T) {
 	}
 }
 
-// [Qodo #1] ECM lexer 应按 mode 正确识别
-func TestEvaluateSQL_MySQL_ECM_NoBackslashEscapes(t *testing.T) {
+// [CR round2] 非默认 mode 下保守拒绝（Omni 不支持 mode-aware 解析）
+func TestEvaluateSQL_MySQL_NoBackslashEscapes_Rejected(t *testing.T) {
 	sql := "SELECT 'test\\' /*!50000' FROM t"
 	mode := sqlpolicy.MySQLLexerMode{NoBackslashEscapes: true}
 	decision, _ := EvaluateSQL(EngineMySQL, sql, mode)
-	if decision.ReasonCode != sqlpolicy.ReasonECMDetected {
-		t.Errorf("expected ECM detected with NoBackslashEscapes, got reason=%s", decision.ReasonCode)
+	// 非默认 mode → Omni parser 语义不一致 → fail-closed 拒绝
+	if decision.ReasonCode != sqlpolicy.ReasonParseError {
+		t.Errorf("expected ReasonParseError for NoBackslashEscapes, got %s", decision.ReasonCode)
+	}
+}
+
+func TestEvaluateSQL_MySQL_ANSIQuotes_Rejected(t *testing.T) {
+	decision, _ := EvaluateSQL(EngineMySQL, "SELECT 1", sqlpolicy.MySQLLexerMode{ANSIQuotes: true})
+	if decision.ReasonCode != sqlpolicy.ReasonParseError {
+		t.Errorf("expected ReasonParseError for ANSI_QUOTES, got %s", decision.ReasonCode)
 	}
 }
 
