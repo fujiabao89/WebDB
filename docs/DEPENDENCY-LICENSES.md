@@ -10,7 +10,7 @@
 
 | 包 | 版本 | 许可证 | 类型 |
 |---|---|---|---|
-| github.com/bytebase/omni | v0.0.0-20260728103305 | MIT | direct (WEB-13) |
+| github.com/bytebase/omni | v0.0.0-20260728103305-d2f82de1b468 | MIT | direct (WEB-13) |
 | github.com/google/uuid | v1.6.0 | BSD 3-Clause | direct |
 | github.com/jackc/pgx/v5 | v5.10.0 | MIT | direct |
 | github.com/pressly/goose/v3 | v3.27.2 | MIT | direct |

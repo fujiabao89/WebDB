@@ -755,24 +755,19 @@ func isHex64(s string) bool {
 	return true
 }
 
-// isValidStableCode 验证字符串是否为稳定错误码。
-// 仅允许以特定前缀开头，防原始数据库错误泄露。
+// isValidStableCode 精确白名单验证稳定错误码 [CR #2]。
 func isValidStableCode(s string) bool {
-	if len(s) == 0 || len(s) > 63 {
-		return false
+	codes := map[string]bool{
+		"allowed": true, "sql_parse_error": true, "multiple_statements": true,
+		"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
+		"executable_comment_detected": true, "invalid_scope": true, "unauthorized": true,
+		"forbidden": true, "connection_not_found": true, "policy_not_configured": true,
+		"read_not_allowed": true, "query_timeout": true, "query_cancelled": true,
+		"rate_limited": true, "connection_busy": true, "result_too_large": true,
+		"database_error": true, "audit_failed": true, "internal_error": true,
+		"unsupported_engine": true, "invalid_page_token": true,
+		"pagination_capacity_exhausted": true, "unsupported_query": true,
+		"stale_config": true, "config_conflict": true,
 	}
-	allowedPrefixes := []string{
-		"sql_", "multiple_", "statement_", "unsupported_",
-		"invalid_", "unauthorized", "forbidden",
-		"connection_", "policy_", "read_",
-		"query_", "rate_", "result_", "database_", "audit_", "internal_",
-		"stale_", "config_", "pagination_", "allowed", "empty_",
-		"executable_",
-	}
-	for _, p := range allowedPrefixes {
-		if len(s) >= len(p) && s[:len(p)] == p {
-			return true
-		}
-	}
-	return false
+	return codes[s]
 }

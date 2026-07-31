@@ -383,9 +383,8 @@ func classifyMySQLSelect(n *mysqlast.SelectStmt) (StatementKind, ASTFeatures) {
 				features.HasRecursiveCTE = true
 			}
 		}
-		if hasModifyingCTEMySQL(n.CTEs) {
-			features.HasModifyingCTE = true
-		}
+		// [CR #10] MySQL DML CTE (WITH d AS (DELETE...)) 被 Omni parser
+		// 拒绝为 parse error → fail-closed，无需额外检查。
 	}
 
 	if n.SetOp != mysqlast.SetOpNone {
@@ -443,31 +442,8 @@ func classifyMySQLExplain(n *mysqlast.ExplainStmt) (StatementKind, ASTFeatures) 
 }
 
 func hasModifyingCTEMySQL(ctes []*mysqlast.CommonTableExpr) bool {
-	for _, cte := range ctes {
-		if cte.Select == nil {
-			continue
-		}
-		s := cte.Select
-		if s.SetOp != mysqlast.SetOpNone {
-			if s.Left != nil && isDMLSelectMySQL(s.Left) {
-				return true
-			}
-			if s.Right != nil && isDMLSelectMySQL(s.Right) {
-				return true
-			}
-		} else {
-			if isDMLSelectMySQL(s) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// isDMLSelectMySQL 判断 MySQL SelectStmt 是否含 DML 语义。
-// MySQL CTE 中的 DML 会被解析为对应的 DML 类型（InsertStmt等），
-// 而非 SelectStmt。这里保留结构性检查以防未来变化。
-func isDMLSelectMySQL(s *mysqlast.SelectStmt) bool {
+	// [CR #10] MySQL 修改型 CTE 被 Omni parser 拒绝（parse error），
+	// 此函数保留作为结构完整性占位。参见 classifyMySQLSelect 中的注释。
 	return false
 }
 
