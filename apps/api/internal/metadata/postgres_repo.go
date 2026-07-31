@@ -599,15 +599,19 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 				}
 			}
 		case float64:
+			// [Qodo #4] 仅数字类型字段接受 float64
 			if k == "duration_ms" || k == "row_count" || k == "rows_affected" {
 				if val >= 0 && val == float64(int64(val)) && val <= 1<<31-1 {
 					filtered[k] = val
 				}
-			} else {
+			}
+			// 其他 key 不接受 float64（静默丢弃）
+		case bool:
+			// [Qodo #4] 仅 cached 接受 bool
+			if k == "cached" {
 				filtered[k] = val
 			}
-		case bool:
-			filtered[k] = val
+			// 其他 key 不接受 bool（静默丢弃）
 		}
 	}
 

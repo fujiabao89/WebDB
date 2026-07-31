@@ -74,7 +74,8 @@ func applyPolicy(result ClassificationResult) PolicyDecision {
 	feat := result.ASTFeatures
 	if feat.HasLockingClause || feat.HasSelectInto || feat.HasIntoOutfile ||
 		feat.HasIntoVar || feat.HasAssignment || feat.HasExplainAnalyze ||
-		feat.HasModifyingCTE || feat.HasExplainDMLDDL || feat.HasNestedExplain {
+		feat.HasModifyingCTE || feat.HasExplainDMLDDL || feat.HasNestedExplain ||
+		feat.HasDangerousFunc {
 		return PolicyDecision{Allowed: false, ReasonCode: ReasonNotAllowed, Classification: result}
 	}
 	return PolicyDecision{Allowed: true, ReasonCode: ReasonAllowed, Classification: result}

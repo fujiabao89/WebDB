@@ -155,6 +155,11 @@ func classifyPGSelect(n *pgast.SelectStmt) (StatementKind, ASTFeatures) {
 		features.HasSelectInto = true
 	}
 
+	// [CR #6] 递归检测危险函数调用 (setval, lo_create, SECURITY DEFINER 等)
+	if hasDangerousPGFunc(n) {
+		features.HasDangerousFunc = true
+	}
+
 	return StmtSelect, features
 }
 
@@ -212,6 +217,40 @@ func hasModifyingCTEPG(ctes *pgast.List) bool {
 	return false
 }
 
+// hasDangerousPGFunc 递归检测 PG AST 中的危险函数调用 [CR #6]。
+// 包括 setval, lo_create, lo_import 等可副作用写入的函数。
+func hasDangerousPGFunc(n pgast.Node) bool {
+	found := false
+	pgast.Inspect(n, func(n pgast.Node) bool {
+		if fc, ok := n.(*pgast.FuncCall); ok {
+			name := strings.ToLower(fcName(fc))
+			if name == "setval" || name == "lo_create" ||
+				name == "lo_import" || name == "lo_unlink" ||
+				name == "pg_catalog.lo_create" || name == "pg_catalog.lo_import" ||
+				name == "nextval" || name == "pg_catalog.setval" {
+				found = true
+				return false // 停止遍历
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// fcName 从 FuncCall 提取函数名。
+func fcName(fc *pgast.FuncCall) string {
+	if fc.Funcname == nil {
+		return ""
+	}
+	var parts []string
+	for _, item := range fc.Funcname.Items {
+		if sv, ok := item.(*pgast.String); ok {
+			parts = append(parts, sv.Str)
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
 func mergePGFeatures(a, b ASTFeatures) ASTFeatures {
 	a.HasCTE = a.HasCTE || b.HasCTE
 	a.HasRecursiveCTE = a.HasRecursiveCTE || b.HasRecursiveCTE
@@ -219,6 +258,7 @@ func mergePGFeatures(a, b ASTFeatures) ASTFeatures {
 	a.HasLockingClause = a.HasLockingClause || b.HasLockingClause
 	a.HasSelectInto = a.HasSelectInto || b.HasSelectInto
 	a.HasModifyingCTE = a.HasModifyingCTE || b.HasModifyingCTE
+	a.HasDangerousFunc = a.HasDangerousFunc || b.HasDangerousFunc
 	return a
 }
 

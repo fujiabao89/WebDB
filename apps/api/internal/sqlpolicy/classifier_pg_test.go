@@ -59,6 +59,10 @@ func TestClassifyPG(t *testing.T) {
 		{id: "PG-47", sql: "TABLE t FOR UPDATE", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasLockingClause: true}},
 		{id: "PG-48", sql: "WITH d AS (DELETE FROM t RETURNING *) TABLE d", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasCTE: true, HasModifyingCTE: true}},
 		{id: "PG-49", sql: "TABLE t; DELETE FROM t", wantDeny: true, wantCode: ReasonMultipleStatements},
+		// [CR #6] 危险函数检测
+		{id: "PG-50", sql: "SELECT setval('s', 1)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-51", sql: "SELECT lo_create(0)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-52", sql: "SELECT nextval('s')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 	}
 
 	for _, tt := range tests {
@@ -101,6 +105,7 @@ func checkFeaturesBidi(t *testing.T, got, want ASTFeatures) {
 		{"HasExplainAnalyze", got.HasExplainAnalyze, want.HasExplainAnalyze},
 		{"HasExplainDMLDDL", got.HasExplainDMLDDL, want.HasExplainDMLDDL},
 		{"HasNestedExplain", got.HasNestedExplain, want.HasNestedExplain},
+		{"HasDangerousFunc", got.HasDangerousFunc, want.HasDangerousFunc},
 	}
 	for _, c := range checks {
 		if c.got && !c.want {

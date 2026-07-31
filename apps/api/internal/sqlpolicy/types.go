@@ -52,6 +52,7 @@ type ASTFeatures struct {
 	HasModifyingCTE   bool // 数据修改 CTE
 	HasExplainDMLDDL  bool // EXPLAIN 目标是 DML/DDL
 	HasNestedExplain  bool // 嵌套 EXPLAIN
+	HasDangerousFunc  bool // 危险函数 (setval, lo_create, SECURITY DEFINER)
 }
 
 // ClassificationResult 语句分类结果。
