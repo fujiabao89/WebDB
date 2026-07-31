@@ -52,7 +52,9 @@ type ASTFeatures struct {
 	HasModifyingCTE   bool // 数据修改 CTE
 	HasExplainDMLDDL  bool // EXPLAIN 目标是 DML/DDL
 	HasNestedExplain  bool // 嵌套 EXPLAIN
-	HasDangerousFunc  bool // 危险函数 (setval, lo_create, SECURITY DEFINER)
+	// 危险函数：按名单匹配的写副作用函数 (setval/nextval/lo_create/lo_import/lo_unlink 等)。
+	// 不覆盖用户自定义 SECURITY DEFINER 函数，该风险由执行层只读事务和最小权限账号承担。
+	HasDangerousFunc bool
 }
 
 // ClassificationResult 语句分类结果。

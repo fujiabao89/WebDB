@@ -217,19 +217,27 @@ func hasModifyingCTEPG(ctes *pgast.List) bool {
 	return false
 }
 
-// hasDangerousPGFunc 递归检测 PG AST 中的危险函数调用 [CR #6]。
-// 包括 setval, lo_create, lo_import 等可副作用写入的函数。
+// dangerousPGFuncs 危险函数名单 — 仅按函数名最后一段匹配，忽略 schema 限定 [CR #20]。
+var dangerousPGFuncs = map[string]struct{}{
+	"setval":    {},
+	"nextval":   {},
+	"lo_create": {},
+	"lo_import": {},
+	"lo_export": {},
+	"lo_unlink": {},
+	"lo_put":    {},
+}
+
+// hasDangerousPGFunc 递归检测 PG AST 中的危险函数调用 [CR #6, CR #20]。
+// 只比较函数名最后一段（忽略 schema 限定前缀），使用集合查询。
 func hasDangerousPGFunc(n pgast.Node) bool {
 	found := false
 	pgast.Inspect(n, func(n pgast.Node) bool {
 		if fc, ok := n.(*pgast.FuncCall); ok {
-			name := strings.ToLower(fcName(fc))
-			if name == "setval" || name == "lo_create" ||
-				name == "lo_import" || name == "lo_unlink" ||
-				name == "pg_catalog.lo_create" || name == "pg_catalog.lo_import" ||
-				name == "nextval" || name == "pg_catalog.setval" {
+			name := strings.ToLower(fcBaseName(fc))
+			if _, bad := dangerousPGFuncs[name]; bad {
 				found = true
-				return false // 停止遍历
+				return false
 			}
 		}
 		return true
@@ -237,18 +245,16 @@ func hasDangerousPGFunc(n pgast.Node) bool {
 	return found
 }
 
-// fcName 从 FuncCall 提取函数名。
-func fcName(fc *pgast.FuncCall) string {
-	if fc.Funcname == nil {
+// fcBaseName 返回函数名的最后一段（忽略 schema 限定前缀）[CR #20]。
+func fcBaseName(fc *pgast.FuncCall) string {
+	if fc.Funcname == nil || fc.Funcname.Len() == 0 {
 		return ""
 	}
-	var parts []string
-	for _, item := range fc.Funcname.Items {
-		if sv, ok := item.(*pgast.String); ok {
-			parts = append(parts, sv.Str)
-		}
+	last := fc.Funcname.Items[fc.Funcname.Len()-1]
+	if sv, ok := last.(*pgast.String); ok {
+		return sv.Str
 	}
-	return strings.Join(parts, ".")
+	return ""
 }
 
 func mergePGFeatures(a, b ASTFeatures) ASTFeatures {
