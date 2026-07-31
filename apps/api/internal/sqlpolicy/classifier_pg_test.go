@@ -71,6 +71,7 @@ func TestClassifyPG(t *testing.T) {
 		{id: "PG-56", sql: "SELECT lo_from_bytea(0, '')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 		{id: "PG-57", sql: "SELECT lowrite(0, '')", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 		{id: "PG-58", sql: "SELECT lo_truncate(0, 0)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
+		{id: "PG-59", sql: "SELECT lo_truncate64(0, 0)", wantKind: StmtSelect, wantDeny: true, wantCode: ReasonNotAllowed, features: ASTFeatures{HasDangerousFunc: true}},
 	}
 
 	for _, tt := range tests {
