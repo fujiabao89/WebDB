@@ -60,8 +60,8 @@ go -C apps/api fmt ./...                    # 无输出
 go -C apps/api vet ./...                    # 无输出
 
 # 构建（Win + Linux）
-cd apps/api && CGO_ENABLED=0 GOOS=windows go build ./...   # PASS
-cd apps/api && CGO_ENABLED=0 GOOS=linux go build ./...     # PASS
+CGO_ENABLED=0 GOOS=windows go -C apps/api build ./...   # PASS
+CGO_ENABLED=0 GOOS=linux go -C apps/api build ./...     # PASS
 
 # CI (commit 64be9bb, run 2026-07-31)
 Web / Contracts / API / Detect / Safety / Contract checks 全部 success
