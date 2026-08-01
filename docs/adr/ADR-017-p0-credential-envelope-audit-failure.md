@@ -1,12 +1,14 @@
 # ADR-017：P0 凭证信封加密、KEK 生命周期与审计失败策略
 
-> 状态：提议中（Owner Gate）｜日期：2026-08-01｜作者：Claude Code
+> 状态：已接受｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
-> **在 Owner 批准前，本 ADR 状态为"提议中"，不得标记为"已接受"。**
+> Owner 已于 2026-08-01 对 D1-D15 全部决策做出明确批准。本 ADR 的决策内容已冻结。
 
 ## 背景
 
 P0-02 已在 `credential_envelopes` 表中建立加密字段 Schema（ciphertext、data_nonce、wrapped_dek、wrap_nonce、envelope_suite、kek_version），但 AEAD 算法、DEK 生成方式、AAD 编码、KEK 版本行为和审计失败策略尚未决策。P0-04 已定义了 SQL 执行的生命周期（阶段 A-D）和审计脱敏基线。
+
+WEB-21（P0-05A）已完成方案设计与 Owner Gate 审批。
 
 WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 

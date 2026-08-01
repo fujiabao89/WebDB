@@ -1,9 +1,9 @@
 # P0-05：凭证信封加密、KEK 生命周期与审计失败策略
 
-> 状态：提议中（Owner Gate）｜日期：2026-08-01｜作者：Claude Code
+> 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
-> 本方案冻结 P0-05 的凭证加密、KEK 注入、信封版本、轮换和审计失败语义。
-> **在 Owner 明确批准前，不得开始 WEB-22/WEB-23 的生产实现。**
+> Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
+> WEB-22/WEB-23 可基于本方案启动生产实现。
 
 ---
 
@@ -132,7 +132,7 @@ P0 不实现 TLS 客户端证书、SSH 密钥或 OAuth token。这些是 P1+ 的
 ### 3.3 编码与规范化
 
 - 编码格式：**JSON**（UTF-8）
-- 规范化：编码前去除 `user` 和 `password` 的首尾空白（`strings.TrimSpace`）
+- 规范化：**user 和 password 保持原值，不执行 TrimSpace 或 Unicode 规范化。** 原始字节直接用于连接目标数据库。
 - 序列化：使用 `json.Marshal`，无缩进，按 Go `struct` 字段顺序
 - `v` 字段必须为 `1`（正整数），其他值拒绝
 - 未知字段：**拒绝**（使用 `json.Decoder` + `DisallowUnknownFields`）
@@ -192,64 +192,75 @@ P0 不实现 TLS 客户端证书、SSH 密钥或 OAuth token。这些是 P1+ 的
 - **行为**：返回 `internal_error`，不执行加密，不写入数据库，不调用 Adapter
 - 不允许回退到弱随机源（如 `math/rand`）
 
-### 4.4 AAD 规范编码
+### 4.4 AAD 规范编码（Owner 决策 D4：二进制编码）
 
-AAD 使用 Canonical JSON 编码，绑定以下字段：
+**数据 AAD**（用于 payload 加密的 AES-256-GCM Seal/Open）和 **Wrap AAD**（用于 DEK 包装的 AES-256-GCM Seal/Open）均使用**版本化确定性二进制编码**。
 
-```json
-{"envelope_suite":"AES256GCM-v1","kek_version":1,"secret_ref":"550e8400-e29b-41d4-a716-446655440000","secret_version":1,"workspace_id":"660e8400-e29b-41d4-a716-446655440001"}
+#### 4.4.1 二进制编码格式
+
+AAD 为以下字段按固定顺序以大端序（big-endian）拼接的字节序列：
+
+```text
+AAD = version_tag(4B) || workspace_id(16B) || secret_ref(16B) || secret_version(4B) || envelope_suite_tag(4B) || kek_version(4B)
 ```
 
-> UUID 统一使用小写、带连字符的 36 字符标准格式（RFC 4122 §3）。AAD 序列化时必须直接使用 `uuid.UUID.String()` 输出，不得自行去除连字符或转换大小写。加密与解密端必须使用完全相同的 AAD 规范化规则。
+| 字段 | 大小 | 编码 | 示例值 |
+|---|---|---|---|
+| `version_tag` | 4 bytes | 固定 `0x00000001`（AAD 格式版本 1） | `00 00 00 01` |
+| `workspace_id` | 16 bytes | UUID 原始字节（`uuid.UUID` 的 `[16]byte`） | — |
+| `secret_ref` | 16 bytes | UUID 原始字节 | — |
+| `secret_version` | 4 bytes | int32 大端序 | `00 00 00 01` (v1) |
+| `envelope_suite_tag` | 4 bytes | 枚举映射（`0x00000001` = AES256GCM-v1） | `00 00 00 01` |
+| `kek_version` | 4 bytes | int32 大端序 | `00 00 00 01` (V1) |
 
-**AAD 字段**：
+总长度：**48 bytes**。所有整数字段使用大端序（big-endian），UUID 字段使用 RFC 4122 原始 16 字节表示。
 
-| 字段 | 来源 | 目的 |
-|---|---|---|
-| `workspace_id` | `credential_envelopes.workspace_id` | 防止跨工作区密文替换 |
-| `secret_ref` | `credential_envelopes.secret_ref` | 防止跨 secret 密文替换 |
-| `secret_version` | `credential_envelopes.version` | 防止跨版本密文替换 |
-| `envelope_suite` | `credential_envelopes.envelope_suite` | 防止 suite 混淆/downgrade |
-| `kek_version` | `credential_envelopes.kek_version` | 防止 KEK 版本混淆 |
+#### 4.4.2 数据 AAD 与 Wrap AAD
 
-**Canonical JSON 规则**：
-- 所有键按字典序排列
-- 无空格、无换行
-- 字符串使用 UTF-8，Unicode 转义使用小写 `\uXXXX`
-- 整数不含前导零
+- **数据 AAD**：上述完整 48-byte 序列。在 `AES-256-GCM-Seal(DEK, data_nonce, plaintext, data_aad)` 中使用。
+- **Wrap AAD**：独立的 48-byte 序列，字段值与数据 AAD 相同，但作为独立参数传入 `AES-256-GCM-Seal(KEK, wrap_nonce, DEK, wrap_aad)`。**Wrap AAD 禁止为 nil。**
 
-**不允许的 AAD 行为**：
-- AAD 为空：拒绝
-- AAD 字段缺失：拒绝
-- AAD 含未知字段：拒绝
-- AAD 与 envelope 行的实际值不匹配：解密失败（GCM 认证失败）
+#### 4.4.3 绑定目的
+
+| 字段 | 防止的攻击 |
+|---|---|
+| `workspace_id` | 跨工作区密文替换 |
+| `secret_ref` | 跨 secret 密文替换 |
+| `secret_version` | 跨版本密文替换 |
+| `envelope_suite_tag` | Suite 混淆/downgrade |
+| `kek_version` | KEK 版本混淆 |
+| `version_tag` | AAD 格式演进兼容
 
 ### 4.5 加密流程
 
 ```text
 1. DEK ← crypto/rand(32 bytes)
 2. data_nonce ← crypto/rand(12 bytes)
-3. AAD ← canonicalJSON(workspace_id, secret_ref, secret_version, envelope_suite, kek_version)
+3. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 4. plaintext ← json.Marshal(payload)  // 验证 schema 后
-5. ciphertext ← AES-256-GCM-Seal(DEK, data_nonce, plaintext, AAD)
-   // ciphertext 包含 GCM 认证标签（附加在末尾 16 bytes）
+5. ciphertext ← AES-256-GCM-Seal(DEK, data_nonce, plaintext, data_aad)
+   // ciphertext 包含 128-bit GCM 认证标签（附加在末尾 16 bytes）
 
 6. wrap_nonce ← crypto/rand(12 bytes)
-7. wrapped_dek ← AES-256-GCM-Seal(KEK, wrap_nonce, DEK, nil)
-   // DEK wrapping 不需要 AAD（DEK 关系已在 envelope 行中绑定）
+7. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+   // wrap_aad 与 data_aad 内容相同但独立构造，禁止为 nil
+8. wrapped_dek ← AES-256-GCM-Seal(KEK, wrap_nonce, DEK, wrap_aad)
 
-8. 持久化: (ciphertext, data_nonce, wrapped_dek, wrap_nonce, envelope_suite, kek_version)
+9. 持久化: (ciphertext, data_nonce, wrapped_dek, wrap_nonce, envelope_suite, kek_version)
 ```
+
+**每 KEK 加密次数上限**：单个 KEK 版本最多用于 `2^24` 次 DEK 包装操作（约 1677 万次），达到上限后该 KEK 版本拒绝新的包装请求（仍可用于解密），强制部署者轮换 KEK。此上限远低于 GCM nonce 重用的安全阈值（2^32），提供充足安全余量。
 
 ### 4.6 解密流程
 
 ```text
 1. 验证 envelope_suite 为已知版本 → 否则返回 unknown_envelope_suite
 2. 验证 kek_version 有对应 KEK → 否则返回 unknown_kek_version（见 §5）
-3. AAD ← canonicalJSON(workspace_id, secret_ref, secret_version, envelope_suite, kek_version)
-4. DEK ← AES-256-GCM-Open(KEK, wrap_nonce, wrapped_dek, nil)
+3. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+4. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+5. DEK ← AES-256-GCM-Open(KEK, wrap_nonce, wrapped_dek, wrap_aad)
    → 失败：返回 decryption_failed（不区分 DEK 或 payload 失败，防 oracles）
-5. plaintext ← AES-256-GCM-Open(DEK, data_nonce, ciphertext, AAD)
+6. plaintext ← AES-256-GCM-Open(DEK, data_nonce, ciphertext, data_aad)
    → 失败：返回 decryption_failed
 6. 验证 payload schema → 失败：返回 invalid_payload
 7. 返回 CredentialPayload{User, Password}
@@ -307,13 +318,15 @@ type KEKProvider interface {
 
 - KEK 通过环境变量 `WEBDB_KEK_V1`、`WEBDB_KEK_V2` 等注入
 - 变量名格式：`WEBDB_KEK_V{version}`（version 为正整数）
+- **当前写入版本由独立环境变量 `WEBDB_ACTIVE_KEK_VERSION` 显式指定**（值为正整数），不得自动选择最大版本号
 - 环境变量为空：启动时 **fatal**，拒绝启动
+- `WEBDB_ACTIVE_KEK_VERSION` 指向的版本必须有对应的 `WEBDB_KEK_V{N}` 变量，否则 fatal
 - 有效的 KEK 版本至少有 `V1`
 
 ### 5.3 KEK 编码与长度
 
-- KEK 编码：**Base64 标准编码**（RFC 4648 §4，无换行）
-- 解码后长度：**32 bytes (256 bits)**
+- KEK 编码：**Base64 标准编码**（RFC 4648 §4，含 padding `=`）
+- 解码：**严格解码**，拒绝非标准字符和缺失 padding，解码后长度必须为 **32 bytes (256 bits)**
 - 拒绝行为：
   - 长度不为 32 bytes → fatal 拒绝启动
   - 非有效 Base64 → fatal 拒绝启动
@@ -333,11 +346,11 @@ type KEKProvider interface {
 |---|---|
 | `kek_version` 未知且无对应 env var | 返回 `unknown_kek_version`，不尝试解密 |
 | `kek_version` 存在且对应 env var 有有效值 | 正常解密 |
-| 写入新 envelope | 始终使用 `ActiveKEK()` 返回的当前版本 |
+| 写入新 envelope | 始终使用 `WEBDB_ACTIVE_KEK_VERSION` 显式指定的版本 |
 
-**当前写入版本**：环境变量中最大版本号对应的密钥（如同时有 V1 和 V2，则使用 V2 作为写入版本）。
+**当前写入版本**：由 `WEBDB_ACTIVE_KEK_VERSION` 环境变量显式指定，**禁止自动选择最大版本号**。
 
-**KEK 版本不得回退到旧版本进行写入**。
+**KEK 版本不得回退到旧版本进行写入**。要切换写入版本，必须修改 `WEBDB_ACTIVE_KEK_VERSION` 并重启服务。
 
 ### 5.6 KEK 安全约束
 
@@ -377,9 +390,11 @@ KEK 不得出现在：
           rotate      retire      (保留历史)
               │           │           │
               ▼           ▼           ▼
-         new version   retired    旧版本仍可解密
-         (active)      (不可用于   （直到 KEK 版本淘汰）
-                       新连接)
+         new version   retired    旧版本可解密但
+         (active)      (不可用于   **不得用于普通执行**
+                       新连接，   （仅审计追溯）
+                       被引用时
+                       不得退役)
 ```
 
 ### 6.2 操作定义
@@ -451,23 +466,27 @@ KEK 不得出现在：
 - 写入审计事件: `credential.rotate.fail`
 
 **并发轮换**：
-- 两个并发轮换：事务隔离级别保证只有一个成功
 - 使用 `SELECT ... FOR UPDATE` 锁定 credential_envelopes 行
-- 失败的事务回滚，客户端可重试
+- 固定锁顺序：始终先锁 `credential_envelopes` 再锁 `connections`（防止死锁）
+- 事务隔离级别保证只有一个成功；失败的事务回滚，客户端可重试
+- `expected_version` + 唯一约束 `(workspace_id, secret_ref, version)` 双重保护
 
 #### 6.2.4 退役（RetireCredential）
 
 ```text
 1. 验证调用者角色
-2. UPDATE credential_envelopes SET retired_at = now()
+2. 检查该版本未被任何 connection 引用（SELECT COUNT(*) FROM connections
+   WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3）
+   → 被引用时拒绝退役，返回 credential_in_use
+3. UPDATE credential_envelopes SET retired_at = now()
    WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3 AND retired_at IS NULL
-3. 不影响 connections 引用
 4. 写入审计事件: credential.retire
 ```
 
-- 退役记录不覆盖或删除历史密文
-- 退役后仍可解密（用于审计追溯）
-- 退役版本不应被新连接引用（应用层约束）
+- **被引用的版本不得直接退役**（Owner D8 拒绝）。必须先更新所有引用连接或等待连接被删除。
+- 退役记录不覆盖或删除历史密文。
+- 退役后**不得用于普通执行**（凭证解析阶段 C' 拒绝 `retired_at IS NOT NULL` 的版本）。
+- 退役版本仅可用于审计追溯（通过直接查询 envelope 表，不经过正常凭证解析路径）。
 
 #### 6.2.5 连接引用更新
 
@@ -496,8 +515,9 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | 解密失败（GCM 认证失败） | `decryption_failed`，不返回任何明文 |
 | 引用不存在版本 | `credential_not_found`（防枚举） |
 | 跨 workspace 访问 | `credential_not_found`（防枚举） |
-| 引用已退役版本（读取） | 允许（用于审计追溯） |
-| 引用已退役版本（新连接） | 应用层拒绝 |
+| 引用已退役版本（普通执行） | **拒绝**（Owner D8），返回 `credential_retired` |
+| 引用已退役版本（审计追溯） | 允许（通过直接查询 envelope 表，不经过正常凭证解析路径） |
+| 被引用的版本退役 | **拒绝**（Owner D8），返回 `credential_in_use` |
 | 并发轮换冲突 | 一个成功，其余回滚 |
 
 ---
@@ -586,7 +606,8 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | E14 | 凭证查找失败 | `credential.lookup` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `error_code` |
 | E15 | 凭证解密失败 | `credential.decrypt` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `secret_version`, `error_code` |
 | E16 | 未知 KEK 版本 | `credential.decrypt` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `secret_version`, `kek_version`, `error_code` |
-| E17 | 审计写入失败告警 | `audit.write` | `failed` | `system` | NULL | NULL | `error_code`（写入应用安全日志） |
+
+> **E17（审计写入失败）**：不持久化为 audit_events 行（失败的审计系统不可写入）。作为独立安全告警通过应用日志/监控通道发出，携带 `trace_id`、`error_code` 和发生时间。此告警通道独立于 `audit_events` 表，不受审计表触发器或写入失败的影响。
 
 ### 8.2 Metadata 允许列表（合并字段表，16 字段）
 
@@ -643,18 +664,20 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 
 ### 9.1 分阶段矩阵
 
-| 阶段 | 审计写入失败时 | 是否调用 Adapter | 是否返回结果 | Execution 最终状态 | 客户端错误码 | 安全告警 | 是否允许重试 |
-|---|---|---|---|---|---|---|---|
-| **阶段 A**（workspace 已确认存在） | 不访问目标数据库 | 否 | 否 | N/A（无 Execution） | `audit_failed` | 是 | 否（自动重试禁止） |
-| **阶段 A**（workspace 无法解析） | 仅写应用安全日志 | 否 | 否 | N/A | 原始业务错误码 | 否 | 否 |
-| **阶段 B**（Execution 创建） | 不访问目标数据库 | 否 | 否 | 取决于 INSERT 是否成功 | `internal_error` | 是 | 否 |
-| **阶段 C**（SQL 策略拒绝） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是 | 否 |
-| **阶段 C'**（凭证解析失败） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是 | 否 |
-| **阶段 D-0**（running 更新失败） | 返回 `audit_failed` | 否 | 否 | `pending`（未更新） | `audit_failed` | 是 | 否 |
-| **阶段 D 完成后** | 返回 `audit_failed` | 已调用 | **否**（不返回查询结果） | `completed` | `audit_failed` | 是 | 客户端决定 |
-| **拒绝事件**（rate_limited/connection_busy） | 返回 `audit_failed` | 已调用（失败） | 否 | `failed` | `audit_failed` | 是 | 否 |
-| **取消/超时事件** | 返回 `audit_failed` | 已调用（已取消/超时） | 否 | `cancelled`/`failed` | `audit_failed` | 是 | 客户端决定 |
-| **告警系统自身失败** | 写入 stderr/syslog | N/A | N/A | N/A | N/A | 基础设施级告警 | N/A |
+元数据库内部操作（Execution 状态更新、AuditEvent append）在同一数据库事务中原子提交。对目标数据库的外部查询遵循 P0-04 已批准的失败矩阵（`rate_limited`/`connection_busy`/`query_timeout`/`query_cancelled`/`database_error`），不在本方案中改变。
+
+| 阶段 | 审计写入失败时 | 是否调用 Adapter | 是否返回结果 | Execution 最终状态 | 客户端错误码 | 安全告警 | 是否允许重试 | 事务边界 |
+|---|---|---|---|---|---|---|---|---|
+| **阶段 A**（workspace 已确认存在） | 不访问目标数据库 | 否 | 否 | N/A（无 Execution） | `audit_failed` | 是（E17 通道） | 否 | AuditEvent 单条 INSERT |
+| **阶段 A**（workspace 无法解析） | 仅写应用安全日志 | 否 | 否 | N/A | 原始业务错误码 | 否 | 否 | N/A |
+| **阶段 B**（Execution 创建） | 不访问目标数据库 | 否 | 否 | 取决于 INSERT 是否成功 | `internal_error` | 是（E17 通道） | 否 | Execution INSERT + AuditEvent INSERT 原子 |
+| **阶段 C**（SQL 策略拒绝） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **阶段 C'**（凭证解析失败） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **阶段 D-0**（running 更新失败） | 返回 `audit_failed` | 否 | 否 | `pending`（未更新） | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE 单条 |
+| **阶段 D 完成后** | 返回 `audit_failed` | 已调用 | **否**（不返回查询结果） | `completed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **拒绝事件**（rate_limited/connection_busy） | 返回 `audit_failed` | 已调用（失败） | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **取消/超时事件** | 返回 `audit_failed` | 已调用（已取消/超时） | 否 | `cancelled`/`failed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **告警系统自身失败** | 写入 stderr/syslog | N/A | N/A | N/A | N/A | 基础设施级告警 | N/A | N/A |
 
 ### 9.2 关键原则
 
@@ -684,19 +707,11 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 - 审计事件不随结果过期删除（ADR-013）
 - 审计表仅 append/query，数据库拒绝 UPDATE/DELETE/TRUNCATE（ADR-013）
 
-### 10.2 审计保留期（Owner 决策）
+### 10.2 审计保留期（Owner 决策 D12）
 
-审计事件的保留期尚未决定。选项：
-
-| 选项 | 保留期 | 影响 |
-|---|---|---|
-| A | 与结果相同（7 天） | 审计追溯能力有限 |
-| B | 较长（90 天/1 年） | 需要清理任务和存储预算 |
-| C | 不自动删除 | 需要归档策略和存储增长管理 |
-
-**建议**：Owner 在 P0 阶段先决定一个初始审计保留期。P0 阶段默认建议 **90 天**。
-
-审计保留期决定后，WEB-23 需根据选择实现对应的清理或归档机制。具体清理方式（受控删除、归档后删除、仅归档）和权限边界取决于 Owner 决策，不得在本任务中固定；在 Owner 决策完成前，审计事件保持 append-only（ADR-013 约束，拒绝 UPDATE/DELETE/TRUNCATE），清理机制暂不定义实现细节。
+- **至少保留 90 天**（从 `occurred_at` 起算）。
+- **P0 阶段不实施自动删除**。精确清理机制、归档策略和权限边界另建独立任务。
+- 审计事件保持 append-only（ADR-013 约束，数据库拒绝 UPDATE/DELETE/TRUNCATE）。
 
 ### 10.3 凭证 envelope 保留
 
@@ -729,41 +744,41 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 
 ---
 
-## 12. Owner 决策包
+## 12. Owner 决策记录
 
-以下决策必须由 Owner 明确批准。**不得代替 Owner 填写批准结果。**
+以下决策已于 2026-08-01 由 Owner `fujiabao89` 逐项批准。
 
-| ID | 决策项 | 可选方案 | 推荐方案 | 安全依据 | 新依赖 | Owner 决定 | 批准人 | 日期 |
-|---|---|---|---|---|---|---|---|---|
-| D1 | Credential Payload schema/version | v1: `{v, user, password}` | **v1** | 最小化原则，仅满足 Adapter 当前需求 | 无 | | | |
-| D2 | AEAD 算法 | A: AES-256-GCM; B: AES-256-GCM + AES-KWP | **A: AES-256-GCM** | stdlib 零依赖，充分安全 | 无 | | | |
-| D3 | DEK wrapping 算法 | A: AES-256-GCM; B: AES-KWP (RFC 5649) | **A: AES-256-GCM** | 简单一致，避免自行实现 RFC 3394 | 无 | | | |
-| D4 | AAD 字段与编码 | 当前 5 字段 + Canonical JSON | **5 字段+Canonical JSON** | 绑定所有关键上下文防替换 | 无 | | | |
-| D5 | KEK 格式 | Base64 编码，256-bit | **Base64, 256-bit** | 标准编码，足够强度 | 无 | | | |
-| D6 | KEK 版本行为 | 环境变量 `WEBDB_KEK_V{N}`，启动验证 | **环境变量，启动验证** | ADR-006 决策，最小化运维复杂度 | 无 | | | |
-| D7 | 轮换并发语义 | SELECT FOR UPDATE，事务隔离 | **SELECT FOR UPDATE** | PostgreSQL 保证原子性 | 无 | | | |
-| D8 | 退役后解密 | A: 允许; B: 禁止 | **A: 允许** | 审计追溯需要 | 无 | | | |
-| D9 | 审计事件枚举（E1-E17） | 17 类事件 | **17 类事件** | 覆盖所有关键路径 | 无 | | | |
-| D10 | Metadata 允许列表 | 14 个字段 | **14 字段** | 精确格式校验，无自由文本 | 无 | | | |
-| D11 | 审计失败策略矩阵 | §9.1 的分阶段矩阵 | **分阶段 fail-closed** | 与 P0-04 契约一致 | 无 | | | |
-| D12 | 审计保留期 | 7天/90天/1年/不删除 | **90天（P0 建议）** | 平衡追溯与存储 | 无 | | | |
-| D13 | 是否需要 Schema migration | 否（现有 Schema 足够） | **否** | credential_envelopes 已包含所有字段 | 无 | | | |
-| D14 | 是否需要新增第三方依赖 | 否（全部 stdlib） | **否** | Go stdlib 满足全部需求 | 无 | | | |
-| D15 | 残余风险接受 | §13 残余风险清单 | **接受或拒绝各风险** | 逐项评估 | 无 | | | |
+| ID | 决策项 | Owner 决定 | 批准 |
+|---|---|---|---|
+| D1 | Credential Payload schema/version | **修改后批准**：v1 `{v, user, password}`；保持 user/password 原值，禁止 TrimSpace/Unicode 规范化 | ✅ |
+| D2 | AEAD 算法 | **批准**：AES-256-GCM，256-bit DEK，96-bit crypto/rand nonce，128-bit GCM tag | ✅ |
+| D3 | DEK wrapping 算法 | **修改后批准**：AES-256-GCM wrapping；使用独立 wrap AAD，禁止 nil AAD；每 KEK 加密次数上限 2^24 | ✅ |
+| D4 | AAD 字段与编码 | **修改后批准**：保留 5 个绑定字段 + version_tag（共 6 字段）；版本化确定性二进制编码（48 bytes），不采用 Canonical JSON | ✅ |
+| D5 | KEK 格式 | **批准**：RFC 4648 padded Base64 严格解码，结果必须为 32 bytes | ✅ |
+| D6 | KEK 版本行为 | **修改后批准**：`WEBDB_KEK_V{N}` + 显式 `WEBDB_ACTIVE_KEK_VERSION`；禁止自动选择最大版本 | ✅ |
+| D7 | 轮换并发语义 | **修改后批准**：稳定行 SELECT FOR UPDATE + expected_version + 唯一约束 + 固定锁顺序（先 envelope 后 connections） | ✅ |
+| D8 | 退役规则 | **拒绝原方案**：retired 版本不得用于普通执行；被引用版本不得直接退役（须先解除所有引用） | ❌→✅ |
+| D9 | 审计事件枚举 | **修改后批准**：E1-E16 持久化审计；E17 作为独立安全告警通道，不写回失败的审计系统 | ✅ |
+| D10 | Metadata 允许列表 | **修改后批准**：事件级精确 metadata schema；统一为 16 字段（6 P0-05 新增 + 10 P0-04 现有） | ✅ |
+| D11 | 审计失败策略 | **修改后批准**：元数据库变更与 audit 在同一事务中原子提交；外部查询执行后遵循 P0-04 失败矩阵 | ✅ |
+| D12 | 审计保留期 | **修改后批准**：至少保留 90 天；P0 不实施自动删除；精确清理另建独立任务 | ✅ |
+| D13 | Schema migration | **条件批准**：按 D8/D12 决定时无需 migration；否则重新升级 Owner | ✅ |
+| D14 | 新增第三方依赖 | **批准**：不新增第三方依赖，不自行实现密码算法 | ✅ |
+| D15 | 残余风险 | **逐项批准**：R1/R2/R4 条件接受；R3 加入 KEK 调用上限后接受；R5/R7 沿用既有决策；R6 创建生产角色拆分任务 | ✅ |
 
 ---
 
 ## 13. 残余风险
 
-| # | 风险 | 严重程度 | 缓解措施 | 是否可接受 |
+| # | 风险 | 严重程度 | 缓解措施 | Owner 决定 (D15) |
 |---|---|---|---|---|
-| R1 | Go 无法保证可靠内存清零 | 低 | 使用后置 nil、`runtime.KeepAlive`、最小化明文生命周期；文档如实记录 | Owner 决定 |
-| R2 | `crypto/rand` 在极端熵耗尽时返回错误 | 极低 | fail-closed，不降级 | Owner 决定 |
-| R3 | 96-bit GCM nonce 在 >2^32 次加密后可能重用 | 极低 | 单个 secret 的加密次数远低于此阈值；每次加密生成新 DEK | Owner 决定 |
-| R4 | KEK 环境变量在进程内存中可被调试器读取 | 中 | 需要主机 root 权限；部署环境保护 | Owner 决定 |
-| R5 | `SELECT func()` 副作用（含 SECURITY DEFINER） | 中 | P0-04 已有缓解：测试账号不授予危险函数权限；可增加只读事务保护 | 已由 P0-04 跟踪 |
-| R6 | 审计事件不防内部 DBA 篡改（触发器可被 SUPERUSER 绕过） | 中 | P0 Compose 环境未拆分角色；生产部署应拆分 | Owner 决定 |
-| R7 | 服务重启后 Continuation Token 全部失效 | 低 | ADR-015 已接受此限制 | 已接受 |
+| R1 | Go 无法保证可靠内存清零 | 低 | 使用后置 nil、`runtime.KeepAlive`、最小化明文生命周期；文档如实记录 | ✅ 条件接受 |
+| R2 | `crypto/rand` 在极端熵耗尽时返回错误 | 极低 | fail-closed，不降级 | ✅ 条件接受 |
+| R3 | 96-bit GCM nonce 在 >2^32 次加密后可能重用 | 极低 | 加入每 KEK 2^24 次加密上限（§4.5），远低于 nonce 重用阈值 | ✅ 接受（加入 KEK 调用上限后） |
+| R4 | KEK 环境变量在进程内存中可被调试器读取 | 中 | 需要主机 root 权限；部署环境保护 | ✅ 条件接受 |
+| R5 | `SELECT func()` 副作用（含 SECURITY DEFINER） | 中 | P0-04 已有缓解 | ✅ 沿用 P0-04 既有决策 |
+| R6 | 审计事件不防内部 DBA 篡改（触发器可被 SUPERUSER 绕过） | 中 | **创建独立后续任务：生产环境数据库角色拆分** | ✅ 创建生产角色拆分任务 |
+| R7 | 服务重启后 Continuation Token 全部失效 | 低 | ADR-015 已接受此限制 | ✅ 沿用 ADR-015 |
 
 ---
 

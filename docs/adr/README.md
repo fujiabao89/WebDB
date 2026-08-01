@@ -20,4 +20,4 @@
 | [014](ADR-014-sort-key-uniqueness-proof.md) | SortKey 唯一性证明与 VerifiedSortPlan | 已接受 |
 | [015](ADR-015-continuation-token-ownership.md) | Continuation Token 归属与安全模型 | 已接受 |
 | [016](ADR-016-admission-reservation-before-execution.md) | Admission 预留与 Execution 创建时序 | 已接受 |
-| [017](ADR-017-p0-credential-envelope-audit-failure.md) | P0 凭证信封加密、KEK 生命周期与审计失败策略 | 提议中 |
+| [017](ADR-017-p0-credential-envelope-audit-failure.md) | P0 凭证信封加密、KEK 生命周期与审计失败策略 | 已接受 |
