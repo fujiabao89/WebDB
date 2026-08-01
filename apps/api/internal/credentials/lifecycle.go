@@ -95,6 +95,11 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 		return nil, fmt.Errorf("%w: expected %d, actual %d", ErrVersionConflict, expectedVersion, env.Version)
 	}
 
+	// 2a. 最新版本已退役时拒绝轮换。
+	if env.RetiredAt != nil {
+		return nil, fmt.Errorf("%w: version %d retired", ErrCredentialRetired, env.Version)
+	}
+
 	// 3. 新版本号
 	newVersion := env.Version + 1
 
