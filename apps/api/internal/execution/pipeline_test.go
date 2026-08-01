@@ -257,7 +257,7 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 			store := &fakeConnectionReader{connections: []*metadata.Connection{conn}, err: tt.connErr}
 			policies := &fakePolicyReader{policy: policy, err: tt.policyErr}
 			members := &fakeMemberReader{
-				member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID},
+				member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer},
 				err:    tt.memberErr,
 			}
 			pipeline := testPipeline(store, policies, members, resolver, client)
@@ -292,7 +292,7 @@ func TestPipelineUsesPolicyBoundSinglePageAndPersistentConfigRevision(t *testing
 	connV2.Host = "db2.example.invalid"
 	connV2.UpdatedAt = connV1.UpdatedAt.Add(time.Microsecond)
 	store := &fakeConnectionReader{connections: []*metadata.Connection{connV1, &connV2}}
-	pipeline := testPipeline(store, &fakePolicyReader{policy: policy}, &fakeMemberReader{member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID}}, resolver, client)
+	pipeline := testPipeline(store, &fakePolicyReader{policy: policy}, &fakeMemberReader{member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer}}, resolver, client)
 	req := ExecuteRequest{
 		Principal:    principal,
 		ConnectionID: connV1.ID,
@@ -526,5 +526,45 @@ func TestPipelineRejectsMissingMembers(t *testing.T) {
 	}
 	if client.calls > 0 {
 		t.Fatalf("nil Members: adapter called %d times, want 0", client.calls)
+	}
+}
+
+func TestPipelineRejectsRoleWithoutReadPermission(t *testing.T) {
+	t.Parallel()
+
+	principal, conn, policy, resolver, client := validPipelineInputs()
+	store := &fakeConnectionReader{connections: []*metadata.Connection{conn}}
+	policies := &fakePolicyReader{policy: policy}
+	// 空角色 — CanRead() 返回 false
+	members := &fakeMemberReader{
+		member: &metadata.WorkspaceMember{
+			WorkspaceID: principal.WorkspaceID,
+			UserID:      principal.UserID,
+			Role:        "",
+		},
+	}
+	pipeline := testPipeline(store, policies, members, resolver, client)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("empty role: Execute() error = nil")
+	}
+	if result.ErrorCode != ErrForbidden {
+		t.Fatalf("empty role: code = %q, want %q", result.ErrorCode, ErrForbidden)
+	}
+	// 角色拒绝时不得调用连接仓储、Resolver 或 Adapter
+	if store.calls > 0 {
+		t.Fatalf("empty role: connection store called %d times, want 0", store.calls)
+	}
+	if resolver.calls > 0 {
+		t.Fatalf("empty role: resolver called %d times, want 0", resolver.calls)
+	}
+	if client.calls > 0 {
+		t.Fatalf("empty role: adapter called %d times, want 0", client.calls)
 	}
 }

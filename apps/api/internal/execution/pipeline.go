@@ -130,6 +130,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = ErrForbidden
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	if !member.Role.CanRead() {
+		result.ErrorCode = ErrForbidden
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
 
 	// 阶段 B: 连接元数据（工作区绑定），确定服务端权威 Engine
 	conn, err := p.store.ConnectionByID(ctx, req.Principal.WorkspaceID, req.ConnectionID)
