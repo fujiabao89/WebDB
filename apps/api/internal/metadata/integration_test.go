@@ -523,6 +523,22 @@ func TestConnectionWritesRejectRetiredCredential(t *testing.T) {
 	} else if !errors.Is(err, ErrEnvelopeNotFound) {
 		t.Fatalf("更新连接引用已退役凭证：返回意外错误 %v，期望 ErrEnvelopeNotFound", err)
 	}
+
+	// 不存在的连接 ID — 不得伪装为 ErrEnvelopeNotFound。
+	phantom := *conn
+	phantom.ID = uuid.New()
+	if err := store.UpdateConnection(ctx, phantom.WorkspaceID, &phantom); err == nil {
+		t.Fatal("更新不存在的连接：error = nil，期望连接不存在错误")
+	} else if errors.Is(err, ErrEnvelopeNotFound) {
+		t.Fatalf("更新不存在的连接：不应返回 ErrEnvelopeNotFound，返回 %v", err)
+	}
+
+	// 连接属于另一工作区 — 不得伪装为 ErrEnvelopeNotFound。
+	if err := store.UpdateConnection(ctx, uuid.New(), conn); err == nil {
+		t.Fatal("更新跨工作区连接：error = nil，期望连接不存在错误")
+	} else if errors.Is(err, ErrEnvelopeNotFound) {
+		t.Fatalf("更新跨工作区连接：不应返回 ErrEnvelopeNotFound，返回 %v", err)
+	}
 }
 
 func TestCountConnectionsByVersionLocksMatchingReferences(t *testing.T) {
