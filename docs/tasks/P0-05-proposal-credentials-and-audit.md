@@ -351,12 +351,14 @@ KEK 不得出现在：
 - API/浏览器响应
 - 普通测试夹具
 
-单元测试只能使用显式标记的合成临时密钥。以下示例仅供说明长度要求，实际测试中应通过 `crypto/rand` 生成或使用独立固定值，禁止从本文档复制：
+单元测试只能使用显式标记的合成临时密钥，通过 `crypto/rand` 生成或使用显式标注的独立固定值。**禁止从本文档复制任何密钥字面量：**
 
 ```go
 // 仅测试用：合成 256-bit 密钥（32 字节）
-// 禁止在测试或生产代码中直接复制以下值
-var testKEK = []byte("0123456789abcdef0123456789abcdef") // 严格 32 bytes
+// 实际测试应使用以下方式之一：
+//   1. var testKEK = make([]byte, 32); _, _ = rand.Read(testKEK)
+//   2. var testKEK = []byte("独立且明确的固定非密钥标记值--32B")
+// 禁止使用任何可被误认为真实密钥的字面量
 ```
 
 ---
@@ -393,8 +395,9 @@ var testKEK = []byte("0123456789abcdef0123456789abcdef") // 严格 32 bytes
 6. 使用 ActiveKEK 加密
 7. INSERT INTO credential_envelopes (workspace_id, secret_ref, version, ...)
 8. 写入审计事件: action="credential.create", outcome="succeeded"
-   → 审计写入失败：INSERT 已持久化（独立非事务操作），返回 audit_failed；
-      已创建的 envelope 行保留（创建是单 INSERT 无事务依赖），客户端可重试验证幂等性
+   → 审计写入失败：INSERT 已持久化，返回 audit_failed；客户端可重试审计写入。
+      创建操作不提供幂等键——每次 CreateCredential 生成新的 secret_ref 和 envelope，
+      重试必须基于上一步返回的 secret_ref 判断是否已创建，不得重复调用 CreateCredential
 ```
 
 #### 6.2.2 读取指定版本（ResolveCredential）
@@ -424,7 +427,9 @@ var testKEK = []byte("0123456789abcdef0123456789abcdef") // 严格 32 bytes
 3. BEGIN TRANSACTION
 4.   SELECT secret_ref FROM credential_envelopes
         WHERE workspace_id = $1 AND secret_ref = $2 FOR UPDATE
-5.   新 version = MAX(version) + 1（在持锁事务内原子计算）
+     → 行不存在或不属于该 workspace：ROLLBACK，返回 credential_not_found，
+       写入审计: credential.rotate.fail (error_code=credential_not_found)，流程终止
+5.   新 version = MAX(version) + 1（在持锁事务内原子计算，步骤 4 已确认行存在）
 6.   生成新 DEK + nonces
 7.   使用 ActiveKEK 加密新 payload
 8.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
@@ -432,8 +437,9 @@ var testKEK = []byte("0123456789abcdef0123456789abcdef") // 严格 32 bytes
         WHERE workspace_id = $1 AND secret_ref = $2
 10. COMMIT
 11. 写入审计事件: credential.rotate.success
-    → 审计写入失败：事务已 COMMIT（新版本和连接引用已持久化），返回 audit_failed；
-       事务内的变更不受审计写入失败影响，客户端可重试审计写入
+    → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
+       轮换的幂等性由 DB 唯一约束 (workspace_id, secret_ref, version) 保证——
+       重复调用会因版本号冲突而失败，客户端须以 secret_ref 和当前版本号为幂等键
 ```
 
 **轮换失败行为**：
@@ -578,28 +584,27 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | E16 | 未知 KEK 版本 | `credential.decrypt` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `secret_version`, `kek_version`, `error_code` |
 | E17 | 审计写入失败告警 | `audit.write` | `failed` | `system` | NULL | NULL | `error_code`（写入应用安全日志） |
 
-### 8.2 Metadata 允许列表（13 个字段）
+### 8.2 Metadata 允许列表（P0-05 凭证扩展字段）
 
-P0-05 新增字段与 P0-04 现有 `sanitizeAuditMetadata()` 允许列表的关系：
-- P0-04 当前维护的字段（`summary`、`rows_affected`、`row_count`、`cached`、`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）继续生效
-- P0-05 新增以下凭证相关字段：`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`
-- WEB-23 实现时需扩展 `sanitizeAuditMetadata()` 以支持完整 16 字段允许列表，并添加兼容性测试验证新旧字段不会被丢弃
+下表列出 P0-05 新增的凭证相关 metadata 字段（13 个）。P0-04 当前 `sanitizeAuditMetadata()` 维护的字段（`summary`、`rows_affected`、`row_count`、`cached`、`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）继续生效，WEB-23 实现时需扩展 sanitizer 以支持以下凭证字段与现有字段共存（完整 16 字段），并添加兼容性测试：
 
-| 键 | 类型 | 约束 | 适用事件 |
-|---|---|---|---|
-| `secret_ref` | string | UUID 格式 (36 chars) | E3-E6, E14-E16 |
-| `secret_version` | integer | > 0 | E3, E16 |
-| `old_version` | integer | > 0 | E4 |
-| `new_version` | integer | > old_version | E4 |
-| `envelope_suite` | string | 精确枚举值 | E3, E4 |
-| `kek_version` | integer | > 0 | E3, E4, E16 |
-| `statement_hash` | string | 64 char hex | E9-E13 |
-| `row_count` | integer | 0..2^31-1 | E10 |
-| `duration_ms` | integer | ≥ 0 | E7, E10 |
-| `error_code` | string | 稳定错误码枚举 | E5, E8, E11-E17 |
-| `reason_code` | string | 稳定拒绝原因码 | E9 |
-| `engine` | string | `postgresql` \| `mysql` | E1, E3, E4, E7-E13 |
-| `environment` | string | `development` \| `staging` \| `production` | E1, E2, E7, E8, E10, E11 |
+| 键 | 类型 | 约束 | 适用事件 | 来源 |
+|---|---|---|---|---|
+| `secret_ref` | string | UUID 格式 (36 chars) | E3-E6, E14-E16 | P0-05 新增 |
+| `secret_version` | integer | > 0 | E3, E16 | P0-05 新增 |
+| `old_version` | integer | > 0 | E4 | P0-05 新增 |
+| `new_version` | integer | > old_version | E4 | P0-05 新增 |
+| `envelope_suite` | string | 精确枚举值 | E3, E4 | P0-05 新增 |
+| `kek_version` | integer | > 0 | E3, E4, E16 | P0-05 新增 |
+| `statement_hash` | string | 64 char hex | E9-E13 | P0-04 现有 |
+| `row_count` | integer | 0..2^31-1 | E10 | P0-04 现有 |
+| `duration_ms` | integer | ≥ 0 | E7, E10 | P0-04 现有 |
+| `error_code` | string | 稳定错误码枚举 | E5, E8, E11-E17 | P0-04 现有 |
+| `reason_code` | string | 稳定拒绝原因码 | E9 | P0-04 现有 |
+| `engine` | string | `postgresql` \| `mysql` | E1, E3, E4, E7-E13 | P0-04 现有 |
+| `environment` | string | `development` \| `staging` \| `production` | E1, E2, E7, E8, E10, E11 | P0-04 现有 |
+
+> P0-04 另有 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件类型。完整合并后的 sanitizer 允许列表为 16 字段。
 
 ### 8.3 禁止字段
 
@@ -687,12 +692,7 @@ P0-05 新增字段与 P0-04 现有 `sanitizeAuditMetadata()` 允许列表的关�
 
 **建议**：Owner 在 P0 阶段先决定一个初始审计保留期。P0 阶段默认建议 **90 天**。
 
-**清理机制约束**（无论 Owner 选择哪个保留期）：
-- 清理操作必须由独立的后台任务执行（不是普通应用仓储方法），且使用受限数据库角色
-- 清理任务以 `occurred_at < (now() - retention)` 为条件批量删除，不提供单条删除 API
-- 每次清理前写入 `audit.retention.expired` 系统审计事件（记录清理范围的时间窗口和行数）
-- 清理任务不得绕过 `deny_audit_mutation()` 触发器——触发器保留用于防御普通应用路径，清理任务使用独立数据库角色或临时禁用触发器后立即恢复
-- 此机制在 WEB-23 中实现，不得在本任务中固定具体保留期数值
+审计保留期决定后，WEB-23 需根据选择实现对应的清理或归档机制。具体清理方式（受控删除、归档后删除、仅归档）和权限边界取决于 Owner 决策，不得在本任务中固定；在 Owner 决策完成前，审计事件保持 append-only（ADR-013 约束，拒绝 UPDATE/DELETE/TRUNCATE），清理机制暂不定义实现细节。
 
 ### 10.3 凭证 envelope 保留
 
