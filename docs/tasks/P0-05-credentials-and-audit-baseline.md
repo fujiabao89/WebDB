@@ -9,7 +9,7 @@
 >
 > **方案文档**：[P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md)
 > **威胁模型**：[P0-05-threat-model.md](P0-05-threat-model.md)
-> **ADR**：[ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)（提议中）
+> **ADR**：[ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)（已接受）
 
 ## 目标与范围
 
