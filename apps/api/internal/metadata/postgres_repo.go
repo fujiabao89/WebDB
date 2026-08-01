@@ -178,13 +178,15 @@ func (s *PGStore) AddMember(ctx context.Context, m *WorkspaceMember) error {
 }
 
 func (s *PGStore) MemberByWorkspaceAndUser(ctx context.Context, wsID, userID uuid.UUID) (*WorkspaceMember, error) {
-	const q = `SELECT workspace_id, user_id, role, created_at FROM workspace_members
-		WHERE workspace_id = $1 AND user_id = $2`
+	const q = `SELECT wm.workspace_id, wm.user_id, wm.role, wm.created_at
+		FROM workspace_members wm
+		JOIN users u ON u.id = wm.user_id AND u.status = 'active'
+		WHERE wm.workspace_id = $1 AND wm.user_id = $2`
 	m := &WorkspaceMember{}
 	err := s.DB.QueryRowContext(ctx, q, wsID, userID).Scan(
 		&m.WorkspaceID, &m.UserID, &m.Role, &m.CreatedAt,
 	)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("member (%s, %s): %w", wsID, userID, err)
 	}
 	if err != nil {
