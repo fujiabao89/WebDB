@@ -25,7 +25,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 - **数据加密**：AES-256-GCM（256-bit DEK，96-bit nonce，128-bit tag）
 - **DEK 包装**：AES-256-GCM（使用 KEK，96-bit nonce，独立 wrap AAD 禁止 nil）
-- **每 KEK 加密上限**：2^24 次（达到后拒绝新包装，仍可解密）
+- **每 KEK 加密上限**：2^24 次。P0 使用进程内原子计数器（重启归零），达到上限后拒绝新包装但仍可解密。跨实例部署时各实例独立计数，实际总量可能略超 2^24，但仍在 GCM nonce 安全边界（2^32）内。此上限旨在防止持续运行期间的 nonce 碰撞，非不可绕过的硬配额
 - **Nonce 生成**：`crypto/rand.Read`（失败时 fail-closed）
 - **AAD**：版本化确定性二进制编码（48 bytes），绑定 `version_tag` + `workspace_id` + `secret_ref` + `secret_version` + `envelope_suite_tag` + `kek_version`（大端序）。数据 AAD 与 Wrap AAD 独立构造，Wrap AAD 禁止为 nil
 - **`envelope_suite`**：`"AES256GCM-v1"`（精确匹配，未知值拒绝）
