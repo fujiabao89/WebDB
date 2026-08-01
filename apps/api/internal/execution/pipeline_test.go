@@ -446,3 +446,85 @@ func TestMapCredentialErrorPreservesStableClassifications(t *testing.T) {
 		})
 	}
 }
+
+func TestMapMembershipErrorPreservesStableClassifications(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want StableErrorCode
+	}{
+		{
+			name: "not a member",
+			err:  sql.ErrNoRows,
+			want: ErrForbidden,
+		},
+		{
+			name: "deadline exceeded",
+			err:  context.DeadlineExceeded,
+			want: ErrExecutionTimeout,
+		},
+		{
+			name: "cancelled",
+			err:  context.Canceled,
+			want: ErrExecutionCancelled,
+		},
+		{
+			name: "wrapped not found",
+			err:  fmt.Errorf("lookup: %w", sql.ErrNoRows),
+			want: ErrForbidden,
+		},
+		{
+			name: "unknown error",
+			err:  errors.New("db connection refused"),
+			want: ErrInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mapMembershipError(tt.err); got != tt.want {
+				t.Fatalf("mapMembershipError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPipelineRejectsMissingMembers(t *testing.T) {
+	t.Parallel()
+
+	principal, conn, _, resolver, client := validPipelineInputs()
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: &metadata.ConnectionPolicy{AllowRead: boolPtr(true), MaxRows: 100, StatementTimeoutMs: 1_000}},
+		Members:     nil,
+		Resolver:    resolver,
+		Adapter:     client,
+	})
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("nil Members: Execute() error = nil")
+	}
+	if result.ErrorCode != ErrInternalError {
+		t.Fatalf("nil Members: code = %q, want %q", result.ErrorCode, ErrInternalError)
+	}
+	store := pipeline.store.(*fakeConnectionReader)
+	if store.calls > 0 {
+		t.Fatalf("nil Members: connection store called %d times, want 0", store.calls)
+	}
+	if resolver.calls > 0 {
+		t.Fatalf("nil Members: resolver called %d times, want 0", resolver.calls)
+	}
+	if client.calls > 0 {
+		t.Fatalf("nil Members: adapter called %d times, want 0", client.calls)
+	}
+}

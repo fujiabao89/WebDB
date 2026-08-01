@@ -115,22 +115,20 @@ type ExecuteResult struct {
 // 如果客户端声称的 Engine 与连接记录不一致则拒绝（防止方言策略绕过）。
 func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
-	if p == nil || p.store == nil || p.policyStore == nil || p.resolver == nil || p.adapter == nil {
+	if p == nil || p.store == nil || p.policyStore == nil || p.members == nil || p.resolver == nil || p.adapter == nil {
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
 	// 阶段 A: 成员资格与工作区权限 — 未激活或非成员拒绝。
-	if p.members != nil {
-		member, err := p.members.MemberByWorkspaceAndUser(ctx, req.Principal.WorkspaceID, req.Principal.UserID)
-		if err != nil {
-			result.ErrorCode = ErrForbidden
-			return result, fmt.Errorf("%w", result.ErrorCode)
-		}
-		if member == nil {
-			result.ErrorCode = ErrForbidden
-			return result, fmt.Errorf("%w", result.ErrorCode)
-		}
+	member, err := p.members.MemberByWorkspaceAndUser(ctx, req.Principal.WorkspaceID, req.Principal.UserID)
+	if err != nil {
+		result.ErrorCode = mapMembershipError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	if member == nil {
+		result.ErrorCode = ErrForbidden
+		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
 	// 阶段 B: 连接元数据（工作区绑定），确定服务端权威 Engine
@@ -249,6 +247,20 @@ func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
 		return 0, fmt.Errorf("connection updated_at must be after unix epoch")
 	}
 	return revision, nil
+}
+
+// mapMembershipError 映射成员资格查询错误到稳定错误码。
+func mapMembershipError(err error) StableErrorCode {
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrForbidden
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrExecutionTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return ErrExecutionCancelled
+	}
+	return ErrInternalError
 }
 
 // mapConnectionError 映射连接查询错误到稳定错误码。
