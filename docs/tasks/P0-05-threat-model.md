@@ -1,6 +1,6 @@
 # P0-05：凭证与审计威胁模型
 
-> 状态：提议中（Owner Gate）｜日期：2026-08-01｜作者：Claude Code
+> 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > 配合 `P0-05-proposal-credentials-and-audit.md`。本威胁模型必须在 Owner 批准后才能作为 WEB-22/WEB-23 的安全基线。
 
