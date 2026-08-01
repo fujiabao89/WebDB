@@ -50,7 +50,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 ### 5. 审计事件
 
-- **E1-E16 持久化审计**：connection.create/update、credential.create/rotate(retry映射至already_rotated)/retire、connection.test、sql.execute（denied/succeeded/failed/timeout/cancelled）、credential.lookup/decrypt 失败、unknown KEK version
+- **E1-E16 持久化审计**：connection.create/update、credential.create/rotate（expected_version 不匹配时返回 version_conflict, outcome=failed）/retire、connection.test、sql.execute（denied/succeeded/failed/timeout/cancelled）、credential.lookup/decrypt 失败、unknown KEK version
 - **E17**：审计写入失败作为独立安全告警通道，不写回失败的审计系统
 - **Metadata 允许列表**：合并 16 字段（6 P0-05 新增 + 10 P0-04 现有），使用事件级精确格式校验，禁止自由文本
 - **禁止字段**：SQL 正文、密码、KEK/DEK、nonce、连接串、目标库结果、原始数据库错误
@@ -87,7 +87,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
 - 回滚：`git revert` WEB-22/WEB-23 合并提交；credential_envelopes 仅追加写，数据不受影响
-- KEK 紧急轮换：添加新 `WEBDB_KEK_V{N+1}` → 更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` → 重启 → 新凭证使用新 KEK
+- KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 
 ## 相关资料
 

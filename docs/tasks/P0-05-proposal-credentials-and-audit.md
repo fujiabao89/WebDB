@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-22/WEB-23 可基于本方案启动生产实现。
+> WEB-22（凭证信封加密）可基于本方案启动生产实现。WEB-23（审计接入）须等待 WEB-22 完成。
 
 ---
 
@@ -67,9 +67,7 @@ type ConnectConfig struct {
 
 ### 1.4 现有审计脱敏（P0-04，已实现）
 
-`sanitizeAuditMetadata()` 当前允许列表：`summary`、`rows_affected`、`row_count`、`cached`、`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`。
-
-启发式检测 `looksLikeSQL()` 和 `looksLikeCredential()` 仍存在（计划在 P0-04 后续收紧中移除）。
+`sanitizeAuditMetadata()` 当前允许列表：`summary`、`rows_affected`、`row_count`、`cached`。启发式检测 `looksLikeSQL()` 和 `looksLikeCredential()` 仍存在。**P0-04 提案 §8.5 计划的扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）和基线收紧（移除 `summary`/启发式函数）当前尚未实现**，待 P0-04 后续迭代完成。
 
 ### 1.5 当前不可用的能力
 
@@ -99,7 +97,7 @@ type ConnectConfig struct {
 - 不接入企业 KMS
 - 不实现登录/OIDC、DML/DDL、公开 HTTP SQL API
 - 不改变 ADR-010 的 7 天结果保留策略
-- 不擅自固定审计事件保留期
+- 不在 P0 实施审计事件的自动删除或精确归档机制（保留期 D12 已批准：至少 90 天）
 
 ---
 
@@ -250,6 +248,8 @@ AAD = version_tag(4B) || workspace_id(16B) || secret_ref(16B) || secret_version(
 ```
 
 **每 KEK 加密次数上限**：单个 KEK 版本最多用于 `2^24` 次 DEK 包装操作（约 1677 万次），达到上限后该 KEK 版本拒绝新的包装请求（仍可用于解密），强制部署者轮换 KEK。此上限远低于 GCM nonce 重用的安全阈值（2^32），提供充足安全余量。
+
+**计数实现**：P0 使用进程内原子计数器（`atomic.Uint64`）。服务重启后计数器归零——此上限旨在防止持续运行期间的 nonce 碰撞，而非提供不可绕过的硬配额。此限制记录为残余风险（R3 注释）。生产环境应通过监控 DEK 包装速率并在接近阈值时提前预警。跨实例部署时各实例独立计数，实际包装总量可能略超 2^24，但仍在 GCM 安全边界内。
 
 ### 4.6 解密流程
 
@@ -421,8 +421,10 @@ KEK 不得出现在：
 1. 验证调用者有 workspace 成员资格
 2. SELECT FROM credential_envelopes WHERE (workspace_id, secret_ref, secret_version) = (...)
 3. 行不存在 → audit: credential.lookup.fail, 返回 credential_not_found
-4. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
-5. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+4. 行存在且 `retired_at IS NOT NULL` → 普通执行路径返回 credential_retired
+   （审计追溯路径允许继续解密，通过独立查询接口，不经过此执行流程）
+5. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
+6. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 6. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 7. KEK ← KEKProvider.GetKEK(row.kek_version)
 8. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
@@ -433,7 +435,7 @@ KEK 不得出现在：
 13. 返回 CredentialPayload
 ```
 
-> **约束**：步骤 9-12 任一失败，Adapter 调用次数必须为 0。步骤 2 的行不存在时，不执行步骤 5-12 的任何加密操作。
+> **约束**：步骤 10-13 任一失败，Adapter 调用次数必须为 0。步骤 3（行不存在）或步骤 4（已退役）时不执行任何加密操作。
 
 #### 6.2.3 轮换（RotateCredential）
 
@@ -497,22 +499,30 @@ KEK 不得出现在：
 #### 6.2.5 连接引用更新
 
 ```text
-UPDATE connections SET secret_version = $new_version
-WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
+1. BEGIN TRANSACTION
+2.   SELECT version FROM credential_envelopes
+        WHERE workspace_id = $ws AND secret_ref = $ref AND version = $new_version
+        AND retired_at IS NULL FOR UPDATE
+     → 行不存在或已退役：ROLLBACK，返回 credential_not_found 或 credential_retired
+3.   UPDATE connections SET secret_version = $new_version
+     WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
+4. COMMIT
 ```
 
-- 引用必须属于同一 workspace
-- 引用的 version 必须在 credential_envelopes 中存在且 `retired_at IS NULL`（应用层约束）
-- 应用层必须验证连接引用不能指向其他 workspace 的 secret_ref
+- 步骤 2 对目标 envelope 加锁（与退役流程使用相同的锁协议），防止并发退役在引用检查和 UPDATE 之间完成。
+- 引用必须属于同一 workspace。
+- 引用的 version 必须在 credential_envelopes 中存在且 `retired_at IS NULL`（步骤 2 在持锁事务内验证）。
 
 ### 6.3 状态转换表
 
 | 操作 | 前置状态 | 后置状态 | 事务？ | 审计事件 |
 |---|---|---|---|---|
-| Create | — | version=1, active | 否（单 INSERT） | `credential.create` |
+| Create | — | version=1, active | 否（单 INSERT）† | `credential.create` |
 | Read | active 或 retired | 不变 | 否 | 无（除非失败） |
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
-| Retire | active | retired | 否 | `credential.retire` |
+| Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
+
+> † Create 为单条 INSERT 无显式事务边界；若后续审计写入失败，envelope 行已持久化且审计失败不影响创建结果。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 
@@ -600,7 +610,7 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | E2 | 连接更新 | `connection.update` | `succeeded` | `user` | 连接 ID | NULL | `environment` |
 | E3 | 凭证创建 | `credential.create` | `succeeded` | `user` | NULL | NULL | `secret_ref`(UUID), `secret_version`, `envelope_suite`, `kek_version` |
 | E4 | 凭证轮换成功 | `credential.rotate` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `old_version`, `new_version`, `envelope_suite`, `kek_version` |
-| E5 | 凭证轮换失败 | `credential.rotate` | `failed` | `user` | NULL | NULL | `secret_ref`, `error_code` |
+| E5 | 凭证轮换失败 | `credential.rotate` | `failed` | `user` | NULL | NULL | `secret_ref`, `error_code`, `expected_version`（如适用）, `actual_version`（如适用） |
 | E6 | 凭证退役 | `credential.retire` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `version` |
 | E7 | 连接测试成功 | `connection.test` | `succeeded` | `user` | 连接 ID | NULL | `engine`, `environment`, `duration_ms` |
 | E8 | 连接测试失败 | `connection.test` | `failed` | `user` | 连接 ID | NULL | `engine`, `environment`, `error_code` |
@@ -662,7 +672,9 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | `invalid_payload` | Payload schema 验证失败 | C' |
 | `payload_too_large` | Payload 超过大小上限 | C' |
 | `credential_not_found` | 凭证 envelope 不存在 | C' |
-| `credential_retired` | 凭证版本已退役（用于新连接引用时） | C' |
+| `credential_retired` | 凭证版本已退役（普通执行路径拒绝） | C' |
+| `version_conflict` | 轮换 expected_version 不匹配（其他轮换已先完成） | C' |
+| `credential_in_use` | 凭证版本被连接引用，无法退役 | C' |
 
 ---
 
@@ -680,7 +692,7 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | **阶段 C**（SQL 策略拒绝） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **阶段 C'**（凭证解析失败） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **阶段 D-0**（running 更新失败） | 返回 `audit_failed` | 否 | 否 | `pending`（未更新） | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE 单条 |
-| **阶段 D 完成后** | 返回 `audit_failed` | 已调用 | **否**（不返回查询结果） | `completed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **阶段 D 完成后** | 返回 `audit_failed` | 已调用 | **否**（不返回查询结果） | `completed`（Execution UPDATE 在独立事务中已提交） | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE 独立事务；AuditEvent INSERT 后置独立事务 |
 | **拒绝事件**（rate_limited/connection_busy） | 返回 `audit_failed` | 已调用（失败）* | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **取消/超时事件** | 返回 `audit_failed` | 已调用（已取消/超时） | 否 | `cancelled`/`failed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **告警系统自身失败** | 写入 stderr/syslog | N/A | N/A | N/A | N/A | 基础设施级告警 | N/A | N/A |
