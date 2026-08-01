@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -101,7 +102,7 @@ func NewEnvKEKProvider() (KEKProvider, error) {
 	// 交叉验证：不同版本不能使用相同密钥值
 	for v1, k1 := range keys {
 		for v2, k2 := range keys {
-			if v1 < v2 && string(k1) == string(k2) {
+			if v1 < v2 && bytes.Equal(k1, k2) {
 				return nil, fmt.Errorf("%w: KEK V%d and V%d have identical values", ErrInvalidKEK, v1, v2)
 			}
 		}
@@ -124,7 +125,9 @@ func (p *envKEKProvider) ActiveKEK() (int, []byte, error) {
 	if !ok {
 		return 0, nil, fmt.Errorf("%w: active version %d", ErrUnknownKEKVersion, p.activeVersion)
 	}
-	return p.activeVersion, key, nil
+	out := make([]byte, len(key))
+	copy(out, key)
+	return p.activeVersion, out, nil
 }
 
 func (p *envKEKProvider) GetKEK(version int) ([]byte, error) {
@@ -132,7 +135,9 @@ func (p *envKEKProvider) GetKEK(version int) ([]byte, error) {
 	if !ok {
 		return nil, fmt.Errorf("%w: %d", ErrUnknownKEKVersion, version)
 	}
-	return key, nil
+	out := make([]byte, len(key))
+	copy(out, key)
+	return out, nil
 }
 
 func (p *envKEKProvider) RecordWrap(version int) error {

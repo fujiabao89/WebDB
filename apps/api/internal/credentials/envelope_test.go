@@ -123,8 +123,8 @@ func TestEnvelope_WrongKEK(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek1, rand.Reader)
-	_, err := OpenEnvelope(env, ws, ref, kek2)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek1, rand.Reader)
+	_, err = OpenEnvelope(env, ws, ref, kek2)
 	if err == nil {
 		t.Fatal("expected decryption failure with wrong KEK")
 	}
@@ -138,9 +138,12 @@ func TestEnvelope_WrongDataAAD(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
 	wrongWS := uuid.New()
-	_, err := OpenEnvelope(env, wrongWS, ref, kek)
+	_, err = OpenEnvelope(env, wrongWS, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with wrong workspace (AAD mismatch)")
 	}
@@ -154,9 +157,12 @@ func TestEnvelope_CiphertextTamper(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
 	env.Ciphertext[0] ^= 0x01
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with tampered ciphertext")
 	}
@@ -170,9 +176,12 @@ func TestEnvelope_WrappedDEKTamper(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
 	env.WrappedDEK[0] ^= 0x01
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with tampered wrapped DEK")
 	}
@@ -186,9 +195,9 @@ func TestEnvelope_DataNonceTamper(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
 	env.DataNonce[0] ^= 0x01
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with tampered data nonce")
 	}
@@ -202,9 +211,9 @@ func TestEnvelope_WrapNonceTamper(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
 	env.WrapNonce[0] ^= 0x01
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with tampered wrap nonce")
 	}
@@ -227,15 +236,15 @@ func TestEnvelope_NoncesIndependent(t *testing.T) {
 			t.Fatal(err)
 		}
 		ds := string(env.DataNonce)
-		ws := string(env.WrapNonce)
+		wn := string(env.WrapNonce)
 		if seenData[ds] {
 			t.Error("data nonce reused")
 		}
-		if seenWrap[ws] {
+		if seenWrap[wn] {
 			t.Error("wrap nonce reused")
 		}
 		seenData[ds] = true
-		seenWrap[ws] = true
+		seenWrap[wn] = true
 	}
 }
 
@@ -259,9 +268,9 @@ func TestEnvelope_SuiteMismatchOnOpen(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
 	env.EnvelopeSuite = "BROKEN-SUITE"
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with suite mismatch")
 	}
@@ -274,9 +283,9 @@ func TestEnvelope_KEKVersionMismatch(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	env, _ := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
+	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
 	env.KEKVersion = 99
-	_, err := OpenEnvelope(env, ws, ref, kek)
+	_, err = OpenEnvelope(env, ws, ref, kek)
 	if err == nil {
 		t.Fatal("expected failure with KEK version mismatch in AAD")
 	}

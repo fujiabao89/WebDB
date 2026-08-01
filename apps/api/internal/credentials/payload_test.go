@@ -234,10 +234,10 @@ func TestPayload_PreserveUnicode(t *testing.T) {
 
 func TestPayload_NoPlaintextInError(t *testing.T) {
 	_, err := EncodePayload(CredentialPayload{User: "", Password: "secret_pw"})
-	if err != nil {
-		errStr := err.Error()
-		if strings.Contains(errStr, "secret_pw") {
-			t.Error("password should not appear in error message")
-		}
+	if err == nil {
+		t.Fatal("expected error for empty user")
+	}
+	if strings.Contains(err.Error(), "secret_pw") {
+		t.Error("password should not appear in error message")
 	}
 }

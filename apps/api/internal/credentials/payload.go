@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"unicode/utf8"
 )
 
@@ -24,9 +25,16 @@ const (
 // ---- 数据模型 ----------------------------------------------------------------
 
 // CredentialPayload 数据库凭证明文（仅存在于内存）。
+// Password 字段带有 json:"-" tag，防止 json.Marshal 意外泄露。
+// EncodePayload 使用独立的 rawPayload 结构进行序列化。
 type CredentialPayload struct {
 	User     string `json:"user"`
-	Password string `json:"password"`
+	Password string `json:"-"`
+}
+
+// String 防止 %v/%+v 泄露明文密码。
+func (p CredentialPayload) String() string {
+	return fmt.Sprintf("CredentialPayload{User:%q, Password:[REDACTED]}", p.User)
 }
 
 // rawPayload 用于严格解码的中间结构。
@@ -95,6 +103,11 @@ func DecodePayload(data []byte) (CredentialPayload, error) {
 	var raw rawPayload
 	if err := decoder.Decode(&raw); err != nil {
 		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrInvalidPayload, err)
+	}
+
+	// 严格校验：拒绝尾随数据（第二个 JSON 值或垃圾字节）
+	if _, err := decoder.Token(); err != io.EOF {
+		return CredentialPayload{}, fmt.Errorf("%w: trailing data after JSON object", ErrInvalidPayload)
 	}
 
 	if err := checkDuplicateKeys(data); err != nil {

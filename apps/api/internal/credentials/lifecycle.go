@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/fujiabao89/webdb/internal/metadata"
@@ -39,12 +40,12 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 		return nil, err
 	}
 
-	// Record wrapping
-	if err := m.kek.RecordWrap(ver); err != nil {
+	if err := m.store.CreateEnvelope(ctx, env); err != nil {
 		return nil, err
 	}
 
-	if err := m.store.CreateEnvelope(ctx, env); err != nil {
+	// RecordWrap 在持久化成功后递增
+	if err := m.kek.RecordWrap(ver); err != nil {
 		return nil, err
 	}
 
@@ -56,7 +57,10 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef uuid.UUID, secretVersion int) (CredentialPayload, error) {
 	env, err := m.store.EnvelopeByRef(ctx, workspaceID, secretRef, secretVersion)
 	if err != nil {
-		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
+			return CredentialPayload{}, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		}
+		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrInternalError, err)
 	}
 
 	if env.RetiredAt != nil {
@@ -82,7 +86,10 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	// 1. 锁定 Envelope 行
 	env, err := m.store.LockEnvelopeForUpdate(ctx, tx, workspaceID, secretRef)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
+			return nil, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
 	}
 
 	// 2. expected_version 检查
@@ -104,10 +111,6 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 		return nil, err
 	}
 
-	if err := m.kek.RecordWrap(ver); err != nil {
-		return nil, err
-	}
-
 	// 5. INSERT 新版本
 	if err := m.store.InsertEnvelopeTx(ctx, tx, newEnv); err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
@@ -120,6 +123,11 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("%w: commit: %v", ErrInternalError, err)
+	}
+
+	// 7. RecordWrap 在 Commit 成功后递增，确保回滚时计数不偏离
+	if err := m.kek.RecordWrap(ver); err != nil {
+		return nil, err
 	}
 
 	return newEnv, nil
@@ -136,7 +144,10 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 	// 1. 锁定目标版本
 	env, err := m.store.LockEnvelopeVersion(ctx, tx, workspaceID, secretRef, version)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
+			return fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+		}
+		return fmt.Errorf("%w: %v", ErrInternalError, err)
 	}
 
 	if env.RetiredAt != nil {

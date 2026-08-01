@@ -3,9 +3,13 @@ package metadata
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/google/uuid"
 )
+
+// ErrEnvelopeNotFound 凭证 Envelope 未找到的 sentinel 错误。
+var ErrEnvelopeNotFound = errors.New("credential envelope not found")
 
 // CredentialTXStore 定义凭证生命周期所需的带事务仓储操作。
 type CredentialTXStore interface {

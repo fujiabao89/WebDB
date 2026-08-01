@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -14,36 +15,20 @@ func (s *PGStore) LockEnvelopeForUpdate(ctx context.Context, tx *sql.Tx, wsID, s
 	const q = `SELECT workspace_id, secret_ref, version, ciphertext, data_nonce,
 		wrapped_dek, wrap_nonce, envelope_suite, kek_version,
 		created_at, retired_at FROM credential_envelopes
-		WHERE workspace_id = $1 AND secret_ref = $2 FOR UPDATE`
-	rows, err := tx.QueryContext(ctx, q, wsID, secretRef)
+		WHERE workspace_id = $1 AND secret_ref = $2
+		ORDER BY version DESC LIMIT 1 FOR UPDATE`
+	env := &CredentialEnvelope{}
+	err := tx.QueryRowContext(ctx, q, wsID, secretRef).Scan(
+		&env.WorkspaceID, &env.SecretRef, &env.Version,
+		&env.Ciphertext, &env.DataNonce, &env.WrappedDEK, &env.WrapNonce,
+		&env.EnvelopeSuite, &env.KEKVersion,
+		&env.CreatedAt, &env.RetiredAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("credential envelope (%s, %s): %w", wsID, secretRef, ErrEnvelopeNotFound)
+	}
 	if err != nil {
 		return nil, err
-	}
-	defer rows.Close()
-
-	var env *CredentialEnvelope
-	var maxVersion int
-	for rows.Next() {
-		var e CredentialEnvelope
-		if err := rows.Scan(
-			&e.WorkspaceID, &e.SecretRef, &e.Version,
-			&e.Ciphertext, &e.DataNonce, &e.WrappedDEK, &e.WrapNonce,
-			&e.EnvelopeSuite, &e.KEKVersion,
-			&e.CreatedAt, &e.RetiredAt,
-		); err != nil {
-			return nil, err
-		}
-		if e.Version > maxVersion {
-			maxVersion = e.Version
-			copied := e
-			env = &copied
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	if env == nil {
-		return nil, fmt.Errorf("credential envelope (%s, %s): not found", wsID, secretRef)
 	}
 	return env, nil
 }
@@ -60,8 +45,8 @@ func (s *PGStore) LockEnvelopeVersion(ctx context.Context, tx *sql.Tx, wsID, sec
 		&env.EnvelopeSuite, &env.KEKVersion,
 		&env.CreatedAt, &env.RetiredAt,
 	)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("credential envelope (%s, %s, %d): not found", wsID, secretRef, version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("credential envelope (%s, %s, %d): %w", wsID, secretRef, version, ErrEnvelopeNotFound)
 	}
 	if err != nil {
 		return nil, err
@@ -116,7 +101,10 @@ func (s *PGStore) UpdateRetiredAt(ctx context.Context, tx *sql.Tx, wsID, secretR
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
 	if n == 0 {
 		return nil // 幂等：已退役则静默成功
 	}

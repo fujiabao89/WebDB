@@ -18,14 +18,13 @@ func testKEKBase64() string {
 
 func setEnv(t *testing.T, key, val string) {
 	t.Helper()
-	if err := os.Setenv(key, val); err != nil {
-		t.Fatalf("setenv: %v", err)
-	}
+	t.Setenv(key, val)
 }
 
 func unsetWebDBEnv(t *testing.T) {
+	t.Helper()
 	for _, e := range os.Environ() {
-		if strings.HasPrefix(e, "WEBDB_KEK_V") || e == "WEBDB_ACTIVE_KEK_VERSION=" || strings.HasPrefix(e, "WEBDB_ACTIVE_KEK_VERSION=") {
+		if strings.HasPrefix(e, "WEBDB_KEK_V") || strings.HasPrefix(e, "WEBDB_ACTIVE_KEK_VERSION=") {
 			kv := strings.SplitN(e, "=", 2)
 			os.Unsetenv(kv[0])
 		}
@@ -171,7 +170,7 @@ func TestKEK_WrongLength(t *testing.T) {
 
 func TestKEK_NoKEKConfigured(t *testing.T) {
 	unsetWebDBEnv(t)
-	os.Unsetenv("WEBDB_ACTIVE_KEK_VERSION")
+	setEnv(t, "WEBDB_ACTIVE_KEK_VERSION", "1")
 
 	_, err := NewEnvKEKProvider()
 	if err == nil {

@@ -20,42 +20,52 @@ func TestSensitive_NoPasswordInError(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	// 1. EncodePayload 错误不泄露
-	// 无错误路径会包含密码（EncodePayload 只校验字段名和格式）
-
-	// 2. DecodePayload 错误不泄露
-	_, err := DecodePayload([]byte(`{"v":1,"user":"u","password":"` + canaryPassword + `"}`))
-	if err != nil {
-		checkNoSensitive(t, err.Error(), canaryPassword, "DecodePayload error")
+	// 1. EncodePayload 错误不泄露（空 user 触发错误）
+	_, err := EncodePayload(CredentialPayload{User: "", Password: canaryPassword})
+	if err == nil {
+		t.Fatal("expected error for empty user")
 	}
+	checkNoSensitive(t, err.Error(), canaryPassword, "EncodePayload error")
 
-	// 3. SealEnvelope 错误不泄露
-	encoded, _ := EncodePayload(payload)
-	_ = encoded
+	// 2. DecodePayload 错误不泄露（未知字段触发错误）
+	_, err = DecodePayload([]byte(`{"v":1,"user":"u","password":"` + canaryPassword + `","extra":1}`))
+	if err == nil {
+		t.Fatal("expected decode error for unknown field")
+	}
+	checkNoSensitive(t, err.Error(), canaryPassword, "DecodePayload error")
 
-	// 4. OpenEnvelope 错误不泄露
+	// 3. SealEnvelope 错误不泄露（未知 suite 触发错误）
+	_, err = SealEnvelope(payload, ws, ref, 1, "UNKNOWN-SUITE", 1, kek, rand.Reader)
+	if err == nil {
+		t.Fatal("expected seal error for unknown suite")
+	}
+	checkNoSensitive(t, err.Error(), canaryPassword, "SealEnvelope error")
+
+	// 4. OpenEnvelope 错误不泄露（错误 KEK）
 	env, err := SealEnvelope(payload, ws, ref, 1, SuiteAES256GCMv1, 1, kek, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// 用错误 KEK 解密
 	wrongKEK := make([]byte, 32)
 	rand.Read(wrongKEK)
 	_, err = OpenEnvelope(env, ws, ref, wrongKEK)
-	if err != nil {
-		checkNoSensitive(t, err.Error(), canaryPassword, "OpenEnvelope error (wrong KEK)")
+	if err == nil {
+		t.Fatal("expected error for wrong KEK")
 	}
+	checkNoSensitive(t, err.Error(), canaryPassword, "OpenEnvelope error (wrong KEK)")
 
-	// 5. JSON marshal 不泄露
+	// 5. JSON marshal 不泄露（Password 字段 json:"-"）
 	jsonBytes, _ := json.Marshal(payload)
 	checkNoSensitive(t, string(jsonBytes), canaryPassword, "JSON marshal")
 
-	// 6. fmt.Sprintf 不泄露（通过 Stringer）
+	// 6. fmt.Sprintf 不泄露
+	checkNoSensitive(t, fmt.Sprintf("%v", payload), canaryPassword, "fmt.Sprintf %v CredentialPayload")
+	checkNoSensitive(t, fmt.Sprintf("%+v", payload), canaryPassword, "fmt.Sprintf %+v CredentialPayload")
+
+	// 7. CredentialEnvelope 格式化不泄露
 	s := fmt.Sprintf("%v", env)
 	checkNoSensitive(t, s, canaryPassword, "fmt.Sprintf CredentialEnvelope")
-
-	// 7. fmt.Sprintf %+v 不泄露
 	s = fmt.Sprintf("%+v", env)
 	checkNoSensitive(t, s, canaryPassword, "fmt.Sprintf %+v CredentialEnvelope")
 }
@@ -67,8 +77,18 @@ func checkNoSensitive(t *testing.T, output, canary, context string) {
 	}
 }
 
-// TestSensitive_NoKEKInError 验证 KEK 不泄露。
+// TestSensitive_NoKEKInError 验证 KEK 错误信息不泄露原始密钥值。
 func TestSensitive_NoKEKInError(t *testing.T) {
-	// NewEnvKEKProvider error 不应包含原始 KEK 值
-	// （由 TestKEK_NoKEKInError 覆盖）
+	// 设置一个无效的 KEK（长度不对），验证错误信息不含密钥内容。
+	t.Setenv("WEBDB_ACTIVE_KEK_VERSION", "1")
+	t.Setenv("WEBDB_KEK_V1", "dG9vLXNob3J0") // 仅 9 bytes Base64，解析后不足 32 bytes
+
+	_, err := NewEnvKEKProvider()
+	if err == nil {
+		t.Fatal("expected error for invalid KEK")
+	}
+	// 验证错误信息不含原始 KEK Base64 值
+	if strings.Contains(err.Error(), "dG9vLXNob3J0") {
+		t.Error("KEK value should not appear in error message")
+	}
 }
