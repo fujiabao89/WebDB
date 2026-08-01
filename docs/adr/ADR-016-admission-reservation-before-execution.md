@@ -81,12 +81,26 @@ check() → TryAcquire() → buildSortSpecs() → buildWrappedSQL() → execQuer
 ## 后果
 
 - **安全**：准入失败时 Execution 明确标记为 failed，无信息泄露。
-- **兼容**：本 ADR 的准入决策本身不引入额外的 Adapter API 变更（ADR-014 的 `VerifiedSortPlan`/`VerifiedNextPagePlan` 与 ADR-015 的 `ContinuationRegistry` 所有权迁移已覆盖所需的 Adapter 接口变化）。
+- **兼容**：本 ADR 的准入决策本身不引入额外的 Adapter API 变更（ADR-014 的 `VerifiedSortPlan`、ADR-015 的 `VerifiedNextPagePlan` 与 `ContinuationRegistry` 所有权迁移已覆盖所需的 Adapter 接口变化）。
 - **运营**：rate_limited 和 connection_busy 的 Execution/AuditEvent 可被分别监控和告警。
 - **测试**：用户/工作区/连接限流、取消后 Release、panic 后 Release、Release 幂等。
 
 ## 验证
 
+以下验证基于 P0-04 当前实现（commit `64be9bb`，PR #27）：
+
+| 场景 | 验证方式 | 证据 |
+|------|----------|------|
+| `rate_limited` | `TestAdmission_RateLimit`（`apps/api/internal/adapter/manager_test.go`） | PASS；限流恢复后申请成功 |
+| `context.Canceled` | `TestCancel_PG` / `TestCancel_MySQL`（同上） | PASS；取消后 `permit.Release` 被 defer 调用 |
+| `connection_busy` 的 Service 层终结逻辑 | 当前仅在 Adapter 层通过 `mapAcquireError` 映射错误码；Service 层 `failed` 终结 + 审计写入路径依赖 ADR-016 实施 | 待 P0-04 后续迭代补充端到端验证 |
+| Panic → defer Release → Service finalizer | Adapter 层 `defer permit.Release` 已就位；Service finalizer 路径依赖 ADR-016 实施 | 待补充 |
+| `Release` 多次调用不 panic | 当前 `Permit.Release` 实现使用 `sync.Once` 等价逻辑 | 通过代码审查确认；待补充显式单元测试 |
+| 任一路径无永久 pending | 依赖 Service 层 `rate_limited`/`connection_busy` 分支 + panic finalizer 的完整实现 | 待 ADR-016 实施后补充端到端验证 |
+
+P0-04 验证命令：`go -C apps/api test ./internal/adapter/` `go -C apps/api test ./internal/execution/`
+
+预期状态：
 - `rate_limited`：Execution status=failed, error_code=rate_limited, Audit outcome=denied, DB acquire=0, SQL Query=0。
 - `connection_busy`：Execution status=failed, error_code=connection_busy, Audit outcome=failed, DB acquire 已尝试, SQL Query=0。
 - `context.Canceled` → `Permit.Release` → 无泄漏。

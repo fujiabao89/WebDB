@@ -72,11 +72,11 @@ ready → claim（原子 compare-and-consume）→ in-flight（不可恢复为 r
 **原子 token 旋转**：
 
 有后续页时使用 `Rotate(oldDigest, newDigest, newState)` 原子操作。语义：
-- 在同一把锁/同一原子临界区内验证：oldDigest 存在；状态为 in-flight；claim ownership/version 匹配；newDigest 不存在；newState 有效。
-- 原子执行：删除旧 in-flight entry → 在同一容量槽位写入新 ready entry → 更新 LRU 和全部维度计数；不产生可观察的中间状态。
+- 在同一把锁/同一原子临界区内验证：oldDigest 存在；状态为 in-flight；`expires_at` 未过期（TTL 为绝对过期时间，自 token 创建起算，非 idle TTL）；claim ownership/version 匹配；newDigest 不存在；newState 有效。
+- 任一条件不满足（含 `expires_at` 已过期）：原子删除旧 in-flight entry；不创建新 token；不恢复旧 token；返回 `invalid_page_token`；所有容量计数必须一致。
+- 全部条件满足时原子执行：删除旧 in-flight entry → 在同一容量槽位写入新 ready entry → 更新 LRU 和全部维度计数；不产生可观察的中间状态。
 - 正常旋转不额外占用 global/user/workspace/connection 配额，也不得为了旋转驱逐其他 token。
 - Rotate 成功后，旧 token 永久无效，新 token 成为唯一后继。
-- Rotate 失败：删除旧 in-flight；不恢复旧 token；不创建新 token；返回稳定错误；所有容量计数必须一致。
 
 没有后续页时使用原子 `Complete(oldDigest)` 删除旧 in-flight。
 
@@ -138,7 +138,7 @@ Adapter 的 `NextPage` 改为接收结构化的 `VerifiedNextPagePlan`（含 las
 ## 验证
 
 - Token 防篡改（修改 handle 后拒绝）。
-- TTL 过期后拒绝。
+- TTL 过期后 claim 和 Rotate 均拒绝（TTL 为绝对过期时间，自 token 创建起算，非 idle TTL）。
 - principal/workspace/connection/policy version 不匹配拒绝。
 - generation 变化后旧 token 拒绝。
 - 并发 NextPage 同一 token（第二个请求失败）。
