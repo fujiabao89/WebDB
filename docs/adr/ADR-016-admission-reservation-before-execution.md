@@ -91,14 +91,15 @@ check() → TryAcquire() → buildSortSpecs() → buildWrappedSQL() → execQuer
 
 | 场景 | 验证方式 | 证据 |
 |------|----------|------|
-| `rate_limited` | `TestAdmission_RateLimit`（`apps/api/internal/adapter/manager_test.go`） | PASS；限流恢复后申请成功 |
+| `rate_limited`（Adapter 准入） | `TestAdmission_RateLimit`（`apps/api/internal/adapter/manager_test.go`） | PASS；Adapter 层限流拒绝和 Permit 释放正常 |
+| `rate_limited`（Service 终结 + 审计） | Execution status=failed, error_code=rate_limited, Audit outcome=denied 的 Service 层写入 | 待 ADR-016 实施后补充端到端验证 |
 | `context.Canceled` | `TestCancel_PG` / `TestCancel_MySQL`（同上） | PASS；取消后 `permit.Release` 被 defer 调用 |
 | `connection_busy` 的 Service 层终结逻辑 | 当前仅在 Adapter 层通过 `mapAcquireError` 映射错误码；Service 层 `failed` 终结 + 审计写入路径依赖 ADR-016 实施 | 待 P0-04 后续迭代补充端到端验证 |
 | Panic → defer Release → Service finalizer | Adapter 层 `defer permit.Release` 已就位；Service finalizer 路径依赖 ADR-016 实施 | 待补充 |
 | `Release` 多次调用不 panic | 当前 `Permit.Release` 实现使用 `sync.Once` 等价逻辑 | 通过代码审查确认；待补充显式单元测试 |
 | 任一路径无永久 pending | 依赖 Service 层 `rate_limited`/`connection_busy` 分支 + panic finalizer 的完整实现 | 待 ADR-016 实施后补充端到端验证 |
 
-P0-04 验证命令：`go -C apps/api test ./internal/adapter/` `go -C apps/api test ./internal/execution/`
+P0-04 验证命令：`go -C apps/api test ./internal/adapter/ && go -C apps/api test ./internal/execution/`
 
 预期状态：
 - `rate_limited`：Execution status=failed, error_code=rate_limited, Audit outcome=denied, DB acquire=0, SQL Query=0。

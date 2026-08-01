@@ -1,6 +1,8 @@
 # ADR-015：Continuation Token 归属与安全模型
 
 > 状态：已接受｜日期：2026-07-26｜Owner：fujiabao89｜批准日期：2026-07-27
+>
+> **实施状态**：本 ADR 描述的是已接受的**目标契约**。当前实现（P0-04, commit `64be9bb`）仍由 Adapter 持有 `ContinuationRegistry`；`PoolHandle.NextPage` 仍接收 `token string`。Service-owned Registry、`VerifiedNextPagePlan` 接口和 claim 后不可恢复等契约待后续迭代迁移。本文中"Adapter 不生成/不解析/不保存 token""NextPage 接收 VerifiedNextPagePlan"等表述均为迁移完成后的目标状态。
 
 ## 背景
 
@@ -57,6 +59,8 @@ Registry 保存完整 `ContinuationState`，至少绑定：
 | per connection | 200 |
 
 只允许驱逐处于 `ready` 状态、未被 claim/in-flight 的 token。没有安全驱逐候选时返回 `pagination_capacity_exhausted`。Registry 不得无界增长。
+
+> **残余风险**：当前仅限制 token 数量，未定义单状态或 Registry 总字节数上限。`ContinuationState` 保存 SQL、Args 和分页状态，攻击者可在数量限制内提交大体积请求以消耗服务内存。建议后续迭代引入字节级配额（单状态上限 + 全局/用户/工作区/连接级字节上限），在插入前按深拷贝后实际大小计入，超限时返回受控错误。若 P0-03 已对 SQL/Args 实施大小限制，应在本 ADR 中引用其配置和测试。
 
 ### 6. 原子状态机与终态清理
 
