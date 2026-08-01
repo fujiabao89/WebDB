@@ -1,6 +1,8 @@
 # ADR-014：SortKey 唯一性证明与 VerifiedSortPlan
 
 > 状态：已接受｜日期：2026-07-26｜Owner：fujiabao89｜批准日期：2026-07-27
+>
+> **实施状态**：本 ADR 描述的是已接受的**目标契约**。当前实现（P0-04, commit `64be9bb`）中，`apps/api/internal/adapter/keyset.go` 仍接收 `[]SortKey` 并依据 `k.Unique` 判断唯一性，`VerifiedSortPlan`、`VerifySortPlan()` 和 `queryplan` 包尚未实现。本文中 fail-closed 的 Schema 元数据验证、"禁止静默回退到客户端 SortKey.Unique"和"客户端提交 Unique=true 不影响验证结果"等均为迁移完成后的目标行为。
 
 ## 背景
 
@@ -42,15 +44,15 @@
 - 接口值复制允许，但内部实现必须不可变；所有 slice/map/`[]any` accessor 返回深拷贝。
 - `VerifiedNextPagePlan` 使用相同的 sealed-interface 模式。
 
-3. **唯一创建入口**：`VerifySortPlan()` 函数；不提供 raw constructor；不支持 JSON/数据库反序列化直接构造。
+1. **唯一创建入口**：`VerifySortPlan()` 函数；不提供 raw constructor；不支持 JSON/数据库反序列化直接构造。
 
-4. **Accessor 深拷贝**：所有返回 slice/map/`[]any` 的 accessor 必须返回深拷贝或只读迭代结果，不能把内部可变引用暴露给 Adapter/Service。
+2. **Accessor 深拷贝**：所有返回 slice/map/`[]any` 的 accessor 必须返回深拷贝或只读迭代结果，不能把内部可变引用暴露给 Adapter/Service。
 
-5. **安全复制**：合法计划可以安全复制，但调用方不得通过复制后修改其内部证明或排序字段。
+3. **安全复制**：合法计划可以安全复制，但调用方不得通过复制后修改其内部证明或排序字段。
 
-6. **无效计划的错误映射**：Adapter 必须把无效计划映射为 `unsupported_query` 或专门的内部稳定错误码，不得降级到旧 `SortKey.Unique`。
+4. **无效计划的错误映射**：Adapter 必须把无效计划映射为 `unsupported_query` 或专门的内部稳定错误码，不得降级到旧 `SortKey.Unique`。
 
-7. 客户端和普通服务请求不得提交或控制 `Unique=true`。该标记仅由 `VerifySortPlan` 内部设置。
+5. 客户端和普通服务请求不得提交或控制 `Unique=true`。该标记仅由 `VerifySortPlan` 内部设置。
 
 ### SchemaSnapshot
 
