@@ -421,18 +421,19 @@ KEK 不得出现在：
 1. 验证调用者有 workspace 成员资格
 2. SELECT FROM credential_envelopes WHERE (workspace_id, secret_ref, secret_version) = (...)
 3. 行不存在 → audit: credential.lookup.fail, 返回 credential_not_found
-4. 验证 envelope_suite 已知
-5. AAD ← canonicalJSON(row)
-6. KEK ← KEKProvider.GetKEK(row.kek_version)
-7. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
-8. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, nil)
-9. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, AAD)
-10. 解密失败 → audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
-11. 验证 payload schema
-12. 返回 CredentialPayload
+4. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
+5. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+6. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
+7. KEK ← KEKProvider.GetKEK(row.kek_version)
+8. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
+9. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, wrap_aad)
+10. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, data_aad)
+11. 解密失败（步骤 9 或 10）→ audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
+12. 验证 payload schema
+13. 返回 CredentialPayload
 ```
 
-> **约束**：步骤 8-11 任一失败，Adapter 调用次数必须为 0。步骤 2 的行不存在时，不执行步骤 5-11 的任何加密操作。
+> **约束**：步骤 9-12 任一失败，Adapter 调用次数必须为 0。步骤 2 的行不存在时，不执行步骤 5-12 的任何加密操作。
 
 #### 6.2.3 轮换（RotateCredential）
 
@@ -490,6 +491,7 @@ KEK 不得出现在：
 6. COMMIT
 7. 写入审计事件: credential.retire
 ```
+
 - 步骤 4 在持锁事务内执行，防止与并发连接引用更新或创建产生竞态。
 - 退役操作与引用检查在同一事务中原子完成。
 
@@ -912,11 +914,13 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 
 ### 15.3 KEK 紧急轮换
 
-1. 添加新 `WEBDB_KEK_V{N+1}` 环境变量
-2. 重启 WebDB 服务
-3. 新凭证自动使用新 KEK 加密
-4. 旧版 KEK 保留用于历史解密
-5. 可选：使用 API 批量重新加密旧 envelope（用新 KEK 重新包装 DEK）
+1. 在所有实例上添加新 `WEBDB_KEK_V{N+1}` 环境变量（但不修改 `WEBDB_ACTIVE_KEK_VERSION`）
+2. 滚动重启所有实例（此时仍使用旧版 KEK 写入，新版 KEK 已加载可用于解密）
+3. 确认所有实例正常运行后，更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启
+4. 新 envelope 使用新 KEK 加密；旧版 KEK 保留用于历史解密
+5. 回滚：将 `WEBDB_ACTIVE_KEK_VERSION` 改回旧值并重启；旧 envelope 不受影响
+
+> **P0 不实施 DEK 重包装**：data_aad 包含 `kek_version`（D4），若用新 KEK 重新包装 DEK 后更新 envelope 的 `kek_version` 字段，data_aad 会因 `kek_version` 变化而不同，导致已有 ciphertext 的 GCM 认证失败。P0 阶段 KEK 轮换通过**追加新 envelope 版本**（生成新 DEK、重新加密 payload）实现，而非重包装已有 DEK。旧 KEK 版本必须保留，否则对应 envelope 永久无法解密。DEK 重包装能力留给后续独立任务。
 
 ---
 
