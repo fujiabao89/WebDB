@@ -171,11 +171,15 @@ func TestAuditedCredential_CreateAuditFailureReturnsAuditFailed(t *testing.T) {
 	store := &createOnlyCredentialStore{}
 	audit := &fakeAuditStore{fail: errors.New("injected audit failure")}
 	alarm := &fakeAlarmRecorder{}
-	m, _, _ := auditedManager(store, nil, goodKEK(), audit, alarm)
+	m, _, alarm := auditedManager(store, nil, goodKEK(), audit, alarm)
 
 	_, err := m.Create(context.Background(), uuid.New(), uuid.New(), CredentialPayload{User: "u", Password: "p"})
 	if !IsErrorCode(err, ErrAuditFailed) {
 		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	// 审计失败必须触发 $SECURITY_ALERT（Codex P1）。
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
 	}
 }
 

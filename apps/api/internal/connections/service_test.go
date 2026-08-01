@@ -229,7 +229,7 @@ func TestConnection_TestSucceededWritesE7(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s, _, _ := testService(conns, &fakeMemberStore{}, audit, alarm,
+	s, _, _ := testService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		&fakeTester{})
 
@@ -260,7 +260,7 @@ func TestConnection_TestFailedWritesE8(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s, _, _ := testService(conns, &fakeMemberStore{}, audit, alarm,
+	s, _, _ := testService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		&fakeTester{err: &adapter.AdapterError{Code: adapter.ErrConnectionFailed}})
 
@@ -298,7 +298,7 @@ func TestConnection_TestAuditFailureReturnsAuditFailed(t *testing.T) {
 	}
 	audit := &fakeAuditSink{fail: errors.New("injected audit failure")}
 	alarm := &fakeAlarmSink{}
-	s, _, _ := testService(conns, &fakeMemberStore{}, audit, alarm,
+	s, _, _ := testService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		&fakeTester{})
 
@@ -312,4 +312,51 @@ func TestConnection_TestAuditFailureReturnsAuditFailed(t *testing.T) {
 	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
 		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
 	}
+}
+
+func TestConnection_TestNonMemberRejected(t *testing.T) {
+	// Test 必须像 Create/Update 一样先做成员/角色授权（Codex P1），
+	// 非 owner/admin 不得触发凭证解析或外发 DB ping。
+	p := testPrincipal()
+	connID := uuid.New()
+	conns := &fakeConnectionStore{
+		conns: []*metadata.Connection{{
+			ID:            connID,
+			WorkspaceID:   p.WorkspaceID,
+			Engine:        metadata.EnginePostgreSQL,
+			Environment:   metadata.EnvDevelopment,
+			SecretRef:     uuid.New(),
+			SecretVersion: 1,
+		}},
+	}
+	audit := &fakeAuditSink{}
+	alarm := &fakeAlarmSink{}
+	pinged := false
+	s := NewService(conns, &fakeMemberStore{role: metadata.RoleViewer}, audit, alarm,
+		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
+		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
+			pinged = true
+			return nil
+		}))
+
+	err := s.Test(context.Background(), p, connID)
+	if err == nil {
+		t.Fatal("expected forbidden error for non-manager")
+	}
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("error = %v, want forbidden", err)
+	}
+	if pinged {
+		t.Fatal("non-manager must not trigger outbound DB ping")
+	}
+	if len(audit.events) != 0 {
+		t.Fatalf("audit events = %d, want 0 (rejected before audit)", len(audit.events))
+	}
+}
+
+// fakeTesterFunc 将函数适配为 ConnectionTester。
+type fakeTesterFunc func(ctx context.Context, cfg adapter.ConnectConfig) error
+
+func (f fakeTesterFunc) Ping(ctx context.Context, cfg adapter.ConnectConfig) error {
+	return f(ctx, cfg)
 }

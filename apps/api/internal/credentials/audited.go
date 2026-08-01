@@ -60,8 +60,8 @@ func (m *AuditedLifecycleManager) Create(ctx context.Context, wsID, actorID uuid
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, err)
 	}
-	if err := m.audit.AppendAudit(ctx, event); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, err)
+	if err := m.writeAudit(ctx, event); err != nil {
+		return nil, err
 	}
 	return env, nil
 }
@@ -111,8 +111,8 @@ func (m *AuditedLifecycleManager) Resolve(ctx context.Context, wsID, secretRef u
 	if buildErr != nil {
 		return payload, buildErr
 	}
-	if auditErr := m.audit.AppendAudit(ctx, event); auditErr != nil {
-		return payload, fmt.Errorf("%w: %v", ErrAuditFailed, auditErr)
+	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
+		return payload, auditErr
 	}
 	return payload, err
 }
@@ -126,8 +126,8 @@ func (m *AuditedLifecycleManager) Rotate(ctx context.Context, wsID, actorID, sec
 		if buildErr != nil {
 			return nil, err
 		}
-		if auditErr := m.audit.AppendAudit(ctx, event); auditErr != nil {
-			return nil, fmt.Errorf("%w: %v", ErrAuditFailed, auditErr)
+		if auditErr := m.writeAudit(ctx, event); auditErr != nil {
+			return nil, auditErr
 		}
 		return nil, err
 	}
@@ -137,8 +137,8 @@ func (m *AuditedLifecycleManager) Rotate(ctx context.Context, wsID, actorID, sec
 	if buildErr != nil {
 		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, buildErr)
 	}
-	if auditErr := m.audit.AppendAudit(ctx, event); auditErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, auditErr)
+	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
+		return nil, auditErr
 	}
 	return newEnv, nil
 }
@@ -153,8 +153,8 @@ func (m *AuditedLifecycleManager) Retire(ctx context.Context, wsID, actorID, sec
 	if buildErr != nil {
 		return fmt.Errorf("%w: %v", ErrAuditFailed, buildErr)
 	}
-	if auditErr := m.audit.AppendAudit(ctx, event); auditErr != nil {
-		return fmt.Errorf("%w: %v", ErrAuditFailed, auditErr)
+	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
+		return auditErr
 	}
 	return nil
 }
@@ -208,6 +208,20 @@ func newRetireSucceededEvent(wsID, actorID, secretRef uuid.UUID, version int, tr
 }
 
 // ---- helpers ----------------------------------------------------------------
+
+// writeAudit 写审计；审计追加失败触发 $SECURITY_ALERT 并返回 audit_failed（ADR-017 §6）。
+func (m *AuditedLifecycleManager) writeAudit(ctx context.Context, event *metadata.AuditEvent) error {
+	if err := m.audit.AppendAudit(ctx, event); err != nil {
+		m.alarm.Alarm(ctx, metadata.SecurityAlertEvent{
+			TraceID:     event.TraceID,
+			WorkspaceID: event.WorkspaceID,
+			Code:        string(ErrAuditFailed),
+			OccurredAt:  m.clock(),
+		})
+		return fmt.Errorf("%w: %v", ErrAuditFailed, err)
+	}
+	return nil
+}
 
 // newLifecycleAuditEvent 构建凭证生命周期审计事件（user/system actor 判别）。
 func newLifecycleAuditEvent(

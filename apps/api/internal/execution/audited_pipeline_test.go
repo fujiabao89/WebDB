@@ -160,8 +160,10 @@ func auditedMember(principal AuthenticatedPrincipal) *fakeMemberReader {
 	}
 }
 
+// fixedClock 返回动态时钟（time.Now），使 finished_at 采样不早于 execution started_at
+// 且发生于 adapter 工作之后（Codex P1 修复 4 的验证基础）。
 func fixedClock() func() time.Time {
-	return func() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+	return func() time.Time { return time.Now() }
 }
 
 // ---- 生命周期事件测试 --------------------------------------------------------
@@ -204,6 +206,10 @@ func TestAuditedExecute_Succeeded(t *testing.T) {
 	}
 	if last.ErrorCode != nil {
 		t.Fatalf("completed execution error_code = %v, want nil", *last.ErrorCode)
+	}
+	// finished_at 必须在 adapter 工作之后采样，不得早于 started_at（Codex P1）。
+	if last.FinishedAt == nil || last.FinishedAt.Before(last.StartedAt) {
+		t.Fatalf("finished_at=%v must not be before started_at=%v", last.FinishedAt, last.StartedAt)
 	}
 
 	// audit sql.execute succeeded（独立写入）
@@ -272,6 +278,11 @@ func TestAuditedExecute_PolicyDenied(t *testing.T) {
 	last := updates[len(updates)-1]
 	if last.Status != metadata.ExecStatusFailed {
 		t.Fatalf("execution status = %s, want failed", last.Status)
+	}
+
+	// 执行前审计事务必须已提交（Codex P1），而非被 defer Rollback 丢弃。
+	if len(txStore.txs) != 1 || !txStore.txs[0].committed {
+		t.Fatal("denied path must commit the pre-execution transaction")
 	}
 
 	// audit sql.execute denied（mtx 内原子写入）

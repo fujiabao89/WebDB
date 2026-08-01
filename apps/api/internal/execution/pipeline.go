@@ -237,6 +237,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 				}); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
 			}
+			// 提交 execution failed + audit denied（同一事务原子持久化，ADR-017 §6）。
+			if _, err := p.commitPreExecution(mtx, result); err != nil {
+				return result, err
+			}
 		}
 		return result, fmt.Errorf("%w: %s", ErrReadNotAllowed, code)
 	}
@@ -258,6 +262,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 				}); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrPolicyNotConfigured)
 			}
+			if _, err := p.commitPreExecution(mtx, result); err != nil {
+				return result, err
+			}
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -271,6 +278,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 					Engine:        strPtr(string(serverEngine)),
 				}); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
+			}
+			if _, err := p.commitPreExecution(mtx, result); err != nil {
+				return result, err
 			}
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
@@ -288,6 +298,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		if mtx != nil {
 			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+			}
+			if _, err := p.commitPreExecution(mtx, result); err != nil {
+				return result, err
 			}
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
@@ -402,6 +415,16 @@ func (p *Pipeline) auditFailed(
 	// ADR-017 §6：审计失败不向调用方返回查询结果。
 	result.Result = nil
 	return result, fmt.Errorf("%w (original error: %s)", result.ErrorCode, originalCode)
+}
+
+// commitPreExecution 提交执行前的事务（execution failed + audit 原子持久化，ADR-017 §6）。
+// 提交失败按元数据库错误处理，返回 internal_error。
+func (p *Pipeline) commitPreExecution(mtx metadata.MetadataTx, result *ExecuteResult) (*ExecuteResult, error) {
+	if err := mtx.Commit(); err != nil {
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	return result, nil
 }
 
 // recordPreExecution 在执行前（阶段 C/C'）原子记录 execution=failed + 审计事件。
@@ -536,31 +559,38 @@ func (p *Pipeline) recordPostExecution(
 
 	switch result.ErrorCode {
 	case ErrExecutionCancelled:
+		// E13 cancelled：矩阵不含 environment。
 		status = metadata.ExecStatusCancelled
 		outcome = metadata.OutcomeCancelled
 		md.ErrorCode = strPtr("query_cancelled")
 	case ErrExecutionTimeout:
+		// E12 timeout：矩阵不含 environment。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeFailed
 		md.ErrorCode = strPtr("query_timeout")
 	case "":
+		// E10 succeeded：矩阵要求 environment。
 		status = metadata.ExecStatusCompleted
 		outcome = metadata.OutcomeSucceeded
+		md.Environment = strPtr(string(conn.Environment))
 		if result.Result != nil {
 			rowCount := result.Result.TotalReturned
 			md.RowCount = intPtr(rowCount)
 		}
 	default:
+		// E11 failed：矩阵要求 environment。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeFailed
 		md.ErrorCode = strPtr(string(result.ErrorCode))
+		md.Environment = strPtr(string(conn.Environment))
 	}
 
 	exec.Status = status
 	exec.ErrorCode = md.ErrorCode
-	finished := now
+	// finished_at 在 adapter 工作完成后采样，避免早于 started_at（Codex P1）。
+	finished := p.clock()
 	exec.FinishedAt = &finished
-	if dur := now.Sub(exec.StartedAt); dur > 0 {
+	if dur := finished.Sub(exec.StartedAt); dur > 0 {
 		d := int(dur.Milliseconds())
 		md.DurationMs = &d
 		exec.DurationMs = &d

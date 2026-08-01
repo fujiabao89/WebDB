@@ -140,7 +140,12 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 }
 
 // Test 测试连接连通性。成功写入 E7，失败写入 E8。
+// 与 Create/Update 一致，先校验调用者为工作区 owner/admin，
+// 避免非成员触发凭证解析与外发数据库 ping（Codex P1）。
 func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error {
+	if err := s.requireManager(ctx, p); err != nil {
+		return err
+	}
 	conn, err := s.conns.ConnectionByID(ctx, p.WorkspaceID, connID)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrConnectionNotFound, err)
