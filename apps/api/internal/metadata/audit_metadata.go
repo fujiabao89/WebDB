@@ -24,7 +24,7 @@ const (
 )
 
 // AuditMetadata 是审计 metadata 的强类型表示。
-// 仅包含 proposal §8.2 批准的 16 字段 + credential.rotate 事件专用的
+// 仅包含 proposal §8.2 批准的 13 字段 + credential.rotate 事件专用的
 // expected_version/actual_version（proposal §8.1 E5 矩阵）。
 // 禁止任意 map[string]any 或自由文本直接进入审计仓储；
 // 所有字段经 Marshal → ValidateAuditEventMetadata 精确校验后持久化。
@@ -42,9 +42,6 @@ type AuditMetadata struct {
 	ReasonCode      *string `json:"reason_code,omitempty"`      // 稳定拒绝原因码
 	Engine          *string `json:"engine,omitempty"`           // postgresql | mysql
 	Environment     *string `json:"environment,omitempty"`      // development | staging | production
-	Summary         *string `json:"summary,omitempty"`          // P0-04 兼容，<=255
-	RowsAffected    *int    `json:"rows_affected,omitempty"`    // P0-04 兼容
-	Cached          *bool   `json:"cached,omitempty"`           // P0-04 兼容
 	ExpectedVersion *int    `json:"expected_version,omitempty"` // credential.rotate 专用
 	ActualVersion   *int    `json:"actual_version,omitempty"`   // credential.rotate 专用
 }
@@ -97,14 +94,11 @@ var auditFieldSpecs = map[string]auditFieldSpec{
 	"kek_version":      {kind: kindInt, validate: validatePositiveIntField},
 	"statement_hash":   {kind: kindString, validate: validateHex64Field},
 	"row_count":        {kind: kindInt, validate: validateNonNegIntField},
-	"rows_affected":    {kind: kindInt, validate: validateNonNegIntField},
 	"duration_ms":      {kind: kindInt, validate: validateNonNegIntField},
 	"error_code":       {kind: kindString, validate: validateStableErrorCodeField},
 	"reason_code":      {kind: kindString, validate: validateStableReasonCodeField},
 	"engine":           {kind: kindString, validate: validateEngineField},
 	"environment":      {kind: kindString, validate: validateEnvironmentField},
-	"summary":          {kind: kindString, validate: validateSummaryField},
-	"cached":           {kind: kindBool},
 }
 
 // ValidateAuditEventMetadata 对审计 metadata 做事件级精确校验（fail-closed）。
@@ -397,14 +391,6 @@ func validateEnvironmentField(name string, v any) error {
 	return nil
 }
 
-func validateSummaryField(name string, v any) error {
-	s, _ := v.(string)
-	if len(s) > 255 {
-		return fmt.Errorf("audit metadata: field %q exceeds 255 bytes", name)
-	}
-	return nil
-}
-
 // isValidUUID 校验标准 RFC 4122 UUID 字符串格式（8-4-4-4-12 hex）。
 func isValidUUID(s string) bool {
 	if len(s) != 36 {
@@ -428,15 +414,4 @@ func isValidUUID(s string) bool {
 	return true
 }
 
-// isValidReasonCode 校验稳定拒绝原因码（P0-04 枚举 + 连接策略拒绝码）。
-// policy_not_configured/read_not_allowed 由执行管线在连接策略拒绝时作为 reason_code 发出（Codex P1）。
-func isValidReasonCode(s string) bool {
-	switch s {
-	case "allowed", "sql_parse_error", "multiple_statements", "statement_not_allowed",
-		"unsupported_statement", "empty_sql", "executable_comment_detected",
-		"policy_not_configured", "read_not_allowed":
-		return true
-	default:
-		return false
-	}
-}
+// isValidReasonCode 在 postgres_repo.go 定义，复用 stableReasonCodes 白名单（CodeRabbit #27）。

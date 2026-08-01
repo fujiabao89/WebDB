@@ -882,7 +882,10 @@ func TestAudit_UpdateRejected(t *testing.T) {
 		Metadata: json.RawMessage(`{"environment":"development"}`),
 		TraceID:  "trace-update-001", OccurredAt: time.Now().UTC(),
 	}
-	store.AppendAudit(ctx, event)
+	// 断言追加成功，避免 metadata 不符合契约时以 append-only 断言失败掩盖真实写入错误（CodeRabbit #24）。
+	if err := store.AppendAudit(ctx, event); err != nil {
+		t.Fatalf("追加审计失败: %v", err)
+	}
 
 	_, err := db.ExecContext(ctx, `UPDATE audit_events SET action = 'modified' WHERE id = $1`, event.ID)
 	if err == nil {
@@ -903,7 +906,10 @@ func TestAudit_DeleteRejected(t *testing.T) {
 		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
 		TraceID:  "trace-delete-001", OccurredAt: time.Now().UTC(),
 	}
-	store.AppendAudit(ctx, event)
+	// 断言追加成功，避免以 append-only 断言失败掩盖真实写入错误（CodeRabbit #24）。
+	if err := store.AppendAudit(ctx, event); err != nil {
+		t.Fatalf("追加审计失败: %v", err)
+	}
 
 	_, err := db.ExecContext(ctx, `DELETE FROM audit_events WHERE id = $1`, event.ID)
 	if err == nil {
@@ -1060,7 +1066,9 @@ func TestAudit_CrossWorkspaceExecution_Rejected(t *testing.T) {
 }
 
 func TestExecution_CrossWorkspaceConnection_Rejected(t *testing.T) {
-	_, store, _, ws, _, _, _, cleanup := setupFull(t)
+	// 使用 setupFull 返回的有效工作区成员作为 ActorID（CodeRabbit #25）：
+	// 否则 executions.actor_id 复合外键会先因无效 actor 拒绝，掩盖跨工作区 ConnectionID 失败。
+	_, store, u, ws, _, _, _, cleanup := setupFull(t)
 	defer cleanup()
 	ctx := context.Background()
 
@@ -1068,7 +1076,7 @@ func TestExecution_CrossWorkspaceConnection_Rejected(t *testing.T) {
 
 	e := &Execution{
 		WorkspaceID: ws.ID, ConnectionID: conn2.ID,
-		ActorID: uuid.New(), StatementHash: "sha256:abc",
+		ActorID: u.ID, StatementHash: "sha256:abc",
 		Status: ExecStatusPending, TraceID: "trace-cross-conn-exe",
 	}
 	err := store.CreateExecution(ctx, e)

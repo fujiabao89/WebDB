@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
-	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -580,91 +578,6 @@ func (s *PGStore) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execut
 
 // ---- AuditEventStore ------------------------------------------------------
 
-// sanitizeAuditMetadata 按允许列表过滤审计元数据，移除 SQL 正文、凭证、KEK、
-// 目标库结果、原始错误等敏感字段。ADR-013: 审计 metadata 必须是脱敏对象。
-func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
-	if len(raw) == 0 {
-		return json.RawMessage("{}")
-	}
-
-	// 拒绝 JSON null 和非对象类型（交由 DB CHECK 约束拒绝）
-	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil || m == nil {
-		return raw
-	}
-
-	// P0 允许列表（WEB-13 扩展字段）
-	allowed := map[string]bool{
-		"summary":        true,
-		"rows_affected":  true,
-		"row_count":      true,
-		"cached":         true,
-		"statement_hash": true,
-		"duration_ms":    true,
-		"error_code":     true,
-		"reason_code":    true,
-		"engine":         true,
-		"environment":    true,
-	}
-
-	filtered := make(map[string]any, len(m))
-	for k, v := range m {
-		if !allowed[k] {
-			continue
-		}
-		switch val := v.(type) {
-		case string:
-			switch k {
-			case "statement_hash":
-				if isHex64(val) {
-					filtered[k] = val
-				}
-			case "error_code", "reason_code":
-				if isValidStableCode(val) {
-					filtered[k] = val
-				}
-			case "engine":
-				if val == "postgresql" || val == "mysql" {
-					filtered[k] = val
-				}
-			case "environment":
-				if val == "development" || val == "staging" || val == "production" {
-					filtered[k] = val
-				}
-			default:
-				if len(val) > 255 {
-					val = val[:255]
-				}
-				if looksLikeSQL(val) || looksLikeCredential(val) {
-					filtered[k] = "[redacted: sensitive content]"
-				} else {
-					filtered[k] = val
-				}
-			}
-		case float64:
-			// [Qodo #4] 仅数字类型字段接受 float64
-			if k == "duration_ms" || k == "row_count" || k == "rows_affected" {
-				if val >= 0 && val == float64(int64(val)) && val <= 1<<31-1 {
-					filtered[k] = val
-				}
-			}
-			// 其他 key 不接受 float64（静默丢弃）
-		case bool:
-			// [Qodo #4] 仅 cached 接受 bool
-			if k == "cached" {
-				filtered[k] = val
-			}
-			// 其他 key 不接受 bool（静默丢弃）
-		}
-	}
-
-	result, err := json.Marshal(filtered)
-	if err != nil {
-		return json.RawMessage("{}")
-	}
-	return json.RawMessage(result)
-}
-
 // AppendAudit 追加一条审计事件。数据库触发器阻止 UPDATE/DELETE/TRUNCATE。
 // fail-closed: metadata 必须是事件类型专用 schema 的强类型数据（ADR-017 / P0-05 §8）。
 // 畸形 JSON、未知字段、错误类型、超长值或未知事件一律拒绝，不做启发式过滤。
@@ -767,30 +680,6 @@ var (
 	_ AuditEventStore         = (*PGStore)(nil)
 )
 
-// sqlKeywordRE 匹配 SQL DML/DDL 关键词（忽略大小写，后跟空白、注释或换行）
-var sqlKeywordRE = regexp.MustCompile(`(?i)\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|EXEC(UTE)?)\b`)
-
-// looksLikeSQL 检测字符串是否包含 SQL 语句特征（P0 审计脱敏辅助）。
-func looksLikeSQL(s string) bool {
-	return sqlKeywordRE.MatchString(s)
-}
-
-// credPatternRE 匹配 DSN URL 凭证和 Bearer token（P0 审计脱敏辅助）
-var credPatternRE = regexp.MustCompile(`(?i)(://[^@\s]+@|bearer\s+[\w-]+)`)
-
-// looksLikeCredential 检测字符串是否包含凭证模式（P0 审计脱敏辅助）。
-func looksLikeCredential(s string) bool {
-	if credPatternRE.MatchString(s) {
-		return true
-	}
-	for _, pattern := range []string{"password", "secret", "token", "key=", "pass="} {
-		if strings.Contains(strings.ToLower(s), pattern) {
-			return true
-		}
-	}
-	return false
-}
-
 // isHex64 验证字符串是否为 64 字符小写 hex（SHA-256 摘要格式）。
 func isHex64(s string) bool {
 	if len(s) != 64 {
@@ -804,13 +693,20 @@ func isHex64(s string) bool {
 	return true
 }
 
-// stableErrorCodes 精确白名单验证稳定错误码（P0-04 + P0-05 §8.4 + execution/adapter 扩展）。
-var stableErrorCodes = map[string]bool{
+// stableReasonCodes 稳定拒绝原因码（P0-04 SQL 分类枚举 + 连接策略拒绝码）。
+// 与 stableErrorCodes 分离：reason_code 与 error_code 使用不同枚举边界（CodeRabbit #27）。
+var stableReasonCodes = map[string]bool{
 	"allowed": true, "sql_parse_error": true, "multiple_statements": true,
 	"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
-	"executable_comment_detected": true, "invalid_scope": true, "unauthorized": true,
-	"forbidden": true, "connection_not_found": true, "policy_not_configured": true,
-	"read_not_allowed": true, "query_timeout": true, "query_cancelled": true,
+	"executable_comment_detected": true, "policy_not_configured": true, "read_not_allowed": true,
+}
+
+// stableErrorCodes 精确白名单验证稳定错误码（P0-04 + P0-05 §8.4 + execution/adapter 扩展）。
+// 不含 reason_code 枚举，避免 "allowed" 等拒绝原因被当作 error_code 校验通过（CodeRabbit #27）。
+var stableErrorCodes = map[string]bool{
+	"invalid_scope": true, "unauthorized": true,
+	"forbidden": true, "connection_not_found": true,
+	"query_timeout": true, "query_cancelled": true,
 	"rate_limited": true, "connection_busy": true, "result_too_large": true,
 	"database_error": true, "audit_failed": true, "internal_error": true,
 	"unsupported_engine": true, "invalid_page_token": true,
@@ -829,4 +725,9 @@ var stableErrorCodes = map[string]bool{
 // isValidStableCode 精确白名单验证稳定错误码 [CR #2]。
 func isValidStableCode(s string) bool {
 	return stableErrorCodes[s]
+}
+
+// isValidReasonCode 校验稳定拒绝原因码（复用 stableReasonCodes，CodeRabbit #27）。
+func isValidReasonCode(s string) bool {
+	return stableReasonCodes[s]
 }

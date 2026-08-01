@@ -51,17 +51,24 @@ func (t *pgMetadataTx) CreateExecution(ctx context.Context, e *Execution) error 
 	if st == "" {
 		st = string(ExecStatusPending)
 	}
+	// ADR-010: result_ref 非空且无过期时间时，默认 7 天后过期。
+	// 与 PGStore.CreateExecution 保持一致，回写 e.ResultExpiresAt（CodeRabbit #23）。
 	expiry := e.ResultExpiresAt
 	if e.ResultRef != nil && *e.ResultRef != "" && expiry == nil {
 		tp := time.Now().UTC().Add(7 * 24 * time.Hour)
 		expiry = &tp
 	}
-	return t.tx.QueryRowContext(ctx, q,
+	e.ResultExpiresAt = expiry
+	if err := t.tx.QueryRowContext(ctx, q,
 		e.WorkspaceID, e.ConnectionID, e.ActorID,
 		e.DocumentID, e.QueryVersionID,
 		e.StatementHash, st, e.TraceID,
 		e.ResultRef, expiry,
-	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt)
+	).Scan(&e.ID, &e.StartedAt, &e.CreatedAt); err != nil {
+		return err
+	}
+	e.Status = ExecutionStatus(st)
+	return nil
 }
 
 // UpdateExecution 在事务中更新 execution 状态。

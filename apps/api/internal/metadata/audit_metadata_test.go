@@ -76,7 +76,7 @@ func TestAuditMetadataValidate_TypeErrors(t *testing.T) {
 		{name: "secret_version as string", action: ActionCredentialCreate, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","secret_version":"1","envelope_suite":"AES256GCM-v1","kek_version":1}`},
 		{name: "duration_ms as string", action: ActionConnectionTest, raw: `{"engine":"postgresql","environment":"development","duration_ms":"42"}`},
 		{name: "error_code as number", action: ActionCredentialLookup, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","error_code":1}`},
-		{name: "cached as string", action: ActionSQLExecute, raw: `{"statement_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","cached":"true"}`},
+		{name: "engine as bool", action: ActionConnectionCreate, raw: `{"engine":true,"environment":"development"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,14 +118,13 @@ func TestAuditMetadataValidate_NestedObject(t *testing.T) {
 }
 
 // TestAuditMetadataValidate_TooLong 验证超长值 fail-closed 拒绝。
+// statement_hash 为固定 64 字符 hex；超过 64 字符必须被格式校验拒绝
+// （summary 等自由长度字段已随强类型 metadata 移除，CodeRabbit #22）。
 func TestAuditMetadataValidate_TooLong(t *testing.T) {
-	long := make([]byte, 300)
-	for i := range long {
-		long[i] = 'x'
-	}
-	raw, _ := json.Marshal(map[string]any{"summary": string(long)})
+	hash := hex64("sha256placeholder00000000000000000000000000000000")[:64]
+	raw := json.RawMessage(`{"statement_hash":"` + hash + `a","error_code":"database_error","engine":"postgresql"}`)
 	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
-		t.Fatal("overlong summary should be rejected")
+		t.Fatal("overlong statement_hash should be rejected")
 	}
 }
 
@@ -154,24 +153,36 @@ func TestAuditMetadataValidate_InvalidFormats(t *testing.T) {
 	}
 }
 
-// TestAuditMetadataValidate_Canary 验证 SQL 正文、密码、KEK、DEK、连接串、结果和原始错误 cannot 进入审计 metadata。
+// TestAuditMetadataValidate_Canary 验证 SQL 正文、密码、KEK、DEK、连接串、结果和原始错误
+// cannot 进入审计 metadata：敏感串注入到该 action 允许的字段时，必须由格式/枚举校验拒绝
+// （而非仅由未知字段检查拒绝）（CodeRabbit #21）。
 func TestAuditMetadataValidate_Canary(t *testing.T) {
+	uuidStr := "123e4567-e89b-42d3-a456-426614174000"
+	hash := hex64("sha256placeholder00000000000000000000000000000000")[:64]
+
 	canaries := []struct {
-		action string
-		key    string
-		value  string
+		action  string
+		outcome AuditOutcome
+		raw     string
 	}{
-		{ActionSQLExecute, "summary", "SELECT * FROM users WHERE password = 'hunter2'"},
-		{ActionCredentialCreate, "summary", "password=sup3rsecret"},
-		{ActionConnectionCreate, "summary", "postgres://user:pass@host:5432/db"},
-		{ActionSQLExecute, "summary", "pq: password authentication failed"},
-		{ActionCredentialCreate, "summary", "kek=WnVqLWNvbmZpZzEyMzQ1Ng=="},
-		{ActionCredentialCreate, "summary", "wrap_dek=aGVsbG93b3JsZDEyMzQ1Ng=="},
+		// E9 denied：statement_hash 放 SQL 正文 → 非 64 hex 拒绝
+		{ActionSQLExecute, OutcomeDenied, `{"statement_hash":"SELECT * FROM users WHERE password = 'hunter2'","reason_code":"statement_not_allowed","engine":"postgresql"}`},
+		// E9 denied：reason_code 放密码 → 非枚举拒绝
+		{ActionSQLExecute, OutcomeDenied, `{"statement_hash":"` + hash + `","reason_code":"password=sup3rsecret","engine":"postgresql"}`},
+		// E3 create：secret_ref 放连接串 → 非 UUID 拒绝
+		{ActionCredentialCreate, OutcomeSucceeded, `{"secret_ref":"postgres://user:pass@host:5432/db","secret_version":1,"envelope_suite":"AES256GCM-v1","kek_version":1}`},
+		// E3 create：envelope_suite 放 KEK 明文 → 非枚举拒绝
+		{ActionCredentialCreate, OutcomeSucceeded, `{"secret_ref":"` + uuidStr + `","secret_version":1,"envelope_suite":"kek=WnVqLWNvbmZpZzEyMzQ1Ng==","kek_version":1}`},
+		// E15 decrypt：error_code 放原始 DB 错误 → 非稳定错误码拒绝
+		{ActionCredentialDecrypt, OutcomeFailed, `{"secret_ref":"` + uuidStr + `","secret_version":1,"error_code":"pq: password authentication failed"}`},
+		// E1 create：engine 放密码 → 非枚举拒绝
+		{ActionConnectionCreate, OutcomeSucceeded, `{"engine":"password=sup3rsecret","environment":"development"}`},
+		// 未知字段仍必须被拒绝（fail-closed）
+		{ActionSQLExecute, OutcomeDenied, `{"statement_hash":"` + hash + `","reason_code":"statement_not_allowed","engine":"postgresql","summary":"SELECT * FROM users"}`},
 	}
 	for _, c := range canaries {
-		raw, _ := json.Marshal(map[string]any{c.key: c.value})
-		if err := ValidateAuditEventMetadata(c.action, OutcomeFailed, raw); err == nil {
-			t.Fatalf("canary %q should be rejected for action %s", c.value, c.action)
+		if err := ValidateAuditEventMetadata(c.action, c.outcome, json.RawMessage(c.raw)); err == nil {
+			t.Fatalf("canary should be rejected for action %s: %s", c.action, c.raw)
 		}
 	}
 }
