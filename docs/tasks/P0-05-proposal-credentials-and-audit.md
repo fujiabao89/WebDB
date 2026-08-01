@@ -182,7 +182,7 @@ P0 不实现 TLS 客户端证书、SSH 密钥或 OAuth token。这些是 P1+ 的
 | 数据 nonce 长度 | **96 bits (12 bytes)** | GCM 标准 nonce 大小 |
 | Wrap nonce 长度 | **96 bits (12 bytes)** | 用于 DEK wrapping 的 nonce |
 | Nonce 生成 | `crypto/rand.Read` | CSPRNG |
-| AAD 编码 | **Canonical JSON**（见 §4.4） | 键排序、无空格 |
+| AAD 编码 | **版本化确定性二进制编码**（见 §4.4） | 48 bytes，大端序 |
 | KDF | **无** | KEK 已是高熵 256-bit 密钥，不需要密码型 KDF |
 
 ### 4.3 随机源失败行为
@@ -454,13 +454,12 @@ KEK 不得出现在：
 10. COMMIT
 11. 写入审计事件: credential.rotate.success
     → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
-       轮换幂等性：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
+       轮换冲突检测：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
        服务端在步骤 4 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
-       若 expected_version 已落后（即已有其他轮换成功），返回现有最新版本信息，
-       写入审计事件 credential.rotate（outcome=succeeded，metadata 含 already_rotated=true、
-       current_version），不执行插入。
-       版本匹配时才继续计算新版本并插入。这样避免依赖唯一约束作为幂等机制，
-       也防止重试产生误报的版本冲突错误
+       若 expected_version 已落后（即已有其他轮换成功），当前请求的 payload 未保存，
+       ROLLBACK 并返回 version_conflict（outcome=failed），metadata 含
+       expected_version 和 actual_version。调用方须重新获取最新版本后重试。
+       版本匹配时才继续计算新版本并插入。expected_version + 唯一约束双重保护。
 ```
 
 **轮换失败行为**：

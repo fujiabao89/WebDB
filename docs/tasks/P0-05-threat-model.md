@@ -124,7 +124,7 @@ DEK 流:
 | T5 | 密文替换（跨workspace） | 攻击者将 envelope A 的密文复制到 workspace B | 可能解密为错误凭证明文 | AAD 绑定 `workspace_id`；GCM 认证失败 | ENC-10 |
 | T6 | 密文替换（跨secret_ref） | 攻击者在同一 workspace 内替换 | 连接获得错误凭证 | AAD 绑定 `secret_ref`；GCM 认证失败 | ENC-11 |
 | T7 | 密文替换（跨版本） | 攻击者用旧版本密文替换新版本 | 回退到旧凭证 | AAD 绑定 `secret_version`；GCM 认证失败 | ENC-12 |
-| T8 | AAD 混淆/伪造 | AAD 构造错误或字段缺失 | GCM 认证失败或绕过 | Canonical JSON 编码；AAD 字段验证 | ENC-03, ENC-04, ENC-05 |
+| T8 | AAD 混淆/伪造 | AAD 构造错误或字段缺失 | GCM 认证失败或绕过 | 版本化确定性二进制编码（48 bytes）；AAD 字段验证 | ENC-03, ENC-04, ENC-05 |
 | T9 | Ciphertext 篡改 | 数据库中密文被修改 | 解密失败或解密为错误数据 | GCM 认证标签（16 bytes AEAD tag） | ENC-06 |
 | T10 | Nonce 篡改 | data_nonce 或 wrap_nonce 被修改 | 解密失败 | GCM 认证失败；与密文一起认证 | ENC-07, ENC-09 |
 | T11 | Wrapped DEK 篡改 | wrapped_dek 被修改 | 无法恢复 DEK | GCM 认证失败 | ENC-08 |
