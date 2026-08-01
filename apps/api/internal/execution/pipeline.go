@@ -21,6 +21,7 @@ import (
 type Pipeline struct {
 	store       ConnectionReader
 	policyStore ConnectionPolicyReader
+	members     WorkspaceMemberReader
 
 	resolver  credentials.CredentialResolver
 	adapter   AdapterClient
@@ -30,6 +31,11 @@ type Pipeline struct {
 // ConnectionReader 仅暴露管线所需的工作区绑定连接读取能力。
 type ConnectionReader interface {
 	ConnectionByID(ctx context.Context, wsID, id uuid.UUID) (*metadata.Connection, error)
+}
+
+// WorkspaceMemberReader 仅暴露管线所需的工作区成员资格检查能力。
+type WorkspaceMemberReader interface {
+	MemberByWorkspaceAndUser(ctx context.Context, wsID, userID uuid.UUID) (*metadata.WorkspaceMember, error)
 }
 
 // ConnectionPolicyReader 仅暴露管线所需的连接策略读取能力。
@@ -68,6 +74,7 @@ func NewAdapterClient(manager *adapter.AdapterManager) AdapterClient {
 type PipelineConfig struct {
 	Store       ConnectionReader
 	PolicyStore ConnectionPolicyReader
+	Members     WorkspaceMemberReader
 	Resolver    credentials.CredentialResolver
 	Adapter     AdapterClient
 	MySQLMode   sqlpolicy.MySQLLexerMode
@@ -78,6 +85,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 	return &Pipeline{
 		store:       cfg.Store,
 		policyStore: cfg.PolicyStore,
+		members:     cfg.Members,
 		resolver:    cfg.Resolver,
 		adapter:     cfg.Adapter,
 		mysqlMode:   cfg.MySQLMode,
@@ -110,6 +118,19 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	if p == nil || p.store == nil || p.policyStore == nil || p.resolver == nil || p.adapter == nil {
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// 阶段 A: 成员资格与工作区权限 — 未激活或非成员拒绝。
+	if p.members != nil {
+		member, err := p.members.MemberByWorkspaceAndUser(ctx, req.Principal.WorkspaceID, req.Principal.UserID)
+		if err != nil {
+			result.ErrorCode = ErrForbidden
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		if member == nil {
+			result.ErrorCode = ErrForbidden
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
 	}
 
 	// 阶段 B: 连接元数据（工作区绑定），确定服务端权威 Engine

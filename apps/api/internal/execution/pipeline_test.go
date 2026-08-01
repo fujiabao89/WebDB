@@ -57,6 +57,17 @@ func (f *fakeResolver) ResolveCredential(context.Context, uuid.UUID, uuid.UUID, 
 	return f.payload, f.err
 }
 
+type fakeMemberReader struct {
+	member *metadata.WorkspaceMember
+	err    error
+	calls  int
+}
+
+func (f *fakeMemberReader) MemberByWorkspaceAndUser(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
+	f.calls++
+	return f.member, f.err
+}
+
 type fakeAdapterClient struct {
 	handle  *fakeAdapterHandle
 	err     error
@@ -96,12 +107,14 @@ func boolPtr(v bool) *bool { return &v }
 func testPipeline(
 	connReader ConnectionReader,
 	policyReader ConnectionPolicyReader,
+	members WorkspaceMemberReader,
 	resolver credentials.CredentialResolver,
 	adapterClient AdapterClient,
 ) *Pipeline {
 	return NewPipeline(PipelineConfig{
 		Store:       connReader,
 		PolicyStore: policyReader,
+		Members:     members,
 		Resolver:    resolver,
 		Adapter:     adapterClient,
 	})
@@ -151,12 +164,21 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 		policy            *metadata.ConnectionPolicy
 		policySet         bool // true: 使用 tt.policy（含 nil）；false: 使用 defaultPolicy
 		policyErr         error
+		memberErr         error
 		resolverErr       error
 		adapterErr        error
 		wantCode          StableErrorCode
 		wantResolverCalls int
 		wantAdapterCalls  int
 	}{
+		{
+			name:              "non workspace member",
+			sql:               "SELECT 1",
+			memberErr:         sql.ErrNoRows,
+			wantCode:          ErrForbidden,
+			wantResolverCalls: 0,
+			wantAdapterCalls:  0,
+		},
 		{
 			name:              "cross workspace connection",
 			sql:               "SELECT 1",
@@ -234,7 +256,11 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 			}
 			store := &fakeConnectionReader{connections: []*metadata.Connection{conn}, err: tt.connErr}
 			policies := &fakePolicyReader{policy: policy, err: tt.policyErr}
-			pipeline := testPipeline(store, policies, resolver, client)
+			members := &fakeMemberReader{
+				member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID},
+				err:    tt.memberErr,
+			}
+			pipeline := testPipeline(store, policies, members, resolver, client)
 
 			result, err := pipeline.Execute(context.Background(), ExecuteRequest{
 				Principal:    principal,
@@ -266,7 +292,7 @@ func TestPipelineUsesPolicyBoundSinglePageAndPersistentConfigRevision(t *testing
 	connV2.Host = "db2.example.invalid"
 	connV2.UpdatedAt = connV1.UpdatedAt.Add(time.Microsecond)
 	store := &fakeConnectionReader{connections: []*metadata.Connection{connV1, &connV2}}
-	pipeline := testPipeline(store, &fakePolicyReader{policy: policy}, resolver, client)
+	pipeline := testPipeline(store, &fakePolicyReader{policy: policy}, &fakeMemberReader{member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID}}, resolver, client)
 	req := ExecuteRequest{
 		Principal:    principal,
 		ConnectionID: connV1.ID,
