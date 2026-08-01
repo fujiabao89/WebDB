@@ -222,5 +222,6 @@ DEK 流:
 | 质量门禁 | QA-01–QA-08 | T28（安全告警失败）、T29（备份泄漏）、T30（panic/取消/超时）、T31（随机源失败） |
 
 T19（审计 metadata 含原始错误）由 P0-04 的 AUDIT-11 覆盖（`docs/tasks/P0-04-proposal-contract-and-parser.md` §9.5）。
-T28（安全告警自身失败）、T29（数据库备份泄漏）需在 WEB-23 中新增针对性测试（建议 ID: AUDIT-05 告警通道故障注入、AUDIT-06 备份不含 KEK 验证），当前矩阵中尚无对应测试 ID。
-T31（随机源失败）需在 WEB-22 中新增针对性测试（建议 ID: ENC-19 mock crypto/rand 故障注入），当前 KEK-01–KEK-08 仅覆盖环境变量验证。
+T28（安全告警自身失败）由 WEB-23 的审计失败注入测试覆盖（告警通道独立于审计表，审计失败仍触发 `$SECURITY_ALERT` 且不递归写回；`execution/audited_pipeline_test.go`）。
+T29（数据库备份泄漏）由 WEB-22/WEB-23 的 canary 敏感信息扫描覆盖（`credentials/sensitive_test.go`、`execution/sensitive_audit_test.go`、`metadata/audit_metadata_test.go`），KEK 只存在于环境变量，不进入代码/镜像/数据库/测试夹具。
+T31（随机源失败）由 WEB-22 覆盖（`crypto/rand` fail-closed，无弱随机源回退）。

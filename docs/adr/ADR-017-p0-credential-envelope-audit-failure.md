@@ -83,6 +83,17 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 - 审计事件至少保留 90 天（从 `occurred_at` 起算），P0 阶段不实施自动删除（D12 已批准）
 - 精确清理机制和归档策略另建独立任务
 
+## 实施与验证状态（WEB-23，2026-08-01）
+
+WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策略：
+
+- **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 proposal §8.2 批准的字段（16 字段 + E5 专用 expected_version/actual_version），事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
+- **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。
+- **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为 completed；禁止自动重试。
+- **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
+- **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
+- **验证**：单元测试、metadata/adapter 集成测试、fuzz、vet、Windows/Linux 构建通过；`go test -race` 由 GitHub Actions 覆盖。
+
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景

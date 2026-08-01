@@ -21,10 +21,17 @@
 
 | 验收项 | 证据 |
 | --- | --- |
-| API、浏览器响应、数据库、日志和审计正文均不含明文密码/KEK | 端到端与日志扫描测试 |
-| 每次关键操作记录 actor、工作区、连接、动作、结果摘要、时间和 execution/trace ID | 审计集成测试 |
-| 审计普通业务路径不能更新/删除；敏感值仅记录脱敏摘要 | 权限与数据测试 |
-| 加密/解密和审计写入失败显式失败并告警，不静默降级 | 故障注入测试 |
+| API、浏览器响应、数据库、日志和审计正文均不含明文密码/KEK | canary 敏感信息扫描（`execution/sensitive_audit_test.go`、`credentials/sensitive_test.go`、`metadata/audit_metadata_test.go`） |
+| 每次关键操作记录 actor、工作区、连接、动作、结果摘要、时间和 execution/trace ID | 审计集成测试（E1-E16 事件 + 关联正确性） |
+| 审计普通业务路径不能更新/删除；敏感值仅记录脱敏摘要 | DB 拒绝 UPDATE/DELETE/TRUNCATE 集成测试；强类型 metadata fail-closed 校验 |
+| 加密/解密和审计写入失败显式失败并告警，不静默降级 | 故障注入测试（AUDIT-01~04 + `$SECURITY_ALERT`） |
+
+## 实施状态（WEB-23，2026-08-01）
+
+- E1-E16 追加式审计已接入连接/凭证/SQL 执行生命周期（`metadata.AuditMetadata` 强类型 + `AppendAudit` fail-closed）。
+- execution 审计感知管线（`execution.Pipeline`）实现执行前 fail-closed、执行后 `audit_failed` 且 execution 保持终态。
+- `$SECURITY_ALERT` 独立安全告警通道覆盖凭证解密失败、未知 KEK 版本、审计写入失败。
+- 单元测试、PostgreSQL metadata/adapter 集成测试、fuzz、vet、Windows/Linux 构建通过；race 由 GitHub Actions 覆盖。
 
 ## Owner Gate 状态（WEB-21）
 

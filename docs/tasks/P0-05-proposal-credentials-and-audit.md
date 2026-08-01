@@ -65,16 +65,16 @@ type ConnectConfig struct {
 
 凭证解密发生在阶段 D 之前、阶段 C 之后——即在授权通过、SQL 策略允许后，才解析凭证并传给 Adapter。
 
-### 1.4 现有审计脱敏（P0-04，已实现）
+### 1.4 审计脱敏（WEB-23 已实现，替代 P0-04 启发式）
 
-`sanitizeAuditMetadata()` 当前允许列表：`summary`、`rows_affected`、`row_count`、`cached`。启发式检测 `looksLikeSQL()` 和 `looksLikeCredential()` 仍存在。**P0-04 提案 §8.5 计划的扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）和基线收紧（移除 `summary`/启发式函数）当前尚未实现**，待 P0-04 后续迭代完成。
+WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（16 字段允许列表 + E5 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
 
-### 1.5 当前不可用的能力
+### 1.5 当前可用能力（WEB-22/WEB-23 已实现）
 
-- 凭证加解密未实现：`Connection.SecretRef`/`SecretVersion` 存在，但无法解密为 `ConnectConfig.User`/`ConnectConfig.Password`
-- KEK Provider 未实现
-- 凭证生命周期（创建/轮换/退役）未实现
-- 审计事件接入未完成（仅 execute 相关事件已定义）
+- 凭证加解密已实现：`Connection.SecretRef`/`SecretVersion` 通过信封解密为 `ConnectConfig.User`/`ConnectConfig.Password`
+- KEK Provider 已实现（环境变量注入，ADR-006）
+- 凭证生命周期（创建/轮换/退役）已实现，并接入 E3-E6 审计
+- 审计事件接入已完成：E1-E16 持久化审计 + E17 独立安全告警通道
 
 ---
 
@@ -957,3 +957,4 @@ KEK 不得出现在：
 | 日期 | 修订内容 |
 |---|---|
 | 2026-08-01 | 初版 — 提交 Owner Gate |
+| 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
