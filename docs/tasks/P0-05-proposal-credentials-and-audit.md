@@ -438,8 +438,12 @@ KEK 不得出现在：
 10. COMMIT
 11. 写入审计事件: credential.rotate.success
     → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
-       轮换的幂等性由 DB 唯一约束 (workspace_id, secret_ref, version) 保证——
-       重复调用会因版本号冲突而失败，客户端须以 secret_ref 和当前版本号为幂等键
+       轮换幂等性：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
+       服务端在步骤 3 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
+       若 expected_version 已落后（即已有其他轮换成功），返回现有最新版本信息
+      （credential.rotate.already_rotated, outcome=succeeded），不执行插入。
+       版本匹配时才继续计算新版本并插入。这样避免依赖唯一约束作为幂等机制，
+       也防止重试产生误报的版本冲突错误
 ```
 
 **轮换失败行为**：
@@ -584,9 +588,9 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | E16 | 未知 KEK 版本 | `credential.decrypt` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `secret_version`, `kek_version`, `error_code` |
 | E17 | 审计写入失败告警 | `audit.write` | `failed` | `system` | NULL | NULL | `error_code`（写入应用安全日志） |
 
-### 8.2 Metadata 允许列表（P0-05 凭证扩展字段）
+### 8.2 Metadata 允许列表（合并字段表，16 字段）
 
-下表列出 P0-05 新增的凭证相关 metadata 字段（13 个）。P0-04 当前 `sanitizeAuditMetadata()` 维护的字段（`summary`、`rows_affected`、`row_count`、`cached`、`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）继续生效，WEB-23 实现时需扩展 sanitizer 以支持以下凭证字段与现有字段共存（完整 16 字段），并添加兼容性测试：
+下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段（已在此表中），另有 3 个 P0-04 现有字段（`summary`、`rows_affected`、`cached`）仅由 P0-04 维护且不适用于凭证事件，未重复列出。WEB-23 实现时需将 sanitizer 扩展至完整 16 字段（6 新增 + 10 现有）并添加兼容性测试：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
