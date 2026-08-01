@@ -437,6 +437,48 @@ func TestAuditedExecute_Cancelled(t *testing.T) {
 	assertAuditEvent(t, auditStore.events[0], metadata.ActionSQLExecute, metadata.OutcomeCancelled, principal, conn, result.ExecutionID)
 }
 
+func TestAuditedExecute_CancelledContextStillPersists(t *testing.T) {
+	// 调用方取消 ctx 后，execution 仍必须标记 cancelled 且 E13 追加（Codex P1：
+	// recordPostExecution 使用 context.WithoutCancel 继续持久化）。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	client.handle.err = context.Canceled
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(ctx, ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrExecutionCancelled {
+		t.Fatalf("error code = %q, want execution_cancelled", result.ErrorCode)
+	}
+
+	updates := txStore.allUpdatedExecs()
+	if len(updates) == 0 {
+		t.Fatal("expected execution update despite cancelled context")
+	}
+	last := updates[len(updates)-1]
+	if last.Status != metadata.ExecStatusCancelled {
+		t.Fatalf("execution status = %s, want cancelled (must persist on cancelled ctx)", last.Status)
+	}
+	if len(auditStore.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (E13 must be appended on cancelled ctx)", len(auditStore.events))
+	}
+	assertAuditEvent(t, auditStore.events[0], metadata.ActionSQLExecute, metadata.OutcomeCancelled, principal, conn, result.ExecutionID)
+}
+
 // ---- 审计失败注入（AUDIT-01~AUDIT-04）---------------------------------------
 
 func TestAuditedExecute_PreExecutionAuditFailure(t *testing.T) {

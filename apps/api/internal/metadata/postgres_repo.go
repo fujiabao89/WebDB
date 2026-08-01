@@ -672,7 +672,7 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 	if e.OccurredAt.IsZero() {
 		return fmt.Errorf("audit: occurred_at 不得为零值")
 	}
-	if err := ValidateAuditEventMetadata(e.Action, e.Metadata); err != nil {
+	if err := ValidateAuditEventMetadata(e.Action, e.Outcome, e.Metadata); err != nil {
 		return err
 	}
 	const q = `

@@ -108,8 +108,8 @@ var auditFieldSpecs = map[string]auditFieldSpec{
 }
 
 // ValidateAuditEventMetadata 对审计 metadata 做事件级精确校验（fail-closed）。
-// 畸形 JSON、未知字段、错误类型、超长值、格式错误或敏感内容一律拒绝。
-func ValidateAuditEventMetadata(action string, raw json.RawMessage) error {
+// 畸形 JSON、未知字段、错误类型、超长值、格式错误、缺失必填字段、互斥字段或敏感内容一律拒绝。
+func ValidateAuditEventMetadata(action string, outcome AuditOutcome, raw json.RawMessage) error {
 	allowed, ok := auditActionFields[action]
 	if !ok {
 		return fmt.Errorf("audit metadata: unknown action %q", action)
@@ -117,7 +117,8 @@ func ValidateAuditEventMetadata(action string, raw json.RawMessage) error {
 
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "{}" {
-		return nil // 空 metadata 合法（audit_events.metadata 默认 '{}'）
+		// 空 metadata 走必填校验，必填字段缺失会被拒绝（Codex P1）。
+		return validateAuditRequired(action, outcome, nil)
 	}
 
 	// 1. 严格解析对象：拒绝畸形 JSON、重复键、尾随数据。
@@ -140,8 +141,73 @@ func ValidateAuditEventMetadata(action string, raw json.RawMessage) error {
 		}
 	}
 
-	// 4. 跨字段约束（new_version > old_version）。
+	// 4. 必填字段与互斥字段校验（Codex P1）。
+	if err := validateAuditRequired(action, outcome, m); err != nil {
+		return err
+	}
+
+	// 5. 跨字段约束（new_version > old_version）。
 	return validateAuditCrossField(m)
+}
+
+// auditActionRequired 定义每个事件 (action, outcome) 的必填 metadata 字段（proposal §8.1 矩阵）。
+var auditActionRequired = map[string]map[AuditOutcome][]string{
+	ActionConnectionCreate: {
+		OutcomeSucceeded: {"engine", "environment"},
+	},
+	ActionConnectionUpdate: {
+		OutcomeSucceeded: {"environment"},
+	},
+	ActionCredentialCreate: {
+		OutcomeSucceeded: {"secret_ref", "secret_version", "envelope_suite", "kek_version"},
+	},
+	ActionCredentialRotate: {
+		OutcomeSucceeded: {"secret_ref", "old_version", "new_version", "envelope_suite", "kek_version"},
+		OutcomeFailed:    {"secret_ref", "error_code"},
+	},
+	ActionCredentialRetire: {
+		OutcomeSucceeded: {"secret_ref", "secret_version"},
+	},
+	ActionConnectionTest: {
+		OutcomeSucceeded: {"engine", "environment", "duration_ms"},
+		OutcomeFailed:    {"engine", "environment", "error_code"},
+	},
+	ActionSQLExecute: {
+		OutcomeDenied:    {"statement_hash", "reason_code", "engine"},
+		OutcomeSucceeded: {"statement_hash", "engine", "environment"},
+		OutcomeFailed:    {"statement_hash", "error_code", "engine"},
+		OutcomeCancelled: {"statement_hash", "error_code", "engine"},
+	},
+	ActionCredentialLookup: {
+		OutcomeFailed: {"secret_ref", "error_code"},
+	},
+	ActionCredentialDecrypt: {
+		OutcomeFailed: {"secret_ref", "secret_version", "error_code"},
+	},
+}
+
+// validateAuditRequired 校验必填字段与互斥字段。
+func validateAuditRequired(action string, outcome AuditOutcome, m map[string]json.RawMessage) error {
+	requiredByOutcome, ok := auditActionRequired[action]
+	if !ok {
+		return fmt.Errorf("audit metadata: no required fields defined for action %q", action)
+	}
+	required, ok := requiredByOutcome[outcome]
+	if !ok {
+		return fmt.Errorf("audit metadata: no required fields defined for action %q outcome %q", action, outcome)
+	}
+	for _, f := range required {
+		if _, present := m[f]; !present {
+			return fmt.Errorf("audit metadata: field %q is required for action %s outcome %s", f, action, outcome)
+		}
+	}
+	// 互斥：succeeded/denied 不得携带 error_code（成功/拒绝用 reason_code 表达，非错误）。
+	if (outcome == OutcomeSucceeded || outcome == OutcomeDenied) && m != nil {
+		if _, present := m["error_code"]; present {
+			return fmt.Errorf("audit metadata: error_code not allowed for action %s outcome %s", action, outcome)
+		}
+	}
+	return nil
 }
 
 // parseStrictObject 使用 json.Decoder 逐 token 解析 JSON 对象，
@@ -362,11 +428,13 @@ func isValidUUID(s string) bool {
 	return true
 }
 
-// isValidReasonCode 校验稳定拒绝原因码（P0-04 枚举）。
+// isValidReasonCode 校验稳定拒绝原因码（P0-04 枚举 + 连接策略拒绝码）。
+// policy_not_configured/read_not_allowed 由执行管线在连接策略拒绝时作为 reason_code 发出（Codex P1）。
 func isValidReasonCode(s string) bool {
 	switch s {
 	case "allowed", "sql_parse_error", "multiple_statements", "statement_not_allowed",
-		"unsupported_statement", "empty_sql", "executable_comment_detected":
+		"unsupported_statement", "empty_sql", "executable_comment_detected",
+		"policy_not_configured", "read_not_allowed":
 		return true
 	default:
 		return false

@@ -12,26 +12,27 @@ func TestAuditMetadataValidate_AllowedFields(t *testing.T) {
 	_ = hash
 
 	tests := []struct {
-		name   string
-		action string
-		md     AuditMetadata
+		name    string
+		action  string
+		outcome AuditOutcome
+		md      AuditMetadata
 	}{
-		{name: "E1 connection.create", action: ActionConnectionCreate, md: AuditMetadata{Engine: strPtr("postgresql"), Environment: strPtr("development")}},
-		{name: "E2 connection.update", action: ActionConnectionUpdate, md: AuditMetadata{Environment: strPtr("production")}},
-		{name: "E3 credential.create", action: ActionCredentialCreate, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), EnvelopeSuite: strPtr("AES256GCM-v1"), KEKVersion: intPtr(2)}},
-		{name: "E4 credential.rotate succeeded", action: ActionCredentialRotate, md: AuditMetadata{SecretRef: strPtr(uuidStr), OldVersion: intPtr(1), NewVersion: intPtr(2), EnvelopeSuite: strPtr("AES256GCM-v1"), KEKVersion: intPtr(2)}},
-		{name: "E5 credential.rotate failed", action: ActionCredentialRotate, md: AuditMetadata{SecretRef: strPtr(uuidStr), ErrorCode: strPtr("version_conflict"), ExpectedVersion: intPtr(2), ActualVersion: intPtr(3)}},
-		{name: "E6 credential.retire", action: ActionCredentialRetire, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1)}},
-		{name: "E7 connection.test succeeded", action: ActionConnectionTest, md: AuditMetadata{Engine: strPtr("mysql"), Environment: strPtr("staging"), DurationMs: intPtr(42)}},
-		{name: "E8 connection.test failed", action: ActionConnectionTest, md: AuditMetadata{Engine: strPtr("postgresql"), Environment: strPtr("development"), ErrorCode: strPtr("connection_failed")}},
-		{name: "E9 sql.execute denied", action: ActionSQLExecute, md: AuditMetadata{StatementHash: strPtr(hash), ReasonCode: strPtr("statement_not_allowed"), Engine: strPtr("postgresql")}},
-		{name: "E10 sql.execute succeeded", action: ActionSQLExecute, md: AuditMetadata{StatementHash: strPtr(hash), RowCount: intPtr(10), DurationMs: intPtr(5), Engine: strPtr("mysql"), Environment: strPtr("production")}},
-		{name: "E11 sql.execute failed", action: ActionSQLExecute, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("database_error"), Engine: strPtr("postgresql"), Environment: strPtr("development")}},
-		{name: "E12 sql.execute timeout", action: ActionSQLExecute, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("query_timeout"), Engine: strPtr("postgresql")}},
-		{name: "E13 sql.execute cancelled", action: ActionSQLExecute, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("query_cancelled"), Engine: strPtr("mysql")}},
-		{name: "E14 credential.lookup failed", action: ActionCredentialLookup, md: AuditMetadata{SecretRef: strPtr(uuidStr), ErrorCode: strPtr("credential_not_found")}},
-		{name: "E15 credential.decrypt failed", action: ActionCredentialDecrypt, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), ErrorCode: strPtr("decryption_failed")}},
-		{name: "E16 unknown KEK version", action: ActionCredentialDecrypt, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), KEKVersion: intPtr(9), ErrorCode: strPtr("unknown_kek_version")}},
+		{name: "E1 connection.create", action: ActionConnectionCreate, outcome: OutcomeSucceeded, md: AuditMetadata{Engine: strPtr("postgresql"), Environment: strPtr("development")}},
+		{name: "E2 connection.update", action: ActionConnectionUpdate, outcome: OutcomeSucceeded, md: AuditMetadata{Environment: strPtr("production")}},
+		{name: "E3 credential.create", action: ActionCredentialCreate, outcome: OutcomeSucceeded, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), EnvelopeSuite: strPtr("AES256GCM-v1"), KEKVersion: intPtr(2)}},
+		{name: "E4 credential.rotate succeeded", action: ActionCredentialRotate, outcome: OutcomeSucceeded, md: AuditMetadata{SecretRef: strPtr(uuidStr), OldVersion: intPtr(1), NewVersion: intPtr(2), EnvelopeSuite: strPtr("AES256GCM-v1"), KEKVersion: intPtr(2)}},
+		{name: "E5 credential.rotate failed", action: ActionCredentialRotate, outcome: OutcomeFailed, md: AuditMetadata{SecretRef: strPtr(uuidStr), ErrorCode: strPtr("version_conflict"), ExpectedVersion: intPtr(2), ActualVersion: intPtr(3)}},
+		{name: "E6 credential.retire", action: ActionCredentialRetire, outcome: OutcomeSucceeded, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1)}},
+		{name: "E7 connection.test succeeded", action: ActionConnectionTest, outcome: OutcomeSucceeded, md: AuditMetadata{Engine: strPtr("mysql"), Environment: strPtr("staging"), DurationMs: intPtr(42)}},
+		{name: "E8 connection.test failed", action: ActionConnectionTest, outcome: OutcomeFailed, md: AuditMetadata{Engine: strPtr("postgresql"), Environment: strPtr("development"), ErrorCode: strPtr("connection_failed")}},
+		{name: "E9 sql.execute denied", action: ActionSQLExecute, outcome: OutcomeDenied, md: AuditMetadata{StatementHash: strPtr(hash), ReasonCode: strPtr("statement_not_allowed"), Engine: strPtr("postgresql")}},
+		{name: "E10 sql.execute succeeded", action: ActionSQLExecute, outcome: OutcomeSucceeded, md: AuditMetadata{StatementHash: strPtr(hash), RowCount: intPtr(10), DurationMs: intPtr(5), Engine: strPtr("mysql"), Environment: strPtr("production")}},
+		{name: "E11 sql.execute failed", action: ActionSQLExecute, outcome: OutcomeFailed, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("database_error"), Engine: strPtr("postgresql"), Environment: strPtr("development")}},
+		{name: "E12 sql.execute timeout", action: ActionSQLExecute, outcome: OutcomeFailed, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("query_timeout"), Engine: strPtr("postgresql")}},
+		{name: "E13 sql.execute cancelled", action: ActionSQLExecute, outcome: OutcomeCancelled, md: AuditMetadata{StatementHash: strPtr(hash), ErrorCode: strPtr("query_cancelled"), Engine: strPtr("mysql")}},
+		{name: "E14 credential.lookup failed", action: ActionCredentialLookup, outcome: OutcomeFailed, md: AuditMetadata{SecretRef: strPtr(uuidStr), ErrorCode: strPtr("credential_not_found")}},
+		{name: "E15 credential.decrypt failed", action: ActionCredentialDecrypt, outcome: OutcomeFailed, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), ErrorCode: strPtr("decryption_failed")}},
+		{name: "E16 unknown KEK version", action: ActionCredentialDecrypt, outcome: OutcomeFailed, md: AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), KEKVersion: intPtr(9), ErrorCode: strPtr("unknown_kek_version")}},
 	}
 
 	for _, tt := range tests {
@@ -40,7 +41,7 @@ func TestAuditMetadataValidate_AllowedFields(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Marshal: %v", err)
 			}
-			if err := ValidateAuditEventMetadata(tt.action, raw); err != nil {
+			if err := ValidateAuditEventMetadata(tt.action, tt.outcome, raw); err != nil {
 				t.Fatalf("ValidateAuditEventMetadata(%q) error = %v", tt.action, err)
 			}
 		})
@@ -50,7 +51,7 @@ func TestAuditMetadataValidate_AllowedFields(t *testing.T) {
 // TestAuditMetadataValidate_UnknownFields 验证未知字段 fail-closed 拒绝。
 func TestAuditMetadataValidate_UnknownFields(t *testing.T) {
 	raw := json.RawMessage(`{"summary":"ok","unknown_field":"x"}`)
-	if err := ValidateAuditEventMetadata(ActionSQLExecute, raw); err == nil {
+	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
 		t.Fatal("unknown field should be rejected fail-closed")
 	}
 }
@@ -59,7 +60,7 @@ func TestAuditMetadataValidate_UnknownFields(t *testing.T) {
 func TestAuditMetadataValidate_DisallowedFieldForEvent(t *testing.T) {
 	// connection.create 不允许 secret_ref
 	raw := json.RawMessage(`{"engine":"postgresql","environment":"development","secret_ref":"123e4567-e89b-42d3-a456-426614174000"}`)
-	if err := ValidateAuditEventMetadata(ActionConnectionCreate, raw); err == nil {
+	if err := ValidateAuditEventMetadata(ActionConnectionCreate, OutcomeSucceeded, raw); err == nil {
 		t.Fatal("secret_ref on connection.create should be rejected")
 	}
 }
@@ -79,7 +80,7 @@ func TestAuditMetadataValidate_TypeErrors(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := ValidateAuditEventMetadata(tt.action, json.RawMessage(tt.raw)); err == nil {
+			if err := ValidateAuditEventMetadata(tt.action, OutcomeFailed, json.RawMessage(tt.raw)); err == nil {
 				t.Fatalf("type error should be rejected: %s", tt.raw)
 			}
 		})
@@ -101,7 +102,7 @@ func TestAuditMetadataValidate_Malformed(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := ValidateAuditEventMetadata(tt.action, json.RawMessage(tt.raw)); err == nil {
+			if err := ValidateAuditEventMetadata(tt.action, OutcomeFailed, json.RawMessage(tt.raw)); err == nil {
 				t.Fatalf("malformed metadata should be rejected: %q", tt.raw)
 			}
 		})
@@ -111,7 +112,7 @@ func TestAuditMetadataValidate_Malformed(t *testing.T) {
 // TestAuditMetadataValidate_NestedObject 验证嵌套对象 fail-closed 拒绝。
 func TestAuditMetadataValidate_NestedObject(t *testing.T) {
 	raw := json.RawMessage(`{"statement_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","nested":{"a":1}}`)
-	if err := ValidateAuditEventMetadata(ActionSQLExecute, raw); err == nil {
+	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
 		t.Fatal("nested object should be rejected fail-closed")
 	}
 }
@@ -123,7 +124,7 @@ func TestAuditMetadataValidate_TooLong(t *testing.T) {
 		long[i] = 'x'
 	}
 	raw, _ := json.Marshal(map[string]any{"summary": string(long)})
-	if err := ValidateAuditEventMetadata(ActionSQLExecute, raw); err == nil {
+	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
 		t.Fatal("overlong summary should be rejected")
 	}
 }
@@ -146,7 +147,7 @@ func TestAuditMetadataValidate_InvalidFormats(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := ValidateAuditEventMetadata(tt.action, json.RawMessage(tt.raw)); err == nil {
+			if err := ValidateAuditEventMetadata(tt.action, OutcomeFailed, json.RawMessage(tt.raw)); err == nil {
 				t.Fatalf("invalid format should be rejected: %s", tt.raw)
 			}
 		})
@@ -169,16 +170,42 @@ func TestAuditMetadataValidate_Canary(t *testing.T) {
 	}
 	for _, c := range canaries {
 		raw, _ := json.Marshal(map[string]any{c.key: c.value})
-		if err := ValidateAuditEventMetadata(c.action, raw); err == nil {
+		if err := ValidateAuditEventMetadata(c.action, OutcomeFailed, raw); err == nil {
 			t.Fatalf("canary %q should be rejected for action %s", c.value, c.action)
 		}
+	}
+}
+
+// TestAuditMetadataValidate_MissingRequiredField 验证缺失必填字段与互斥字段拒绝（Codex P1）。
+func TestAuditMetadataValidate_MissingRequiredField(t *testing.T) {
+	hash := hex64("sha256placeholder00000000000000000000000000000000")[:64]
+
+	tests := []struct {
+		name    string
+		action  string
+		outcome AuditOutcome
+		raw     string
+	}{
+		{name: "E10 missing environment", action: ActionSQLExecute, outcome: OutcomeSucceeded, raw: `{"statement_hash":"` + hash + `","engine":"postgresql"}`},
+		{name: "E9 missing reason_code", action: ActionSQLExecute, outcome: OutcomeDenied, raw: `{"statement_hash":"` + hash + `","engine":"postgresql"}`},
+		{name: "E3 empty metadata", action: ActionCredentialCreate, outcome: OutcomeSucceeded, raw: `{}`},
+		{name: "E1 empty metadata", action: ActionConnectionCreate, outcome: OutcomeSucceeded, raw: `{}`},
+		{name: "succeeded with error_code (exclusive)", action: ActionSQLExecute, outcome: OutcomeSucceeded, raw: `{"statement_hash":"` + hash + `","engine":"postgresql","environment":"development","error_code":"database_error"}`},
+		{name: "denied with error_code (exclusive)", action: ActionSQLExecute, outcome: OutcomeDenied, raw: `{"statement_hash":"` + hash + `","reason_code":"statement_not_allowed","engine":"postgresql","error_code":"database_error"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := ValidateAuditEventMetadata(tt.action, tt.outcome, json.RawMessage(tt.raw)); err == nil {
+				t.Fatalf("expected rejection for: %s", tt.raw)
+			}
+		})
 	}
 }
 
 // TestAuditMetadataValidate_UnknownAction 验证未知事件类型 fail-closed 拒绝。
 func TestAuditMetadataValidate_UnknownAction(t *testing.T) {
 	raw := json.RawMessage(`{}`)
-	if err := ValidateAuditEventMetadata("connection.delete", raw); err == nil {
+	if err := ValidateAuditEventMetadata("connection.delete", OutcomeFailed, raw); err == nil {
 		t.Fatal("unknown action should be rejected")
 	}
 }

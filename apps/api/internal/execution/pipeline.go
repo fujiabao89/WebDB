@@ -238,7 +238,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
 			}
 			// 提交 execution failed + audit denied（同一事务原子持久化，ADR-017 §6）。
-			if _, err := p.commitPreExecution(mtx, result); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
 				return result, err
 			}
 		}
@@ -262,7 +262,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 				}); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrPolicyNotConfigured)
 			}
-			if _, err := p.commitPreExecution(mtx, result); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
 				return result, err
 			}
 		}
@@ -279,7 +279,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 				}); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
 			}
-			if _, err := p.commitPreExecution(mtx, result); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
 				return result, err
 			}
 		}
@@ -296,10 +296,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.CredentialResolved = false
 		result.ErrorCode = mapCredentialError(err)
 		if mtx != nil {
-			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now); err != nil {
+			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now, err); err != nil {
 				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
 			}
-			if _, err := p.commitPreExecution(mtx, result); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
 				return result, err
 			}
 		}
@@ -418,11 +418,18 @@ func (p *Pipeline) auditFailed(
 }
 
 // commitPreExecution 提交执行前的事务（execution failed + audit 原子持久化，ADR-017 §6）。
-// 提交失败按元数据库错误处理，返回 internal_error。
-func (p *Pipeline) commitPreExecution(mtx metadata.MetadataTx, result *ExecuteResult) (*ExecuteResult, error) {
+// 提交失败意味着审计持久化无法保证（DB 连接丢失/提交失败），必须按审计失败处理
+// 并触发 $SECURITY_ALERT，而非降级为 internal_error（Codex P1）。
+func (p *Pipeline) commitPreExecution(
+	ctx context.Context,
+	mtx metadata.MetadataTx,
+	result *ExecuteResult,
+	traceID string,
+	wsID uuid.UUID,
+	now time.Time,
+) (*ExecuteResult, error) {
 	if err := mtx.Commit(); err != nil {
-		result.ErrorCode = ErrInternalError
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		return p.auditFailed(ctx, result, traceID, wsID, now, ErrInternalError)
 	}
 	return result, nil
 }
@@ -479,6 +486,7 @@ func (p *Pipeline) recordCredentialFailure(
 	conn *metadata.Connection,
 	traceID string,
 	now time.Time,
+	credErr error,
 ) error {
 	code := string(result.ErrorCode)
 
@@ -507,6 +515,11 @@ func (p *Pipeline) recordCredentialFailure(
 			SecretRef:     strPtr(conn.SecretRef.String()),
 			SecretVersion: intPtr(conn.SecretVersion),
 			ErrorCode:     strPtr(code),
+		}
+		// E16: unknown_kek_version 需携带 kek_version（Codex P1）。
+		var kekErr *credentials.KEKVersionError
+		if errors.As(credErr, &kekErr) {
+			md.KEKVersion = intPtr(kekErr.Version)
 		}
 	}
 
@@ -550,6 +563,12 @@ func (p *Pipeline) recordPostExecution(
 	now time.Time,
 	statementHash string,
 ) error {
+	// 调用方取消 ctx 时，仍需用未取消的 context 持久化 execution 终态与审计（Codex P1），
+	// 否则 running execution 永不终结、E13 永不追加。
+	if ctx.Err() != nil {
+		ctx = context.WithoutCancel(ctx)
+	}
+
 	var status metadata.ExecutionStatus
 	var outcome metadata.AuditOutcome
 	md := metadata.AuditMetadata{
@@ -609,7 +628,8 @@ func (p *Pipeline) recordPostExecution(
 		return err
 	}
 
-	// 审计后置独立写入。
+	// 审计后置独立写入。occurred_at 使用 post-adapter 的 finished 时间戳，
+	// 而非执行前采样值，确保审计时间不早于实际查询（Codex P1）。
 	event, err := newAuditEvent(
 		conn.WorkspaceID,
 		metadata.ActorTypeUser,
@@ -622,7 +642,7 @@ func (p *Pipeline) recordPostExecution(
 		outcome,
 		md,
 		traceID,
-		now,
+		finished,
 	)
 	if err != nil {
 		return err

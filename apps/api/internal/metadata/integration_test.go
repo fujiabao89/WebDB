@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -749,7 +750,7 @@ func TestAudit_AppendAndQuery(t *testing.T) {
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "connection",
 		ResourceID: conn.ID.String(), Outcome: OutcomeSucceeded,
-		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development"}`),
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
 		TraceID:  "trace-audit-001", OccurredAt: time.Now().UTC(),
 	}
 	if err := store.AppendAudit(ctx, event); err != nil {
@@ -776,7 +777,9 @@ func TestAudit_UserActorWithNullActorID_Rejected(t *testing.T) {
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeUser, ActorID: nil,
 		Action: "connection.test", ResourceType: "connection", ResourceID: conn.ID.String(),
-		Outcome: OutcomeSucceeded, TraceID: "trace-actor-001", OccurredAt: time.Now().UTC(),
+		Outcome:  OutcomeSucceeded,
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
+		TraceID:  "trace-actor-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望 user actor 空 actor_id 被拒绝")
@@ -792,7 +795,9 @@ func TestAudit_SystemActorWithNonNullActorID_Rejected(t *testing.T) {
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem, ActorID: &id,
 		Action: "connection.test", ResourceType: "connection", ResourceID: conn.ID.String(),
-		Outcome: OutcomeSucceeded, TraceID: "trace-actor-002", OccurredAt: time.Now().UTC(),
+		Outcome:  OutcomeSucceeded,
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
+		TraceID:  "trace-actor-002", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望 system actor 非空 actor_id 被拒绝")
@@ -823,7 +828,9 @@ func TestAudit_WhitespaceTraceID_Rejected(t *testing.T) {
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
-		Outcome: OutcomeSucceeded, TraceID: "   ", OccurredAt: time.Now().UTC(),
+		Outcome:  OutcomeSucceeded,
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
+		TraceID:  "   ", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望空白 trace_id 被拒绝")
@@ -893,7 +900,7 @@ func TestAudit_DeleteRejected(t *testing.T) {
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "connection",
 		ResourceID: conn.ID.String(), Outcome: OutcomeSucceeded,
-		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development"}`),
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
 		TraceID:  "trace-delete-001", OccurredAt: time.Now().UTC(),
 	}
 	store.AppendAudit(ctx, event)
@@ -925,7 +932,9 @@ func TestAudit_OrphanWorkspace_Rejected(t *testing.T) {
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: uuid.New(), ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
-		Outcome: OutcomeSucceeded, TraceID: "trace-orphan-001", OccurredAt: time.Now().UTC(),
+		Outcome:  OutcomeSucceeded,
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
+		TraceID:  "trace-orphan-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望孤儿 workspace audit 被拒绝")
@@ -941,7 +950,9 @@ func TestAudit_ExecutionWithoutConnection_Rejected(t *testing.T) {
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
-		Outcome: OutcomeSucceeded, TraceID: "trace-exec-noconn-001",
+		Outcome:     OutcomeSucceeded,
+		Metadata:    json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
+		TraceID:     "trace-exec-noconn-001",
 		ExecutionID: &eid, ConnectionID: nil,
 		OccurredAt: time.Now().UTC(),
 	})
@@ -1010,6 +1021,7 @@ func TestAudit_CrossWorkspaceConnection_Rejected(t *testing.T) {
 		Action: "connection.test", ResourceType: "connection",
 		ResourceID: conn2.ID.String(), Outcome: OutcomeSucceeded,
 		ConnectionID: &conn2.ID,
+		Metadata:     json.RawMessage(`{"engine":"postgresql","environment":"development","duration_ms":5}`),
 		TraceID:      "trace-cross-conn-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -1039,7 +1051,8 @@ func TestAudit_CrossWorkspaceExecution_Rejected(t *testing.T) {
 		Action: "sql.execute", ResourceType: "execution",
 		ResourceID: e2.ID.String(), Outcome: OutcomeSucceeded,
 		ConnectionID: &conn.ID, ExecutionID: &e2.ID,
-		TraceID: "trace-cross-exec-001", OccurredAt: time.Now().UTC(),
+		Metadata: json.RawMessage(`{"statement_hash":"` + strings.Repeat("a", 64) + `","engine":"postgresql","environment":"development"}`),
+		TraceID:  "trace-cross-exec-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望引用其他工作区 execution 的审计被拒绝")

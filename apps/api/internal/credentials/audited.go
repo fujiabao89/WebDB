@@ -2,6 +2,7 @@ package credentials
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -91,6 +92,11 @@ func (m *AuditedLifecycleManager) Resolve(ctx context.Context, wsID, secretRef u
 			SecretRef:     strPtr(secretRef.String()),
 			SecretVersion: intPtr(version),
 			ErrorCode:     strPtr(string(code)),
+		}
+		// E16: unknown_kek_version 需携带 kek_version（Codex P1）。
+		var kekErr *KEKVersionError
+		if errors.As(err, &kekErr) {
+			md.KEKVersion = intPtr(kekErr.Version)
 		}
 		// 凭证解密失败/未知 KEK 版本必须触发安全告警（ADR-017 §6）。
 		if isDecryptFailureCode(code) {

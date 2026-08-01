@@ -132,6 +132,14 @@ func (*simpleKEKProvider) WrapCount(int) uint64  { return 0 }
 
 func goodKEK() KEKProvider { return &simpleKEKProvider{} }
 
+// unknownKEKProvider 模拟未知 KEK 版本（GetKEK 失败）。
+type unknownKEKProvider struct{}
+
+func (*unknownKEKProvider) ActiveKEK() (int, []byte, error) { return 1, nil, nil }
+func (*unknownKEKProvider) GetKEK(int) ([]byte, error)      { return nil, errors.New("unknown kek") }
+func (*unknownKEKProvider) ReserveWrap(int) error           { return nil }
+func (*unknownKEKProvider) WrapCount(int) uint64            { return 0 }
+
 // ---- E3 create ------------------------------------------------------------
 
 func TestAuditedCredential_CreateWritesE3(t *testing.T) {
@@ -250,6 +258,51 @@ func TestAuditedCredential_ResolveDecryptFailureWritesE15AndAlarm(t *testing.T) 
 	}
 	if alarm.events[0].Code != string(ErrDecryptionFailed) {
 		t.Fatalf("alarm code = %q, want decryption_failed", alarm.events[0].Code)
+	}
+}
+
+func TestAuditedCredential_ResolveUnknownKEKVersionWritesE16(t *testing.T) {
+	// E16 必须携带 kek_version（Codex P1）。
+	store := &fakeCredentialStore{
+		env: &metadata.CredentialEnvelope{
+			WorkspaceID:   uuid.New(),
+			SecretRef:     uuid.New(),
+			Version:       1,
+			Ciphertext:    []byte{0x01},
+			DataNonce:     make([]byte, nonceSize),
+			WrappedDEK:    []byte{0x02},
+			WrapNonce:     make([]byte, nonceSize),
+			EnvelopeSuite: SuiteAES256GCMv1,
+			KEKVersion:    9,
+		},
+	}
+	audit := &fakeAuditStore{}
+	alarm := &fakeAlarmRecorder{}
+	m, _, _ := auditedManager(store, nil, &unknownKEKProvider{}, audit, alarm)
+
+	_, err := m.Resolve(context.Background(), uuid.New(), uuid.New(), 1)
+	if err == nil {
+		t.Fatal("expected resolve error")
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %d, want 1", len(audit.events))
+	}
+	ev := audit.events[0]
+	if ev.Action != metadata.ActionCredentialDecrypt {
+		t.Fatalf("action = %q, want credential.decrypt", ev.Action)
+	}
+	var md map[string]any
+	if err := json.Unmarshal(ev.Metadata, &md); err != nil {
+		t.Fatal(err)
+	}
+	if md["kek_version"] != float64(9) {
+		t.Errorf("kek_version = %v, want 9", md["kek_version"])
+	}
+	if md["error_code"] != string(ErrUnknownKEKVersion) {
+		t.Errorf("error_code = %v, want unknown_kek_version", md["error_code"])
+	}
+	if len(alarm.events) != 1 {
+		t.Fatalf("alarm events = %d, want 1 (unknown KEK must alarm)", len(alarm.events))
 	}
 }
 

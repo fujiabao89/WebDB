@@ -67,7 +67,11 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 
 	kek, err := m.kek.GetKEK(env.KEKVersion)
 	if err != nil {
-		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrUnknownKEKVersion, err)
+		// 携带 KEK 版本号，供 E16 审计记录 kek_version（Codex P1）。
+		return CredentialPayload{}, &KEKVersionError{
+			Version: env.KEKVersion,
+			err:     fmt.Errorf("%w: %v", ErrUnknownKEKVersion, err),
+		}
 	}
 
 	return OpenEnvelope(env, workspaceID, secretRef, kek)
