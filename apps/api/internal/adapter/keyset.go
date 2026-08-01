@@ -87,7 +87,9 @@ func buildWrappedSQL(sql string, specs []sortSpec, engine Engine, lastVals []any
 	if contClause != "" {
 		wrapped += "\nWHERE " + contClause
 	}
-	wrapped += "\nORDER BY " + orderClause
+	if orderClause != "" {
+		wrapped += "\nORDER BY " + orderClause
+	}
 	if engine == EnginePostgreSQL {
 		wrapped += fmt.Sprintf("\nLIMIT $%d", b.pgN)
 		allArgs = append(allArgs, limit)

@@ -29,6 +29,17 @@ const (
 	RoleViewer MemberRole = "viewer"
 )
 
+// CanRead 判断角色是否具备读取权限。
+// P0：所有已知角色均可读取；未知/空角色拒绝。
+func (r MemberRole) CanRead() bool {
+	switch r {
+	case RoleOwner, RoleAdmin, RoleEditor, RoleViewer:
+		return true
+	default:
+		return false
+	}
+}
+
 // Engine 数据库引擎。
 type Engine string
 

@@ -434,7 +434,7 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if req.MaxRows <= 0 {
 		req.MaxRows = 500 // 默认最大行数，大于 PageSize 以允许续页
 	}
-	specs, err := buildSortSpecs(req.SortKeys)
+	specs, singlePage, err := prepareFirstPageSort(req)
 	if err != nil {
 		return nil, err
 	}
@@ -450,6 +450,10 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	result, err := h.execQuery(ctx, sql, args, limit, req.PageSize, 0, req.MaxRows)
 	if err != nil {
 		return nil, err
+	}
+	if singlePage {
+		result.NextToken = nil
+		return result, nil
 	}
 	if result.NextToken != nil && result.TotalReturned < req.MaxRows {
 		pv, err := extractLastValues(result.Rows, result.Columns, specs)
@@ -471,6 +475,26 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	}
 	return result, nil
 }
+
+func prepareFirstPageSort(req FirstPageRequest) ([]sortSpec, bool, error) {
+	if len(req.SortKeys) == 0 {
+		if req.MaxRows > req.PageSize {
+			return nil, false, newError(
+				ErrUnsupportedQuery,
+				"verified sort plan required when max rows exceed page size",
+				nil,
+			)
+		}
+		return nil, true, nil
+	}
+
+	specs, err := buildSortSpecs(req.SortKeys)
+	if err != nil {
+		return nil, false, err
+	}
+	return specs, false, nil
+}
+
 func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, token string) (*QueryResult, error) {
 	if err := h.check(); err != nil {
 		return nil, err

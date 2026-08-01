@@ -19,13 +19,19 @@ type StableErrorCode string
 func (e StableErrorCode) Error() string { return string(e) }
 
 const (
-	ErrInvalidScope        StableErrorCode = "invalid_scope"
-	ErrForbidden           StableErrorCode = "forbidden"
-	ErrConnectionNotFound  StableErrorCode = "connection_not_found"
-	ErrPolicyNotConfigured StableErrorCode = "policy_not_configured"
-	ErrReadNotAllowed      StableErrorCode = "read_not_allowed"
-	ErrInternalError       StableErrorCode = "internal_error"
-	ErrUnsupportedEngine   StableErrorCode = "unsupported_engine"
+	ErrInvalidScope             StableErrorCode = "invalid_scope"
+	ErrForbidden                StableErrorCode = "forbidden"
+	ErrConnectionNotFound       StableErrorCode = "connection_not_found"
+	ErrPolicyNotConfigured      StableErrorCode = "policy_not_configured"
+	ErrReadNotAllowed           StableErrorCode = "read_not_allowed"
+	ErrInternalError            StableErrorCode = "internal_error"
+	ErrUnsupportedEngine        StableErrorCode = "unsupported_engine"
+	ErrRateLimited              StableErrorCode = "rate_limited"
+	ErrConnectionBusy           StableErrorCode = "connection_busy"
+	ErrExecutionTimeout         StableErrorCode = "execution_timeout"
+	ErrExecutionCancelled       StableErrorCode = "execution_cancelled"
+	ErrUnsupportedQuery         StableErrorCode = "unsupported_query"
+	ErrConnectionConfigConflict StableErrorCode = "connection_config_conflict"
 )
 
 // Engine 数据库引擎。

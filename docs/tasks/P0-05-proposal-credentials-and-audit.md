@@ -249,7 +249,7 @@ AAD = version_tag(4B) || workspace_id(16B) || secret_ref(16B) || secret_version(
 
 **每 KEK 加密次数上限**：单个 KEK 版本最多用于 `2^24` 次 DEK 包装操作（约 1677 万次），达到上限后该 KEK 版本拒绝新的包装请求（仍可用于解密），强制部署者轮换 KEK。此上限远低于 GCM nonce 重用的安全阈值（2^32），提供充足安全余量。
 
-**计数实现**：P0 使用进程内原子计数器（`atomic.Uint64`）。服务重启后计数器归零——此上限旨在防止持续运行期间的 nonce 碰撞，而非提供不可绕过的硬配额。此限制记录为残余风险（R3 注释）。生产环境应通过监控 DEK 包装速率并在接近阈值时提前预警。跨实例部署时各实例独立计数，实际包装总量可能略超 2^24，但仍在 GCM 安全边界内。
+**计数实现**：P0 使用进程内原子计数器（`atomic.Uint64`），在 Seal 前通过 CAS 原子预留额度。额度按包装尝试计数；一旦预留，后续随机源、加密、持久化或事务提交失败也不归还，因为安全上限约束的是 nonce/包装尝试而非成功写入行数。服务重启后计数器归零——此上限旨在防止持续运行期间的 nonce 碰撞，而非提供不可绕过的硬配额。此限制记录为残余风险（R3 注释）。生产环境应通过监控 DEK 包装速率并在接近阈值时提前预警。跨实例部署时各实例独立计数，实际包装总量可能略超 2^24，但仍在 GCM 安全边界内。
 
 ### 4.6 解密流程
 
@@ -483,9 +483,10 @@ KEK 不得出现在：
         WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
         AND retired_at IS NULL FOR UPDATE
      → 行不存在或已退役：ROLLBACK，返回 credential_not_found
-4.   -- 在同一持锁事务内原子检查引用
-     SELECT COUNT(*) FROM connections
+4.   -- 在同一持锁事务内锁定并检查现有引用
+     SELECT id FROM connections
      WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3
+     FOR SHARE
      → 计数 > 0：ROLLBACK，返回 credential_in_use
 5.   UPDATE credential_envelopes SET retired_at = now()
      WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
@@ -493,7 +494,8 @@ KEK 不得出现在：
 7. 写入审计事件: credential.retire
 ```
 
-- 步骤 4 在持锁事务内执行，防止与并发连接引用更新或创建产生竞态。
+- 步骤 4 的 `FOR SHARE` 会阻塞并发连接版本更新，直至退役事务结束。
+- 连接创建/更新引用时必须以 `FOR KEY SHARE` 锁定且验证目标 envelope 为 active；若先等待退役事务，唤醒后重新检查 `retired_at` 并拒绝已退役版本。该写入侧约束同时关闭“引用检查为 0 后新建引用”的窗口。
 - 退役操作与引用检查在同一事务中原子完成。
 
 #### 6.2.5 连接引用更新
@@ -502,14 +504,14 @@ KEK 不得出现在：
 1. BEGIN TRANSACTION
 2.   SELECT version FROM credential_envelopes
         WHERE workspace_id = $ws AND secret_ref = $ref AND version = $new_version
-        AND retired_at IS NULL FOR UPDATE
+        AND retired_at IS NULL FOR KEY SHARE
      → 行不存在或已退役：ROLLBACK，返回 credential_not_found 或 credential_retired
 3.   UPDATE connections SET secret_version = $new_version
      WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 4. COMMIT
 ```
 
-- 步骤 2 对目标 envelope 加锁（与退役流程使用相同的锁协议），防止并发退役在引用检查和 UPDATE 之间完成。
+- 步骤 2 对目标 envelope 加 `FOR KEY SHARE` 锁，与退役的 `FOR UPDATE` 互斥；锁等待结束后重新检查 active 条件，防止并发退役在引用检查和 UPDATE 之间完成。
 - 引用必须属于同一 workspace。
 - 引用的 version 必须在 credential_envelopes 中存在且 `retired_at IS NULL`（步骤 2 在持锁事务内验证）。
 
@@ -594,6 +596,9 @@ KEK 不得出现在：
 本方案新增的阶段 C'（凭证解析）完全在阶段 C（SQL 策略）通过后、阶段 D（Adapter）之前执行，**不改变 P0-04 的 fail-closed 边界**：
 
 - 阶段 A-C 的拒绝行为不变
+- MySQL lexer mode 从服务端 `PipelineConfig` 注入，执行请求不得提供或覆盖该模式
+- Adapter `ConfigRevision` 使用持久化 `connections.updated_at` 的微秒值；连接配置更新与凭证轮换通过 SQL 保证时间戳至少递增 1 微秒
+- ADR-014 `VerifiedSortPlan` 尚未迁移时，不传入伪造的排序键；仅允许受策略 `max_rows` 约束且不产生 continuation token 的单页请求
 - Adapter 的 `rate_limited`/`connection_busy`/超时/取消逻辑不变
 - 执行状态转换不变
 - 审计 outcome 枚举不变
@@ -870,6 +875,8 @@ KEK 不得出现在：
 | LIFE-07 | 并发轮换 | 一个成功，其余回滚 |
 | LIFE-08 | 事务中间失败（DB 错误） | 旧版本不变，rollback |
 | LIFE-09 | 连接尝试引用其他 workspace 的 secret_ref | DB FK 拒绝 |
+| LIFE-10 | 退役后创建/更新连接引用该版本 | fail-closed 拒绝 |
+| LIFE-11 | 退役引用检查与连接版本更新并发 | `FOR SHARE` 阻塞更新直至退役事务结束 |
 
 ### 14.5 集成断言测试
 
@@ -885,6 +892,7 @@ KEK 不得出现在：
 | INT-08 | audit UPDATE 被拒绝 | DB 触发器测试 |
 | INT-09 | audit DELETE 被拒绝 | DB 触发器测试 |
 | INT-10 | audit TRUNCATE 被拒绝 | DB 触发器测试 |
+| INT-11 | Adapter 并发准入拒绝 | 稳定错误码 `rate_limited`（HTTP 429 映射输入） |
 
 ### 14.6 审计故障注入测试
 
