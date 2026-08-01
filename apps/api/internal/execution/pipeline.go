@@ -18,6 +18,8 @@ import (
 // 安全断言：Policy 拒绝时 Credential Resolver 调用 0 次；
 //
 //	Credential 失败时 Adapter 调用 0 次。
+//
+// WEB-23：配置 Tx/Audit/Alarm 时接入追加式审计与 execution 生命周期（ADR-017）。
 type Pipeline struct {
 	store       ConnectionReader
 	policyStore ConnectionPolicyReader
@@ -26,6 +28,12 @@ type Pipeline struct {
 	resolver  credentials.CredentialResolver
 	adapter   AdapterClient
 	mysqlMode sqlpolicy.MySQLLexerMode
+
+	txs      metadata.TxStore
+	audit    metadata.AuditEventStore
+	alarm    SecurityAlarm
+	clock    func() time.Time
+	newTrace func() string
 }
 
 // ConnectionReader 仅暴露管线所需的工作区绑定连接读取能力。
@@ -78,10 +86,29 @@ type PipelineConfig struct {
 	Resolver    credentials.CredentialResolver
 	Adapter     AdapterClient
 	MySQLMode   sqlpolicy.MySQLLexerMode
+
+	// WEB-23：审计感知管线。Tx 与 Audit 需同时配置；nil 时保持无审计旧行为。
+	Tx    metadata.TxStore
+	Audit metadata.AuditEventStore
+	Alarm SecurityAlarm
+	Clock func() time.Time
+	Trace func() string
 }
 
 // NewPipeline 创建执行管线。
 func NewPipeline(cfg PipelineConfig) *Pipeline {
+	clock := cfg.Clock
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
+	newTrace := cfg.Trace
+	if newTrace == nil {
+		newTrace = func() string { return uuid.NewString() }
+	}
+	alarm := cfg.Alarm
+	if alarm == nil {
+		alarm = NewStderrAlarm()
+	}
 	return &Pipeline{
 		store:       cfg.Store,
 		policyStore: cfg.PolicyStore,
@@ -89,6 +116,11 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		resolver:    cfg.Resolver,
 		adapter:     cfg.Adapter,
 		mysqlMode:   cfg.MySQLMode,
+		txs:         cfg.Tx,
+		audit:       cfg.Audit,
+		alarm:       alarm,
+		clock:       clock,
+		newTrace:    newTrace,
 	}
 }
 
@@ -108,9 +140,12 @@ type ExecuteResult struct {
 	AdapterCalled      bool
 	Result             *adapter.QueryResult
 	ErrorCode          StableErrorCode
+	TraceID            string
+	ExecutionID        *uuid.UUID
 }
 
-// Execute 按顺序执行：Connection → Policy → Resolver → Adapter。
+// Execute 按顺序执行：Connection → Policy → Resolver → Adapter，
+// 并在配置了 Tx/Audit 时接入追加式审计与 execution 生命周期（ADR-017）。
 // 先从服务端获取连接元数据以确定权威 Engine，再以该 Engine 评估 SQL 策略；
 // 如果客户端声称的 Engine 与连接记录不一致则拒绝（防止方言策略绕过）。
 func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteResult, error) {
@@ -119,8 +154,12 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	if (p.txs == nil) != (p.audit == nil) {
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w: Tx 与 Audit 必须同时配置", result.ErrorCode)
+	}
 
-	// 阶段 A: 成员资格与工作区权限 — 未激活或非成员拒绝。
+	// 阶段 A: 成员资格与工作区权限 — 未激活或非成员拒绝（不写审计，proposal §7.1）。
 	member, err := p.members.MemberByWorkspaceAndUser(ctx, req.Principal.WorkspaceID, req.Principal.UserID)
 	if err != nil {
 		result.ErrorCode = mapMembershipError(err)
@@ -135,7 +174,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
-	// 阶段 B: 连接元数据（工作区绑定），确定服务端权威 Engine
+	// 阶段 B: 连接元数据（工作区绑定），确定服务端权威 Engine（不写审计）。
 	conn, err := p.store.ConnectionByID(ctx, req.Principal.WorkspaceID, req.ConnectionID)
 	if err != nil {
 		result.ErrorCode = mapConnectionError(err)
@@ -148,11 +187,57 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return result, fmt.Errorf("%w", ErrUnsupportedEngine)
 	}
 
-	// 阶段 C: SQL Policy（使用服务端权威 Engine）
+	// 阶段 C: SQL Policy（使用服务端权威 Engine）。
 	decision, code := EvaluateSQL(serverEngine, req.SQL, p.mysqlMode)
 	result.Decision = decision
+	statementHash := decision.Classification.StatementHash
+	if statementHash == "" {
+		statementHash = hashRawSQL(req.SQL)
+	}
+
+	traceID := p.newTrace()
+	result.TraceID = traceID
+	now := p.clock()
+
+	// 阶段 B': 创建 Execution（pending）— 仅在配置了元数据库事务时启用。
+	var exec *metadata.Execution
+	var mtx metadata.MetadataTx
+	if p.txs != nil {
+		mtx, err = p.txs.Begin(ctx)
+		if err != nil {
+			result.ErrorCode = ErrInternalError
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		defer mtx.Rollback()
+
+		exec = &metadata.Execution{
+			WorkspaceID:   conn.WorkspaceID,
+			ConnectionID:  conn.ID,
+			ActorID:       req.Principal.UserID,
+			StatementHash: statementHash,
+			Status:        metadata.ExecStatusPending,
+			TraceID:       traceID,
+		}
+		if err := mtx.CreateExecution(ctx, exec); err != nil {
+			result.ErrorCode = ErrInternalError
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		result.ExecutionID = &exec.ID
+	}
+
+	// 阶段 C 拒绝：Execution=failed + Audit(sql.execute, denied)，Adapter 调用 0 次。
 	if !decision.Allowed {
 		result.ErrorCode = code
+		if mtx != nil {
+			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
+				metadata.OutcomeDenied, metadata.AuditMetadata{
+					StatementHash: &statementHash,
+					ReasonCode:    strPtr(string(decision.ReasonCode)),
+					Engine:        strPtr(string(serverEngine)),
+				}); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
+			}
+		}
 		return result, fmt.Errorf("%w: %s", ErrReadNotAllowed, code)
 	}
 
@@ -164,10 +249,30 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 	if policy == nil {
 		result.ErrorCode = ErrPolicyNotConfigured
+		if mtx != nil {
+			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
+				metadata.OutcomeDenied, metadata.AuditMetadata{
+					StatementHash: &statementHash,
+					ReasonCode:    strPtr("policy_not_configured"),
+					Engine:        strPtr(string(serverEngine)),
+				}); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrPolicyNotConfigured)
+			}
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	if policy.AllowRead == nil || !*policy.AllowRead {
 		result.ErrorCode = ErrReadNotAllowed
+		if mtx != nil {
+			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
+				metadata.OutcomeDenied, metadata.AuditMetadata{
+					StatementHash: &statementHash,
+					ReasonCode:    strPtr("read_not_allowed"),
+					Engine:        strPtr(string(serverEngine)),
+				}); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
+			}
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	if policy.StatementTimeoutMs <= 0 || policy.MaxRows <= 0 {
@@ -175,11 +280,16 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
-	// 阶段 C': Credential Resolver
+	// 阶段 C': Credential Resolver。失败时 E14-E16 审计 + $SECURITY_ALERT，Adapter 调用 0 次。
 	payload, err := p.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
 	if err != nil {
 		result.CredentialResolved = false
 		result.ErrorCode = mapCredentialError(err)
+		if mtx != nil {
+			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+			}
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	result.CredentialResolved = true
@@ -190,7 +300,21 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
-	// 阶段 D: Adapter
+	// 阶段 D-0: execution running 更新并在执行前提交元数据库事务。
+	if mtx != nil {
+		exec.Status = metadata.ExecStatusRunning
+		if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+			result.ErrorCode = ErrInternalError
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		if err := mtx.Commit(); err != nil {
+			result.ErrorCode = ErrInternalError
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		mtx = nil
+	}
+
+	// 阶段 D: Adapter。
 	cfg := adapter.ConnectConfig{
 		ConnectionID:   conn.ID.String(),
 		SecretVersion:  conn.SecretVersion,
@@ -210,6 +334,11 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	handle, err := p.adapter.Get(execCtx, cfg)
 	if err != nil {
 		result.ErrorCode = mapAdapterError(err)
+		if exec != nil {
+			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+			}
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	defer handle.Release()
@@ -235,11 +364,240 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	})
 	if err != nil {
 		result.ErrorCode = mapAdapterError(err)
+		if exec != nil {
+			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+			}
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
 	result.Result = queryResult
+	if exec != nil {
+		if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+		}
+	}
 	return result, nil
+}
+
+// ---- 审计与 execution 生命周期辅助（ADR-017）----------------------------------
+
+// auditFailed 处理审计写入失败：fail-closed 不返回结果；触发安全告警。
+func (p *Pipeline) auditFailed(
+	ctx context.Context,
+	result *ExecuteResult,
+	traceID string,
+	wsID uuid.UUID,
+	now time.Time,
+	originalCode StableErrorCode,
+) (*ExecuteResult, error) {
+	p.alarm.Alarm(ctx, SecurityAlertEvent{
+		TraceID:     traceID,
+		WorkspaceID: wsID,
+		Code:        string(ErrAuditFailed),
+		OccurredAt:  now,
+	})
+	result.ErrorCode = ErrAuditFailed
+	// ADR-017 §6：审计失败不向调用方返回查询结果。
+	result.Result = nil
+	return result, fmt.Errorf("%w (original error: %s)", result.ErrorCode, originalCode)
+}
+
+// recordPreExecution 在执行前（阶段 C/C'）原子记录 execution=failed + 审计事件。
+// 任一失败即返回错误 → 调用方 fail-closed，Adapter 调用 0 次。
+func (p *Pipeline) recordPreExecution(
+	ctx context.Context,
+	mtx metadata.MetadataTx,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	outcome metadata.AuditOutcome,
+	md metadata.AuditMetadata,
+) error {
+	code := string(result.ErrorCode)
+	exec.Status = metadata.ExecStatusFailed
+	exec.ErrorCode = &code
+	finished := now
+	exec.FinishedAt = &finished
+
+	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+		return err
+	}
+
+	event, err := newAuditEvent(
+		conn.WorkspaceID,
+		metadata.ActorTypeUser,
+		&exec.ActorID,
+		&conn.ID,
+		&exec.ID,
+		metadata.ActionSQLExecute,
+		"execution",
+		exec.ID.String(),
+		outcome,
+		md,
+		traceID,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	return mtx.AppendAudit(ctx, event)
+}
+
+// recordCredentialFailure 记录凭证解析失败：E14-E16 + $SECURITY_ALERT，Adapter 调用 0 次。
+func (p *Pipeline) recordCredentialFailure(
+	ctx context.Context,
+	mtx metadata.MetadataTx,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+) error {
+	code := string(result.ErrorCode)
+
+	// 触发安全告警（凭证解密失败/未知 KEK 版本，ADR-017 §6）。
+	p.alarm.Alarm(ctx, SecurityAlertEvent{
+		TraceID:     traceID,
+		WorkspaceID: conn.WorkspaceID,
+		Code:        code,
+		OccurredAt:  now,
+	})
+
+	var action string
+	var md metadata.AuditMetadata
+	switch result.ErrorCode {
+	case StableErrorCode(credentials.ErrCredentialNotFound), StableErrorCode(credentials.ErrCredentialRetired):
+		// E14: credential.lookup 失败（system actor）
+		action = metadata.ActionCredentialLookup
+		md = metadata.AuditMetadata{
+			SecretRef: strPtr(conn.SecretRef.String()),
+			ErrorCode: strPtr(code),
+		}
+	default:
+		// E15/E16: credential.decrypt 失败（system actor）
+		action = metadata.ActionCredentialDecrypt
+		md = metadata.AuditMetadata{
+			SecretRef:     strPtr(conn.SecretRef.String()),
+			SecretVersion: intPtr(conn.SecretVersion),
+			ErrorCode:     strPtr(code),
+		}
+	}
+
+	exec.Status = metadata.ExecStatusFailed
+	exec.ErrorCode = &code
+	finished := now
+	exec.FinishedAt = &finished
+	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+		return err
+	}
+
+	event, err := newAuditEvent(
+		conn.WorkspaceID,
+		metadata.ActorTypeSystem,
+		nil,
+		&conn.ID,
+		&exec.ID,
+		action,
+		"credential",
+		conn.SecretRef.String(),
+		metadata.OutcomeFailed,
+		md,
+		traceID,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	return mtx.AppendAudit(ctx, event)
+}
+
+// recordPostExecution 在执行完成后记录 execution 终态 + 审计事件。
+// execution 更新在独立事务中先提交；审计后置独立写入。
+// 审计写入失败时：不返回结果、返回 audit_failed，execution 已记录为终态（ADR-017 §6）。
+func (p *Pipeline) recordPostExecution(
+	ctx context.Context,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	statementHash string,
+) error {
+	var status metadata.ExecutionStatus
+	var outcome metadata.AuditOutcome
+	md := metadata.AuditMetadata{
+		StatementHash: &statementHash,
+		Engine:        strPtr(string(conn.Engine)),
+	}
+
+	switch result.ErrorCode {
+	case ErrExecutionCancelled:
+		status = metadata.ExecStatusCancelled
+		outcome = metadata.OutcomeCancelled
+		md.ErrorCode = strPtr("query_cancelled")
+	case ErrExecutionTimeout:
+		status = metadata.ExecStatusFailed
+		outcome = metadata.OutcomeFailed
+		md.ErrorCode = strPtr("query_timeout")
+	case "":
+		status = metadata.ExecStatusCompleted
+		outcome = metadata.OutcomeSucceeded
+		if result.Result != nil {
+			rowCount := result.Result.TotalReturned
+			md.RowCount = intPtr(rowCount)
+		}
+	default:
+		status = metadata.ExecStatusFailed
+		outcome = metadata.OutcomeFailed
+		md.ErrorCode = strPtr(string(result.ErrorCode))
+	}
+
+	exec.Status = status
+	exec.ErrorCode = md.ErrorCode
+	finished := now
+	exec.FinishedAt = &finished
+	if dur := now.Sub(exec.StartedAt); dur > 0 {
+		d := int(dur.Milliseconds())
+		md.DurationMs = &d
+		exec.DurationMs = &d
+	}
+
+	// 阶段 D 后：execution 更新独立事务提交（proposal §9.1）。
+	mtx, err := p.txs.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer mtx.Rollback()
+	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+		return err
+	}
+	if err := mtx.Commit(); err != nil {
+		return err
+	}
+
+	// 审计后置独立写入。
+	event, err := newAuditEvent(
+		conn.WorkspaceID,
+		metadata.ActorTypeUser,
+		&exec.ActorID,
+		&conn.ID,
+		&exec.ID,
+		metadata.ActionSQLExecute,
+		"execution",
+		exec.ID.String(),
+		outcome,
+		md,
+		traceID,
+		now,
+	)
+	if err != nil {
+		return err
+	}
+	return p.audit.AppendAudit(ctx, event)
 }
 
 func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
@@ -339,3 +697,6 @@ func mapAdapterError(err error) StableErrorCode {
 	}
 	return ErrInternalError
 }
+
+func strPtr(s string) *string { return &s }
+func intPtr(i int) *int       { return &i }

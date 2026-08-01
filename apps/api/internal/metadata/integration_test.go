@@ -749,7 +749,7 @@ func TestAudit_AppendAndQuery(t *testing.T) {
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
 		Action: "connection.test", ResourceType: "connection",
 		ResourceID: conn.ID.String(), Outcome: OutcomeSucceeded,
-		Metadata: json.RawMessage(`{"summary":"test"}`),
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development"}`),
 		TraceID:  "trace-audit-001", OccurredAt: time.Now().UTC(),
 	}
 	if err := store.AppendAudit(ctx, event); err != nil {
@@ -775,7 +775,7 @@ func TestAudit_UserActorWithNullActorID_Rejected(t *testing.T) {
 
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeUser, ActorID: nil,
-		Action: "test", ResourceType: "test", ResourceID: conn.ID.String(),
+		Action: "connection.test", ResourceType: "connection", ResourceID: conn.ID.String(),
 		Outcome: OutcomeSucceeded, TraceID: "trace-actor-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -791,7 +791,7 @@ func TestAudit_SystemActorWithNonNullActorID_Rejected(t *testing.T) {
 	id := uuid.New()
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem, ActorID: &id,
-		Action: "test", ResourceType: "test", ResourceID: conn.ID.String(),
+		Action: "connection.test", ResourceType: "connection", ResourceID: conn.ID.String(),
 		Outcome: OutcomeSucceeded, TraceID: "trace-actor-002", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -809,6 +809,7 @@ func TestAudit_EmptyAction_Rejected(t *testing.T) {
 		Action: "", ResourceType: "conn", ResourceID: "r1",
 		Outcome: OutcomeSucceeded, TraceID: "trace-empty-001", OccurredAt: time.Now().UTC(),
 	})
+	// 空 action 在应用层 fail-closed 拒绝（未知事件类型）
 	if err == nil {
 		t.Fatal("期望空 action 被拒绝")
 	}
@@ -821,7 +822,7 @@ func TestAudit_WhitespaceTraceID_Rejected(t *testing.T) {
 
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
-		Action: "test", ResourceType: "conn", ResourceID: "r1",
+		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
 		Outcome: OutcomeSucceeded, TraceID: "   ", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -853,7 +854,7 @@ func TestAudit_NonObjectMetadata_Rejected(t *testing.T) {
 
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
-		Action: "test", ResourceType: "conn", ResourceID: "r1",
+		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
 		Outcome: OutcomeSucceeded, Metadata: json.RawMessage(`"not_object"`),
 		TraceID: "trace-meta-001", OccurredAt: time.Now().UTC(),
 	})
@@ -869,9 +870,10 @@ func TestAudit_UpdateRejected(t *testing.T) {
 
 	event := &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
-		Action: "test.update", ResourceType: "connection",
+		Action: "connection.update", ResourceType: "connection",
 		ResourceID: conn.ID.String(), Outcome: OutcomeSucceeded,
-		TraceID: "trace-update-001", OccurredAt: time.Now().UTC(),
+		Metadata: json.RawMessage(`{"environment":"development"}`),
+		TraceID:  "trace-update-001", OccurredAt: time.Now().UTC(),
 	}
 	store.AppendAudit(ctx, event)
 
@@ -889,9 +891,10 @@ func TestAudit_DeleteRejected(t *testing.T) {
 
 	event := &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
-		Action: "test.delete", ResourceType: "connection",
+		Action: "connection.test", ResourceType: "connection",
 		ResourceID: conn.ID.String(), Outcome: OutcomeSucceeded,
-		TraceID: "trace-delete-001", OccurredAt: time.Now().UTC(),
+		Metadata: json.RawMessage(`{"engine":"postgresql","environment":"development"}`),
+		TraceID:  "trace-delete-001", OccurredAt: time.Now().UTC(),
 	}
 	store.AppendAudit(ctx, event)
 
@@ -921,7 +924,7 @@ func TestAudit_OrphanWorkspace_Rejected(t *testing.T) {
 
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: uuid.New(), ActorType: ActorTypeSystem,
-		Action: "test", ResourceType: "conn", ResourceID: "r1",
+		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
 		Outcome: OutcomeSucceeded, TraceID: "trace-orphan-001", OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
@@ -937,13 +940,127 @@ func TestAudit_ExecutionWithoutConnection_Rejected(t *testing.T) {
 	eid := uuid.New()
 	err := store.AppendAudit(ctx, &AuditEvent{
 		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
-		Action: "test", ResourceType: "conn", ResourceID: "r1",
+		Action: "connection.test", ResourceType: "conn", ResourceID: "r1",
 		Outcome: OutcomeSucceeded, TraceID: "trace-exec-noconn-001",
 		ExecutionID: &eid, ConnectionID: nil,
 		OccurredAt: time.Now().UTC(),
 	})
 	if err == nil {
 		t.Fatal("期望 execution 非空但 connection 为空被拒绝")
+	}
+}
+
+// ---- 跨工作区关联拒绝（WEB-23）---------------------------------------------
+
+// secondWorkspace 创建第二个工作区及其成员、信封和连接。
+func secondWorkspace(t *testing.T, store *PGStore, ctx context.Context) *Connection {
+	t.Helper()
+	u2 := &User{Email: "other@example.com", PasswordHash: "hash"}
+	if err := store.CreateUser(ctx, u2); err != nil {
+		t.Fatalf("创建第二个用户失败: %v", err)
+	}
+	ws2 := &Workspace{Name: "other-ws"}
+	if err := store.CreateWorkspace(ctx, ws2); err != nil {
+		t.Fatalf("创建第二个工作区失败: %v", err)
+	}
+	if err := store.AddMember(ctx, &WorkspaceMember{WorkspaceID: ws2.ID, UserID: u2.ID, Role: RoleOwner}); err != nil {
+		t.Fatalf("添加第二个工作区成员失败: %v", err)
+	}
+	env2 := &CredentialEnvelope{
+		WorkspaceID:   ws2.ID,
+		SecretRef:     uuid.New(),
+		Version:       1,
+		Ciphertext:    []byte{1, 2, 3},
+		DataNonce:     []byte{4, 5, 6},
+		WrappedDEK:    []byte{7, 8, 9},
+		WrapNonce:     []byte{10, 11, 12},
+		EnvelopeSuite: "aes256-gcm-hkdf-sha256",
+		KEKVersion:    1,
+	}
+	if err := store.CreateEnvelope(ctx, env2); err != nil {
+		t.Fatalf("创建第二个信封失败: %v", err)
+	}
+	conn2 := &Connection{
+		WorkspaceID:   ws2.ID,
+		Name:          "other-conn",
+		Engine:        EnginePostgreSQL,
+		Host:          "localhost",
+		Port:          5432,
+		Database:      "otherdb",
+		Environment:   EnvDevelopment,
+		SecretRef:     env2.SecretRef,
+		SecretVersion: 1,
+		CreatedBy:     u2.ID,
+	}
+	if err := store.CreateConnection(ctx, conn2); err != nil {
+		t.Fatalf("创建第二个连接失败: %v", err)
+	}
+	return conn2
+}
+
+func TestAudit_CrossWorkspaceConnection_Rejected(t *testing.T) {
+	_, store, _, ws, _, _, _, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	conn2 := secondWorkspace(t, store, ctx)
+
+	err := store.AppendAudit(ctx, &AuditEvent{
+		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
+		Action: "connection.test", ResourceType: "connection",
+		ResourceID: conn2.ID.String(), Outcome: OutcomeSucceeded,
+		ConnectionID: &conn2.ID,
+		TraceID:      "trace-cross-conn-001", OccurredAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("期望引用其他工作区 connection 的审计被拒绝")
+	}
+}
+
+func TestAudit_CrossWorkspaceExecution_Rejected(t *testing.T) {
+	_, store, _, ws, _, _, conn, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	conn2 := secondWorkspace(t, store, ctx)
+
+	// 创建第二个工作区的 execution
+	e2 := &Execution{
+		WorkspaceID: conn2.WorkspaceID, ConnectionID: conn2.ID,
+		ActorID: conn2.CreatedBy, StatementHash: "sha256:abc",
+		Status: ExecStatusCompleted, TraceID: "trace-exe-002",
+	}
+	if err := store.CreateExecution(ctx, e2); err != nil {
+		t.Fatalf("创建第二个 execution 失败: %v", err)
+	}
+
+	err := store.AppendAudit(ctx, &AuditEvent{
+		WorkspaceID: ws.ID, ActorType: ActorTypeSystem,
+		Action: "sql.execute", ResourceType: "execution",
+		ResourceID: e2.ID.String(), Outcome: OutcomeSucceeded,
+		ConnectionID: &conn.ID, ExecutionID: &e2.ID,
+		TraceID: "trace-cross-exec-001", OccurredAt: time.Now().UTC(),
+	})
+	if err == nil {
+		t.Fatal("期望引用其他工作区 execution 的审计被拒绝")
+	}
+}
+
+func TestExecution_CrossWorkspaceConnection_Rejected(t *testing.T) {
+	_, store, _, ws, _, _, _, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	conn2 := secondWorkspace(t, store, ctx)
+
+	e := &Execution{
+		WorkspaceID: ws.ID, ConnectionID: conn2.ID,
+		ActorID: uuid.New(), StatementHash: "sha256:abc",
+		Status: ExecStatusPending, TraceID: "trace-cross-conn-exe",
+	}
+	err := store.CreateExecution(ctx, e)
+	if err == nil {
+		t.Fatal("期望引用其他工作区 connection 的 execution 被拒绝")
 	}
 }
 

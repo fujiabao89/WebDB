@@ -666,10 +666,14 @@ func sanitizeAuditMetadata(raw json.RawMessage) json.RawMessage {
 }
 
 // AppendAudit 追加一条审计事件。数据库触发器阻止 UPDATE/DELETE/TRUNCATE。
-// 写入前按允许列表脱敏 metadata（ADR-013），并拒绝零值时间戳。
+// fail-closed: metadata 必须是事件类型专用 schema 的强类型数据（ADR-017 / P0-05 §8）。
+// 畸形 JSON、未知字段、错误类型、超长值或未知事件一律拒绝，不做启发式过滤。
 func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 	if e.OccurredAt.IsZero() {
 		return fmt.Errorf("audit: occurred_at 不得为零值")
+	}
+	if err := ValidateAuditEventMetadata(e.Action, e.Metadata); err != nil {
+		return err
 	}
 	const q = `
 		INSERT INTO audit_events
@@ -678,12 +682,10 @@ func (s *PGStore) AppendAudit(ctx context.Context, e *AuditEvent) error {
 			 metadata, trace_id, execution_id, occurred_at)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		RETURNING id, created_at`
-	md := sanitizeAuditMetadata(e.Metadata)
-	e.Metadata = md
 	return s.DB.QueryRowContext(ctx, q,
 		e.WorkspaceID, string(e.ActorType), e.ActorID, e.ConnectionID,
 		e.Action, e.ResourceType, e.ResourceID, string(e.Outcome),
-		md, e.TraceID, e.ExecutionID, e.OccurredAt,
+		e.Metadata, e.TraceID, e.ExecutionID, e.OccurredAt,
 	).Scan(&e.ID, &e.CreatedAt)
 }
 
@@ -802,19 +804,29 @@ func isHex64(s string) bool {
 	return true
 }
 
+// stableErrorCodes 精确白名单验证稳定错误码（P0-04 + P0-05 §8.4 + execution/adapter 扩展）。
+var stableErrorCodes = map[string]bool{
+	"allowed": true, "sql_parse_error": true, "multiple_statements": true,
+	"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
+	"executable_comment_detected": true, "invalid_scope": true, "unauthorized": true,
+	"forbidden": true, "connection_not_found": true, "policy_not_configured": true,
+	"read_not_allowed": true, "query_timeout": true, "query_cancelled": true,
+	"rate_limited": true, "connection_busy": true, "result_too_large": true,
+	"database_error": true, "audit_failed": true, "internal_error": true,
+	"unsupported_engine": true, "invalid_page_token": true,
+	"pagination_capacity_exhausted": true, "unsupported_query": true,
+	"stale_config": true, "config_conflict": true,
+	// P0-05 §8.4 凭证相关
+	"decryption_failed": true, "unknown_envelope_suite": true, "unknown_kek_version": true,
+	"invalid_payload": true, "payload_too_large": true, "credential_not_found": true,
+	"credential_retired": true, "version_conflict": true, "credential_in_use": true,
+	"wrap_quota_exhausted": true,
+	// execution/adapter 扩展
+	"execution_timeout": true, "execution_cancelled": true, "connection_config_conflict": true,
+	"connection_failed": true, "invalid_config": true, "pool_closed": true,
+}
+
 // isValidStableCode 精确白名单验证稳定错误码 [CR #2]。
 func isValidStableCode(s string) bool {
-	codes := map[string]bool{
-		"allowed": true, "sql_parse_error": true, "multiple_statements": true,
-		"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
-		"executable_comment_detected": true, "invalid_scope": true, "unauthorized": true,
-		"forbidden": true, "connection_not_found": true, "policy_not_configured": true,
-		"read_not_allowed": true, "query_timeout": true, "query_cancelled": true,
-		"rate_limited": true, "connection_busy": true, "result_too_large": true,
-		"database_error": true, "audit_failed": true, "internal_error": true,
-		"unsupported_engine": true, "invalid_page_token": true,
-		"pagination_capacity_exhausted": true, "unsupported_query": true,
-		"stale_config": true, "config_conflict": true,
-	}
-	return codes[s]
+	return stableErrorCodes[s]
 }
