@@ -17,3 +17,6 @@
 | [011](ADR-011-local-auth-then-oidc.md) | 本地账号优先，后续 OIDC/SSO | 已接受 |
 | [012](ADR-012-apache-2-license.md) | Apache License 2.0 | 已接受 |
 | [013](ADR-013-p0-metadata-migrations-schema.md) | P0 元数据库迁移与 Schema 基线 | 已接受 |
+| [014](ADR-014-sort-key-uniqueness-proof.md) | SortKey 唯一性证明与 VerifiedSortPlan | 已接受 |
+| [015](ADR-015-continuation-token-ownership.md) | Continuation Token 归属与安全模型 | 已接受 |
+| [016](ADR-016-admission-reservation-before-execution.md) | Admission 预留与 Execution 创建时序 | 已接受 |
