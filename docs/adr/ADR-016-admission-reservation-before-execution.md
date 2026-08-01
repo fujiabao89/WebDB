@@ -16,7 +16,7 @@ P0-03 `AdmissionController.TryAcquire` 在 `Adapter.Query` 内部执行。P0-04 
 
 当前 `PoolHandle.Query` 的实际代码执行顺序为：
 
-```
+```text
 check() → TryAcquire() → buildSortSpecs() → buildWrappedSQL() → execQuery()
                                                                     ├─ pgPool.Acquire() / db.Conn()
                                                                     └─ Query() / QueryContext()
@@ -81,7 +81,7 @@ check() → TryAcquire() → buildSortSpecs() → buildWrappedSQL() → execQuer
 ## 后果
 
 - **安全**：准入失败时 Execution 明确标记为 failed，无信息泄露。
-- **兼容**：无 Adapter API 变更。
+- **兼容**：本 ADR 的准入决策本身不引入额外的 Adapter API 变更（ADR-014 的 `VerifiedSortPlan`/`VerifiedNextPagePlan` 与 ADR-015 的 `ContinuationRegistry` 所有权迁移已覆盖所需的 Adapter 接口变化）。
 - **运营**：rate_limited 和 connection_busy 的 Execution/AuditEvent 可被分别监控和告警。
 - **测试**：用户/工作区/连接限流、取消后 Release、panic 后 Release、Release 幂等。
 
@@ -101,7 +101,7 @@ check() → TryAcquire() → buildSortSpecs() → buildWrappedSQL() → execQuer
 ## 迁移影响
 
 - P0-04 Service 层新增 `rate_limited` 和 `connection_busy` 两个独立错误处理分支。
-- 无 Adapter 代码变更。
+- 本 ADR 的准入决策本身不引入额外的 Adapter 代码变更（ADR-014/015 已覆盖所需的 Adapter 层修改）。
 
 ## 相关资料
 

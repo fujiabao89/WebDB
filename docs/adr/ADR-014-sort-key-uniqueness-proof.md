@@ -20,19 +20,19 @@
 
 2. **Go sealed interface 类型方案**：`VerifiedSortPlan` 和 `VerifiedNextPagePlan` 均采用 exported sealed interface + 私有实现：
 
-```go
-package queryplan
+   ```go
+   package queryplan
 
-type VerifiedSortPlan interface {
-    isVerifiedSortPlan() // 未导出方法，包外无法实现
-    Valid() bool
-    // 只读 accessor；可变返回值必须深拷贝
-}
+   type VerifiedSortPlan interface {
+       isVerifiedSortPlan() // 未导出方法，包外无法实现
+       Valid() bool
+       // 只读 accessor；可变返回值必须深拷贝
+   }
 
-type verifiedSortPlan struct {
-    // 全部字段私有
-}
-```
+   type verifiedSortPlan struct {
+       // 全部字段私有
+   }
+   ```
 
 - `VerifiedSortPlan` 是 exported sealed interface，具体实现 `verifiedSortPlan` 不导出。
 - 包外无法实现该接口，也无法直接构造具体实现。
@@ -124,7 +124,7 @@ generation 或策略上下文变化时 token 失效。
 ## 后果
 
 - **安全**：唯一性证明不可伪造，无法获得可信 Schema 元数据时 fail-closed。
-- **兼容**：Adapter API 变更（`Query`/`NextPage` 接收 `VerifiedSortPlan`）。`SortKey.Unique` 废弃。
+- **兼容**：Adapter API 变更（`Query` 接收 `VerifiedSortPlan`；`NextPage` 接收 `VerifiedNextPagePlan`，该类型由 ADR-015 定义并替代本 ADR 早期草案中 `NextPage` 对 `VerifiedSortPlan` 的引用）。`SortKey.Unique` 废弃。
 - **运营**：无法证明唯一性的查询拒绝分页，需服务端日志记录原因。
 - **测试**：单列主键、复合唯一索引、NULL 语义、ASC/DESC/NULLS FIRST/LAST、跨页完整性、generation 变化。
 

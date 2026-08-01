@@ -60,7 +60,7 @@ Registry 保存完整 `ContinuationState`，至少绑定：
 
 ### 6. 原子状态机与终态清理
 
-```
+```text
 ready → claim（原子 compare-and-consume）→ in-flight（不可恢复为 ready）
 ```
 
@@ -84,11 +84,11 @@ reauthorization、查询执行、取消、超时、panic 失败时使用 `Abort(
 
 `Rotate`、`Complete`、`Abort` 必须幂等或使用 claim version 防止延迟 finalizer 删除错误的新状态。finalizer 只能清理自己持有的旧 claim，不能删除已旋转出的新 token。
 
-**过期清理**：后台 goroutine 定期扫描 `expires_at`，覆盖 ready 和遗留 in-flight 状态。ready 与 in-flight 都计入全部容量配额。
+**过期清理**：后台 goroutine 定期扫描 `expires_at`，覆盖 ready 和遗留 in-flight 状态，作为原子 claim 过期检查的补充清理。ready 与 in-flight 都计入全部容量配额。
 
 ### 7. NextPage 流程
 
-1. 原子 claim token。
+1. 原子 claim token：在同一临界区内检查当前时间与 `expires_at`；若已过期则原子删除 token、返回 `invalid_page_token`，不得进入 `in-flight`。
 2. 重新验证成员资格（用户是否仍在工作区）。
 3. 重新验证连接策略（`AllowRead`/`MaxRows`/`StatementTimeoutMs` 是否变更）。
 4. 验证 `connection_id`/generation/`policy version`/`statement hash` 未变化。
