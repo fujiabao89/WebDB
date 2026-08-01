@@ -841,7 +841,7 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | KEK-03 | KEK 非有效 Base64 | 启动 fatal |
 | KEK-04 | KEK 长度 != 32 bytes | 启动 fatal |
 | KEK-05 | KEK = `change_me` | 启动 fatal |
-| KEK-06 | 多版本 KEK (V1, V2) | ActiveKEK 返回最高版本 |
+| KEK-06 | 多版本 KEK (V1, V2)，`WEBDB_ACTIVE_KEK_VERSION=1` | ActiveKEK 返回 V1（由 ACTIVE 显式指定，不自动选择 V2） |
 | KEK-07 | GetKEK(未知版本) | `unknown_kek_version` |
 | KEK-08 | V1 和 V2 相同值 | 启动 fatal |
 
