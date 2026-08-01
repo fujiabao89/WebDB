@@ -42,7 +42,10 @@ func SealEnvelope(payload CredentialPayload, workspaceID, secretRef uuid.UUID, s
 		return nil, fmt.Errorf("%w: generate data nonce: %v", ErrInternalError, err)
 	}
 
-	dataAAD := BuildAAD(DataAADTag, workspaceID, secretRef, secretVersion, suite, kekVersion)
+	dataAAD, err := BuildAAD(workspaceID, secretRef, secretVersion, suite, kekVersion)
+	if err != nil {
+		return nil, err
+	}
 
 	ciphertext, err := aesGCMSeal(dek, dataNonce, plaintext, dataAAD)
 	if err != nil {
@@ -54,7 +57,10 @@ func SealEnvelope(payload CredentialPayload, workspaceID, secretRef uuid.UUID, s
 		return nil, fmt.Errorf("%w: generate wrap nonce: %v", ErrInternalError, err)
 	}
 
-	wrapAAD := BuildAAD(WrapAADTag, workspaceID, secretRef, secretVersion, suite, kekVersion)
+	wrapAAD, err := BuildAAD(workspaceID, secretRef, secretVersion, suite, kekVersion)
+	if err != nil {
+		return nil, err
+	}
 
 	wrappedDEK, err := aesGCMSeal(kek, wrapNonce, dek, wrapAAD)
 	if err != nil {
@@ -84,8 +90,14 @@ func OpenEnvelope(env *metadata.CredentialEnvelope, workspaceID, secretRef uuid.
 		return CredentialPayload{}, err
 	}
 
-	dataAAD := BuildAAD(DataAADTag, workspaceID, secretRef, env.Version, env.EnvelopeSuite, env.KEKVersion)
-	wrapAAD := BuildAAD(WrapAADTag, workspaceID, secretRef, env.Version, env.EnvelopeSuite, env.KEKVersion)
+	dataAAD, err := BuildAAD(workspaceID, secretRef, env.Version, env.EnvelopeSuite, env.KEKVersion)
+	if err != nil {
+		return CredentialPayload{}, err
+	}
+	wrapAAD, err := BuildAAD(workspaceID, secretRef, env.Version, env.EnvelopeSuite, env.KEKVersion)
+	if err != nil {
+		return CredentialPayload{}, err
+	}
 
 	dek, err := aesGCMOpen(kek, env.WrapNonce, env.WrappedDEK, wrapAAD)
 	if err != nil {

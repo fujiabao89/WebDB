@@ -26,6 +26,11 @@ const (
 	ErrReadNotAllowed      StableErrorCode = "read_not_allowed"
 	ErrInternalError       StableErrorCode = "internal_error"
 	ErrUnsupportedEngine   StableErrorCode = "unsupported_engine"
+	ErrRateLimited         StableErrorCode = "rate_limited"
+	ErrConnectionBusy      StableErrorCode = "connection_busy"
+	ErrExecutionTimeout    StableErrorCode = "execution_timeout"
+	ErrExecutionCancelled  StableErrorCode = "execution_cancelled"
+	ErrUnsupportedQuery    StableErrorCode = "unsupported_query"
 )
 
 // Engine 数据库引擎。

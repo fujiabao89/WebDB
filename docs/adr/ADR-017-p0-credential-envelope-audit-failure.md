@@ -25,7 +25,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 - **数据加密**：AES-256-GCM（256-bit DEK，96-bit nonce，128-bit tag）
 - **DEK 包装**：AES-256-GCM（使用 KEK，96-bit nonce，独立 wrap AAD 禁止 nil）
-- **每 KEK 加密上限**：2^24 次。P0 使用进程内原子计数器（重启归零），达到上限后拒绝新包装但仍可解密。跨实例部署时各实例独立计数，实际总量可能略超 2^24，但仍在 GCM nonce 安全边界（2^32）内。此上限旨在防止持续运行期间的 nonce 碰撞，非不可绕过的硬配额
+- **每 KEK 加密上限**：2^24 次。P0 使用进程内原子计数器（重启归零），在生成 DEK/nonce 前以 CAS 原子预留包装额度；额度按包装尝试计数，后续随机源、加密或数据库失败不归还。达到上限后拒绝新包装但仍可解密。跨实例部署时各实例独立计数，实际总量可能略超 2^24，但仍在 GCM nonce 安全边界（2^32）内。此上限旨在防止持续运行期间的 nonce 碰撞，非不可绕过的硬配额
 - **Nonce 生成**：`crypto/rand.Read`（失败时 fail-closed）
 - **AAD**：版本化确定性二进制编码（48 bytes），绑定 `version_tag` + `workspace_id` + `secret_ref` + `secret_version` + `envelope_suite_tag` + `kek_version`（大端序）。数据 AAD 与 Wrap AAD 独立构造，Wrap AAD 禁止为 nil
 - **`envelope_suite`**：`"AES256GCM-v1"`（精确匹配，未知值拒绝）
@@ -45,8 +45,9 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 - **创建**：生成 secret_ref UUID → version=1 → 加密 → INSERT
 - **读取**：授权 → 查找 envelope（拒绝 `retired_at IS NOT NULL` 的版本用于普通执行，返回 `credential_retired`）→ 验证 AAD → 解密 DEK → 解密 payload → 验证 schema。退役版本仅审计追溯允许解密（通过直接查询 envelope 表，不经过正常凭证解析路径）
 - **轮换**：expected_version + SELECT FOR UPDATE + INSERT 新版本 + UPDATE connections（同一事务，固定锁顺序：先 envelope 后 connections）
-- **退役**：先验证无连接引用（被引用时拒绝，返回 `credential_in_use`）；通过后 SET retired_at=now()；不删除密文
-- **并发**：事务隔离 + 唯一约束 `(workspace_id, secret_ref, version)` + expected_version 双重保护；失败回滚
+- **退役**：先锁定目标 envelope，再以 `FOR SHARE` 锁定并统计现有连接引用（被引用时拒绝，返回 `credential_in_use`）；通过后 SET retired_at=now()；不删除密文
+- **连接写入**：创建或更新连接引用前必须在同一 SQL 操作中以 `FOR KEY SHARE` 锁定且验证目标 envelope 为 active；等待并发退役后必须重新检查 `retired_at`，不得引用已退役版本
+- **并发**：固定锁顺序（目标 envelope → connections）、事务隔离、唯一约束 `(workspace_id, secret_ref, version)` 与 expected_version 双重保护；失败回滚
 
 ### 5. 审计事件
 
@@ -65,7 +66,9 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 ### 7. 调用顺序
 
-凭证解析（新阶段 C'）在 SQL 策略通过（阶段 C）之后、Adapter 调用（阶段 D）之前执行。凭证失败时 Adapter 调用次数 = 0。
+凭证解析（新阶段 C'）在 SQL 策略与服务端 `ConnectionPolicy` 均通过后、Adapter 调用（阶段 D）之前执行。MySQL lexer mode 只能由 `PipelineConfig` 的服务端可信配置注入，不接受执行请求字段。凭证失败时 Adapter 调用次数 = 0。Adapter 的 `ConfigRevision` 由持久化的 `connections.updated_at` 派生；连接更新与凭证轮换必须令该时间戳严格递增。
+
+在 ADR-014 的 `VerifiedSortPlan` 迁移完成前，WEB-22 不得伪造 `SortKey.Unique`。无法取得可信唯一键证明时仅允许 `effectiveMaxRows <= effectivePageSize` 的受限单页执行，并且不得发放 continuation token。
 
 ## 候选方案与取舍
 
@@ -86,6 +89,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
+- WEB-22 的 PostgreSQL 集成测试覆盖退役后连接创建/更新拒绝，以及退役引用检查对并发连接版本更新的锁定
 - 回滚：`git revert` WEB-22/WEB-23 合并提交；credential_envelopes 仅追加写，数据不受影响
 - KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 

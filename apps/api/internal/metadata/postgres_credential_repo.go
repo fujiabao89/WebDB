@@ -106,7 +106,12 @@ func (s *PGStore) UpdateRetiredAt(ctx context.Context, tx *sql.Tx, wsID, secretR
 		return err
 	}
 	if n == 0 {
-		return nil // 幂等：已退役则静默成功
+		return fmt.Errorf(
+			"credential envelope (%s, %s, %d): active row not updated",
+			wsID,
+			secretRef,
+			version,
+		)
 	}
 	return nil
 }
@@ -114,16 +119,30 @@ func (s *PGStore) UpdateRetiredAt(ctx context.Context, tx *sql.Tx, wsID, secretR
 // ---- ConnectionTXStore 实现 --------------------------------------------------
 
 func (s *PGStore) UpdateConnectionVersion(ctx context.Context, tx *sql.Tx, wsID, secretRef uuid.UUID, newVersion int) error {
-	const q = `UPDATE connections SET secret_version = $1, updated_at = now()
+	const q = `UPDATE connections SET
+			secret_version = $1,
+			updated_at = GREATEST(clock_timestamp(), updated_at + interval '1 microsecond')
 		WHERE workspace_id = $2 AND secret_ref = $3`
 	_, err := tx.ExecContext(ctx, q, newVersion, wsID, secretRef)
 	return err
 }
 
 func (s *PGStore) CountConnectionsByVersion(ctx context.Context, tx *sql.Tx, wsID, secretRef uuid.UUID, version int) (int, error) {
-	const q = `SELECT COUNT(*) FROM connections
-		WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3`
-	var count int
-	err := tx.QueryRowContext(ctx, q, wsID, secretRef, version).Scan(&count)
-	return count, err
+	const q = `SELECT id FROM connections
+		WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3
+		FOR SHARE`
+	rows, err := tx.QueryContext(ctx, q, wsID, secretRef, version)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }

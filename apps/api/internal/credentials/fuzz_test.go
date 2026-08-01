@@ -30,7 +30,7 @@ func FuzzAAD(f *testing.F) {
 			var ws, ref uuid.UUID
 			copy(ws[:], data[0:16])
 			copy(ref[:], data[16:32])
-			_ = BuildAAD(DataAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
+			_, _ = BuildAAD(ws, ref, 1, SuiteAES256GCMv1, 1)
 		}
 	})
 }

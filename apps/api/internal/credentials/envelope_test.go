@@ -8,12 +8,21 @@ import (
 	"github.com/google/uuid"
 )
 
+func mustBuildAAD(t *testing.T, workspaceID, secretRef uuid.UUID, secretVersion int, suite string, kekVersion int) []byte {
+	t.Helper()
+	aad, err := BuildAAD(workspaceID, secretRef, secretVersion, suite, kekVersion)
+	if err != nil {
+		t.Fatalf("BuildAAD: %v", err)
+	}
+	return aad
+}
+
 // ---- AAD 测试 ----------------------------------------------------------------
 
 func TestAAD_EncodeDecode(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
-	aad := BuildAAD(DataAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
+	aad := mustBuildAAD(t, ws, ref, 1, SuiteAES256GCMv1, 1)
 
 	if len(aad) != AADSize {
 		t.Errorf("expected %d bytes, got %d", AADSize, len(aad))
@@ -24,15 +33,19 @@ func TestAAD_EncodeDecode(t *testing.T) {
 	}
 }
 
-func TestAAD_DataAndWrapDifferent(t *testing.T) {
+func TestAAD_DataAndWrapAreIndependentBuffers(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	dataAAD := BuildAAD(DataAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
-	wrapAAD := BuildAAD(WrapAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
+	dataAAD := mustBuildAAD(t, ws, ref, 1, SuiteAES256GCMv1, 1)
+	wrapAAD := mustBuildAAD(t, ws, ref, 1, SuiteAES256GCMv1, 1)
 
+	if !bytes.Equal(dataAAD, wrapAAD) {
+		t.Error("data AAD and wrap AAD must bind the same approved fields")
+	}
+	dataAAD[0] ^= 0xff
 	if bytes.Equal(dataAAD, wrapAAD) {
-		t.Error("data AAD and wrap AAD must differ (different domain tags)")
+		t.Error("data AAD and wrap AAD must be independently allocated")
 	}
 }
 
@@ -40,10 +53,10 @@ func TestAAD_SizeAlways48(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	for _, tag := range []uint32{DataAADTag, WrapAADTag} {
-		aad := BuildAAD(tag, ws, ref, 5, SuiteAES256GCMv1, 3)
+	for i := 0; i < 2; i++ {
+		aad := mustBuildAAD(t, ws, ref, 5, SuiteAES256GCMv1, 3)
 		if len(aad) != AADSize {
-			t.Errorf("AAD size should always be %d, got %d for tag=%d", AADSize, len(aad), tag)
+			t.Errorf("AAD size should always be %d, got %d", AADSize, len(aad))
 		}
 	}
 }
@@ -53,8 +66,8 @@ func TestAAD_CrossWorkspaceFails(t *testing.T) {
 	ws2 := uuid.New()
 	ref := uuid.New()
 
-	aad1 := BuildAAD(DataAADTag, ws1, ref, 1, SuiteAES256GCMv1, 1)
-	aad2 := BuildAAD(DataAADTag, ws2, ref, 1, SuiteAES256GCMv1, 1)
+	aad1 := mustBuildAAD(t, ws1, ref, 1, SuiteAES256GCMv1, 1)
+	aad2 := mustBuildAAD(t, ws2, ref, 1, SuiteAES256GCMv1, 1)
 
 	if bytes.Equal(aad1, aad2) {
 		t.Error("different workspace IDs should produce different AADs")
@@ -66,8 +79,8 @@ func TestAAD_CrossSecretRefFails(t *testing.T) {
 	ref1 := uuid.New()
 	ref2 := uuid.New()
 
-	aad1 := BuildAAD(DataAADTag, ws, ref1, 1, SuiteAES256GCMv1, 1)
-	aad2 := BuildAAD(DataAADTag, ws, ref2, 1, SuiteAES256GCMv1, 1)
+	aad1 := mustBuildAAD(t, ws, ref1, 1, SuiteAES256GCMv1, 1)
+	aad2 := mustBuildAAD(t, ws, ref2, 1, SuiteAES256GCMv1, 1)
 
 	if bytes.Equal(aad1, aad2) {
 		t.Error("different secret_ref should produce different AADs")
@@ -78,8 +91,8 @@ func TestAAD_CrossVersionFails(t *testing.T) {
 	ws := uuid.New()
 	ref := uuid.New()
 
-	aad1 := BuildAAD(DataAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
-	aad2 := BuildAAD(DataAADTag, ws, ref, 2, SuiteAES256GCMv1, 1)
+	aad1 := mustBuildAAD(t, ws, ref, 1, SuiteAES256GCMv1, 1)
+	aad2 := mustBuildAAD(t, ws, ref, 2, SuiteAES256GCMv1, 1)
 
 	if bytes.Equal(aad1, aad2) {
 		t.Error("different versions should produce different AADs")
@@ -324,10 +337,10 @@ func TestAAD_GoldenVector(t *testing.T) {
 	ws := uuid.MustParse("11111111-1111-1111-1111-111111111111")
 	ref := uuid.MustParse("22222222-2222-2222-2222-222222222222")
 
-	aad := BuildAAD(DataAADTag, ws, ref, 1, SuiteAES256GCMv1, 1)
+	aad := mustBuildAAD(t, ws, ref, 1, SuiteAES256GCMv1, 1)
 
 	expected := []byte{
-		0x00, 0x00, 0x00, byte(DataAADTag),
+		0x00, 0x00, 0x00, 0x01,
 		0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
 		0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
 		0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22,

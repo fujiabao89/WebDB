@@ -2,6 +2,8 @@ package credentials
 
 import (
 	"encoding/binary"
+	"fmt"
+	"math"
 
 	"github.com/google/uuid"
 )
@@ -11,8 +13,6 @@ import (
 const (
 	AADSize           = 48
 	versionTag uint32 = 0x00000001
-	DataAADTag uint32 = 1
-	WrapAADTag uint32 = 2
 )
 
 type SuiteTag uint32
@@ -33,20 +33,25 @@ func SuiteTagFromString(s string) (SuiteTag, bool) {
 }
 
 // BuildAAD 构造 48-byte 确定性二进制 AAD（大端序）。
-// 格式: version_tag(3B) || domain_tag(1B) || workspace_id(16B) || secret_ref(16B) ||
+// 格式: version_tag(4B) || workspace_id(16B) || secret_ref(16B) ||
 //
 //	secret_version(4B) || envelope_suite_tag(4B) || kek_version(4B)
-//
-// domain_tag 占据 version_tag 的第 4 字节（DataAADTag=1, WrapAADTag=2），实现 data/wrap 域分离。
-// 调用方（SealEnvelope / OpenEnvelope）在上游校验 suite 有效性，BuildAAD 本身不返回 error。
-func BuildAAD(domainTag uint32, workspaceID, secretRef uuid.UUID, secretVersion int, suite string, kekVersion int) []byte {
-	suiteTag, _ := SuiteTagFromString(suite)
+func BuildAAD(workspaceID, secretRef uuid.UUID, secretVersion int, suite string, kekVersion int) ([]byte, error) {
+	suiteTag, ok := SuiteTagFromString(suite)
+	if !ok {
+		return nil, fmt.Errorf("%w: unsupported AAD suite", ErrUnknownSuite)
+	}
+	if !validAADVersion(secretVersion) {
+		return nil, fmt.Errorf("%w: invalid secret version for AAD", ErrInternalError)
+	}
+	if !validAADVersion(kekVersion) {
+		return nil, fmt.Errorf("%w: invalid KEK version for AAD", ErrInternalError)
+	}
 
 	aad := make([]byte, AADSize)
 	offset := 0
 
 	binary.BigEndian.PutUint32(aad[offset:], versionTag)
-	aad[3] = byte(domainTag)
 	offset += 4
 
 	copy(aad[offset:], workspaceID[:])
@@ -63,5 +68,9 @@ func BuildAAD(domainTag uint32, workspaceID, secretRef uuid.UUID, secretVersion 
 
 	binary.BigEndian.PutUint32(aad[offset:], uint32(kekVersion))
 
-	return aad
+	return aad, nil
+}
+
+func validAADVersion(version int) bool {
+	return version > 0 && uint64(version) <= math.MaxUint32
 }

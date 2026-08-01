@@ -469,6 +469,125 @@ func TestConnection_CrossWorkspaceEnvelope_Rejected(t *testing.T) {
 	}
 }
 
+func TestConnectionWritesRejectRetiredCredential(t *testing.T) {
+	db, store, _, _, _, envV1, conn, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	envV2 := &CredentialEnvelope{
+		WorkspaceID:   envV1.WorkspaceID,
+		SecretRef:     envV1.SecretRef,
+		Version:       2,
+		Ciphertext:    []byte{1, 2, 3},
+		DataNonce:     []byte{4, 5, 6},
+		WrappedDEK:    []byte{7, 8, 9},
+		WrapNonce:     []byte{10, 11, 12},
+		EnvelopeSuite: envV1.EnvelopeSuite,
+		KEKVersion:    envV1.KEKVersion,
+	}
+	if err := store.CreateEnvelope(ctx, envV2); err != nil {
+		t.Fatalf("创建第二版凭证失败: %v", err)
+	}
+
+	conn.SecretVersion = 2
+	if err := store.UpdateConnection(ctx, conn.WorkspaceID, conn); err != nil {
+		t.Fatalf("切换现有连接到第二版失败: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateRetiredAt(ctx, tx, envV1.WorkspaceID, envV1.SecretRef, 1); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("退役第一版失败: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("提交退役失败: %v", err)
+	}
+
+	newConn := *conn
+	newConn.ID = uuid.Nil
+	newConn.Name = "must-reject-retired-create"
+	newConn.SecretVersion = 1
+	if err := store.CreateConnection(ctx, &newConn); err == nil {
+		t.Fatal("创建连接引用已退役凭证：error = nil，期望 fail-closed")
+	}
+
+	conn.SecretVersion = 1
+	if err := store.UpdateConnection(ctx, conn.WorkspaceID, conn); err == nil {
+		t.Fatal("更新连接引用已退役凭证：error = nil，期望 fail-closed")
+	}
+}
+
+func TestCountConnectionsByVersionLocksMatchingReferences(t *testing.T) {
+	db, store, _, _, _, envV1, _, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	envV2 := &CredentialEnvelope{
+		WorkspaceID:   envV1.WorkspaceID,
+		SecretRef:     envV1.SecretRef,
+		Version:       2,
+		Ciphertext:    []byte{1, 2, 3},
+		DataNonce:     []byte{4, 5, 6},
+		WrappedDEK:    []byte{7, 8, 9},
+		WrapNonce:     []byte{10, 11, 12},
+		EnvelopeSuite: envV1.EnvelopeSuite,
+		KEKVersion:    envV1.KEKVersion,
+	}
+	if err := store.CreateEnvelope(ctx, envV2); err != nil {
+		t.Fatalf("创建第二版凭证失败: %v", err)
+	}
+
+	retireTx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retireTx.Rollback()
+
+	count, err := store.CountConnectionsByVersion(ctx, retireTx, envV1.WorkspaceID, envV1.SecretRef, 1)
+	if err != nil {
+		t.Fatalf("统计连接引用失败: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("连接引用数 = %d，期望 1", count)
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		tx, beginErr := db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			updateDone <- beginErr
+			return
+		}
+		if updateErr := store.UpdateConnectionVersion(ctx, tx, envV1.WorkspaceID, envV1.SecretRef, 2); updateErr != nil {
+			_ = tx.Rollback()
+			updateDone <- updateErr
+			return
+		}
+		updateDone <- tx.Commit()
+	}()
+
+	select {
+	case err := <-updateDone:
+		t.Fatalf("并发连接版本更新未被 FOR SHARE 阻塞: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := retireTx.Rollback(); err != nil {
+		t.Fatalf("释放引用锁失败: %v", err)
+	}
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("释放引用锁后更新失败: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("释放引用锁后连接版本更新仍未完成")
+	}
+}
+
 // ---- connection_policies 约束测试 -----------------------------------------
 
 func TestPolicy_Upsert_Succeeds(t *testing.T) {

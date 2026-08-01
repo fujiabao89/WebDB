@@ -23,7 +23,7 @@ const (
 type KEKProvider interface {
 	ActiveKEK() (version int, key []byte, err error)
 	GetKEK(version int) ([]byte, error)
-	RecordWrap(version int) error
+	ReserveWrap(version int) error
 	WrapCount(version int) uint64
 }
 
@@ -140,7 +140,9 @@ func (p *envKEKProvider) GetKEK(version int) ([]byte, error) {
 	return out, nil
 }
 
-func (p *envKEKProvider) RecordWrap(version int) error {
+// ReserveWrap 在生成 DEK/wrap nonce 前原子预留一次包装额度。
+// 额度代表一次包装尝试，不因后续随机源、加密或数据库失败而归还。
+func (p *envKEKProvider) ReserveWrap(version int) error {
 	p.mu.Lock()
 	ctr, ok := p.counters[version]
 	if !ok {
@@ -149,13 +151,20 @@ func (p *envKEKProvider) RecordWrap(version int) error {
 	}
 	p.mu.Unlock()
 
-	// 递增并检查上限
-	current := ctr.Add(1)
-	if current > maxWrapsPerKEK {
-		ctr.Add(^uint64(0)) // 回退（best-effort）
-		return fmt.Errorf("%w: KEK version %d exceeded wrap limit of %d", ErrInternalError, version, maxWrapsPerKEK)
+	for {
+		current := ctr.Load()
+		if current >= maxWrapsPerKEK {
+			return fmt.Errorf(
+				"%w: KEK version %d reached wrap limit of %d",
+				ErrInternalError,
+				version,
+				maxWrapsPerKEK,
+			)
+		}
+		if ctr.CompareAndSwap(current, current+1) {
+			return nil
+		}
 	}
-	return nil
 }
 
 func (p *envKEKProvider) WrapCount(version int) uint64 {

@@ -34,6 +34,9 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
 	}
+	if err := m.kek.ReserveWrap(ver); err != nil {
+		return nil, err
+	}
 
 	env, err := SealEnvelope(payload, workspaceID, secretRef, secretVersion, SuiteAES256GCMv1, ver, kekKey, rand.Reader)
 	if err != nil {
@@ -41,11 +44,6 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 	}
 
 	if err := m.store.CreateEnvelope(ctx, env); err != nil {
-		return nil, err
-	}
-
-	// RecordWrap 在持久化成功后递增
-	if err := m.kek.RecordWrap(ver); err != nil {
 		return nil, err
 	}
 
@@ -105,6 +103,9 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
 	}
+	if err := m.kek.ReserveWrap(ver); err != nil {
+		return nil, err
+	}
 
 	newEnv, err := SealEnvelope(newPayload, workspaceID, secretRef, newVersion, SuiteAES256GCMv1, ver, kekKey, rand.Reader)
 	if err != nil {
@@ -123,11 +124,6 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("%w: commit: %v", ErrInternalError, err)
-	}
-
-	// 7. RecordWrap 在 Commit 成功后递增，确保回滚时计数不偏离
-	if err := m.kek.RecordWrap(ver); err != nil {
-		return nil, err
 	}
 
 	return newEnv, nil

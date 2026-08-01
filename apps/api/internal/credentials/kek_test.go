@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -192,7 +193,7 @@ func TestKEK_WrappingCounterIncrement(t *testing.T) {
 
 	// 验证计数器增加
 	initial := provider.WrapCount(ver)
-	provider.RecordWrap(ver)
+	provider.ReserveWrap(ver)
 	if provider.WrapCount(ver) != initial+1 {
 		t.Error("wrap counter should increment")
 	}
@@ -212,12 +213,12 @@ func TestKEK_WrappingCounterLimit(t *testing.T) {
 	provider.(*envKEKProvider).mu.Unlock()
 
 	// Should be allowed
-	if err := provider.RecordWrap(ver); err != nil {
+	if err := provider.ReserveWrap(ver); err != nil {
 		t.Fatalf("expected wrap at near-limit to succeed: %v", err)
 	}
 
 	// Now at limit - should fail
-	if err := provider.RecordWrap(ver); err == nil {
+	if err := provider.ReserveWrap(ver); err == nil {
 		t.Fatal("expected wrap at limit to be rejected")
 	}
 }
@@ -236,7 +237,7 @@ func TestKEK_WrappingCounterConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			provider.RecordWrap(ver)
+			provider.ReserveWrap(ver)
 		}()
 	}
 	wg.Wait()
@@ -244,6 +245,44 @@ func TestKEK_WrappingCounterConcurrent(t *testing.T) {
 	count := provider.WrapCount(ver)
 	if count != uint64(n) {
 		t.Errorf("expected count %d, got %d after %d concurrent increments", n, count, n)
+	}
+}
+
+func TestKEK_WrapReservationNeverExceedsLimitConcurrently(t *testing.T) {
+	setEnv(t, "WEBDB_KEK_V1", testKEKBase64())
+	setEnv(t, "WEBDB_ACTIVE_KEK_VERSION", "1")
+	provider, err := NewEnvKEKProvider()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ver, _, err := provider.ActiveKEK()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const remaining = 8
+	concrete := provider.(*envKEKProvider)
+	concrete.counters[ver].Store(maxWrapsPerKEK - remaining)
+
+	const contenders = 64
+	var successes atomic.Int64
+	var wg sync.WaitGroup
+	for i := 0; i < contenders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := provider.ReserveWrap(ver); err == nil {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := successes.Load(); got != remaining {
+		t.Fatalf("successful reservations = %d, want %d", got, remaining)
+	}
+	if got := provider.WrapCount(ver); got != maxWrapsPerKEK {
+		t.Fatalf("wrap count = %d, want hard limit %d", got, maxWrapsPerKEK)
 	}
 }
 
