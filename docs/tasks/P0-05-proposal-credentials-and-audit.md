@@ -197,8 +197,10 @@ P0 不实现 TLS 客户端证书、SSH 密钥或 OAuth token。这些是 P1+ 的
 AAD 使用 Canonical JSON 编码，绑定以下字段：
 
 ```json
-{"envelope_suite":"AES256GCM-v1","kek_version":1,"secret_ref":"uuid-hex","secret_version":1,"workspace_id":"uuid-hex"}
+{"envelope_suite":"AES256GCM-v1","kek_version":1,"secret_ref":"550e8400-e29b-41d4-a716-446655440000","secret_version":1,"workspace_id":"660e8400-e29b-41d4-a716-446655440001"}
 ```
+
+> UUID 统一使用小写、带连字符的 36 字符标准格式（RFC 4122 §3）。AAD 序列化时必须直接使用 `uuid.UUID.String()` 输出，不得自行去除连字符或转换大小写。加密与解密端必须使用完全相同的 AAD 规范化规则。
 
 **AAD 字段**：
 
@@ -349,10 +351,12 @@ KEK 不得出现在：
 - API/浏览器响应
 - 普通测试夹具
 
-单元测试只能使用显式标记的合成临时密钥：
+单元测试只能使用显式标记的合成临时密钥。以下示例仅供说明长度要求，实际测试中应通过 `crypto/rand` 生成或使用独立固定值，禁止从本文档复制：
+
 ```go
-// 仅测试用：合成 256-bit 密钥
-var testKEK = []byte("test-key-32-bytes-long!!!!!!")  // 恰好 32 bytes
+// 仅测试用：合成 256-bit 密钥（32 字节）
+// 禁止在测试或生产代码中直接复制以下值
+var testKEK = []byte("0123456789abcdef0123456789abcdef") // 严格 32 bytes
 ```
 
 ---
@@ -389,6 +393,8 @@ var testKEK = []byte("test-key-32-bytes-long!!!!!!")  // 恰好 32 bytes
 6. 使用 ActiveKEK 加密
 7. INSERT INTO credential_envelopes (workspace_id, secret_ref, version, ...)
 8. 写入审计事件: action="credential.create", outcome="succeeded"
+   → 审计写入失败：INSERT 已持久化（独立非事务操作），返回 audit_failed；
+      已创建的 envelope 行保留（创建是单 INSERT 无事务依赖），客户端可重试验证幂等性
 ```
 
 #### 6.2.2 读取指定版本（ResolveCredential）
@@ -400,10 +406,10 @@ var testKEK = []byte("test-key-32-bytes-long!!!!!!")  // 恰好 32 bytes
 4. 验证 envelope_suite 已知
 5. AAD ← canonicalJSON(row)
 6. KEK ← KEKProvider.GetKEK(row.kek_version)
-7. KEK 未知 → audit: unknown_kek_version, 返回 internal_error
+7. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
 8. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, nil)
 9. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, AAD)
-10. 解密失败 → audit: credential.decrypt.fail, 返回 internal_error
+10. 解密失败 → audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
 11. 验证 payload schema
 12. 返回 CredentialPayload
 ```
@@ -415,15 +421,19 @@ var testKEK = []byte("test-key-32-bytes-long!!!!!!")  // 恰好 32 bytes
 ```text
 1. 验证调用者角色
 2. 验证 payload schema
-3. 新 version = MAX(version) + 1（在同一次事务中原子获取）
-4. 生成新 DEK + nonces
-5. 使用 ActiveKEK 加密新 payload
-6. BEGIN TRANSACTION
-7.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
-8.   UPDATE connections SET secret_version = 新 version
+3. BEGIN TRANSACTION
+4.   SELECT secret_ref FROM credential_envelopes
+        WHERE workspace_id = $1 AND secret_ref = $2 FOR UPDATE
+5.   新 version = MAX(version) + 1（在持锁事务内原子计算）
+6.   生成新 DEK + nonces
+7.   使用 ActiveKEK 加密新 payload
+8.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
+9.   UPDATE connections SET secret_version = 新 version
         WHERE workspace_id = $1 AND secret_ref = $2
-9. COMMIT
-10. 写入审计事件: credential.rotate.success
+10. COMMIT
+11. 写入审计事件: credential.rotate.success
+    → 审计写入失败：事务已 COMMIT（新版本和连接引用已持久化），返回 audit_failed；
+       事务内的变更不受审计写入失败影响，客户端可重试审计写入
 ```
 
 **轮换失败行为**：
@@ -568,7 +578,12 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | E16 | 未知 KEK 版本 | `credential.decrypt` | `failed` | `system` | 连接 ID | NULL | `secret_ref`, `secret_version`, `kek_version`, `error_code` |
 | E17 | 审计写入失败告警 | `audit.write` | `failed` | `system` | NULL | NULL | `error_code`（写入应用安全日志） |
 
-### 8.2 Metadata 允许列表（完整）
+### 8.2 Metadata 允许列表（13 个字段）
+
+P0-05 新增字段与 P0-04 现有 `sanitizeAuditMetadata()` 允许列表的关系：
+- P0-04 当前维护的字段（`summary`、`rows_affected`、`row_count`、`cached`、`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）继续生效
+- P0-05 新增以下凭证相关字段：`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`
+- WEB-23 实现时需扩展 `sanitizeAuditMetadata()` 以支持完整 16 字段允许列表，并添加兼容性测试验证新旧字段不会被丢弃
 
 | 键 | 类型 | 约束 | 适用事件 |
 |---|---|---|---|
@@ -670,7 +685,14 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | B | 较长（90 天/1 年） | 需要清理任务和存储预算 |
 | C | 不自动删除 | 需要归档策略和存储增长管理 |
 
-**建议**：Owner 在 P0 阶段先决定一个初始审计保留期。P0 阶段默认建议 **90 天**，由后台任务清理，并在清理前记录 `audit.retention.expired` 系统审计事件。
+**建议**：Owner 在 P0 阶段先决定一个初始审计保留期。P0 阶段默认建议 **90 天**。
+
+**清理机制约束**（无论 Owner 选择哪个保留期）：
+- 清理操作必须由独立的后台任务执行（不是普通应用仓储方法），且使用受限数据库角色
+- 清理任务以 `occurred_at < (now() - retention)` 为条件批量删除，不提供单条删除 API
+- 每次清理前写入 `audit.retention.expired` 系统审计事件（记录清理范围的时间窗口和行数）
+- 清理任务不得绕过 `deny_audit_mutation()` 触发器——触发器保留用于防御普通应用路径，清理任务使用独立数据库角色或临时禁用触发器后立即恢复
+- 此机制在 WEB-23 中实现，不得在本任务中固定具体保留期数值
 
 ### 10.3 凭证 envelope 保留
 

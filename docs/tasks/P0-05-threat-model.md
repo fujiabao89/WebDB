@@ -185,24 +185,40 @@ DEK 流:
 
 | # | 风险 | 不可缓解原因 | 接受条件 |
 |---|---|---|---|
-| R1 | Go GC 移动内存导致明文残留 | Go 语言设计限制 | 文档记录；最小化明文生命周期 |
-| R2 | 主机 root 入侵可读取 KEK/密码 | 无法防止具有 root 权限的攻击者 | 部署环境保护；P0 阶段不承诺内存加密 |
-| R3 | PostgreSQL SUPERUSER 可绕过审计触发器 | 数据库权限模型的根本限制 | 生产部署拆分数据库角色；P0 Compose 环境记录此限制 |
-| R4 | 96-bit nonce 碰撞（概率 ~2^-96） | 密码学概率极限 | 每次加密使用新 DEK，进一步降低风险 |
-| R5 | 服务重启后 Continuation Token 全部失效 | ADR-015 已接受的限制 | 内存 Registry 的设计取舍 |
+| R1 | Go GC 移动内存导致明文残留 | Go 语言设计限制 | 文档记录；最小化明文生命周期（Owner D15） |
+| R2 | 主机 root 入侵可读取 KEK/密码 | 无法防止具有 root 权限的攻击者 | 部署环境保护；P0 阶段不承诺内存加密（Owner D15） |
+| R3 | PostgreSQL SUPERUSER 可绕过审计触发器 | 数据库权限模型的根本限制 | 生产部署拆分数据库角色；P0 Compose 环境记录此限制（Owner D15） |
+| R4 | 96-bit nonce 碰撞（概率 ~2^-96） | 密码学概率极限 | 每次加密使用新 DEK，进一步降低风险（Owner D15） |
+| R5 | `crypto/rand` 在极端熵耗尽时返回错误 | 系统级故障，概率极低 | fail-closed，不降级弱随机源（Owner D15） |
+| R6 | `SELECT func()` 副作用（含 SECURITY DEFINER） | AST 无法判断函数副作用 | P0-04 已有缓解：测试账号不授予危险函数权限（P0-04 残余风险） |
+| R7 | 服务重启后 Continuation Token 全部失效 | ADR-015 已接受的限制 | 内存 Registry 的设计取舍 |
+
+> 上述 R1-R7 与 `P0-05-proposal-credentials-and-audit.md` §13 残余风险清单保持一致。
 
 ---
 
-## 7. P0 明确接受的限制
+## 7. 拟接受的限制（待 Owner 批准）
 
-1. **不使用企业 KMS**：KEK 由环境变量注入（ADR-006）
-2. **不保证内存清零**：Go 语言限制，明文最小化生命周期缓解
-3. **审计触发器可被 SUPERUSER 绕过**：生产部署需拆分数据库角色
+以下限制已由相关 ADR 明确接受或已纳入方案推荐，但最终批准取决于 Owner D1-D15 决策：
+
+1. **不使用企业 KMS**：KEK 由环境变量注入（ADR-006 已接受）
+2. **不保证内存清零**：Go 语言限制，明文最小化生命周期缓解（ADR-017 提议中，Owner D15）
+3. **审计触发器可被 SUPERUSER 绕过**：生产部署需拆分数据库角色（ADR-013 已实现，残余风险 R6）
 4. **服务重启使 Continuation Token 失效**：ADR-015 已接受
-5. **不防止主机 root 入侵**：超出 P0 威胁模型范围
+5. **不防止主机 root 入侵**：超出 P0 威胁模型范围（残余风险 R2）
 
 ---
 
 ## 8. 测试编号对应
 
-威胁到测试的完整映射见 `P0-05-proposal-credentials-and-audit.md` §14 测试矩阵。每个测试 ID 对应上述一个或多个威胁 ID。
+| 测试类别 | 测试 ID 范围 | 覆盖威胁 |
+|---|---|---|
+| Payload | PAY-01–PAY-12 | T20（凭证解密过早）、T21（凭证失败后调 Adapter） |
+| 加密 | ENC-01–ENC-18 | T3（KEK 版本混淆）、T5-T11（密文完整性）、T12-T13（nonce 重用）、T14-T15（downgrade） |
+| KEK Provider | KEK-01–KEK-08 | T1（KEK 泄漏）、T2（弱默认 KEK）、T4（未知 KEK 版本）、T31（随机源失败） |
+| 生命周期 | LIFE-01–LIFE-09 | T22（轮换部分失败）、T23（并发轮换）、T24（退役版本引用） |
+| 集成断言 | INT-01–INT-10 | T16（日志泄漏）、T17（错误响应泄漏）、T18（审计 metadata 注入）、T20、T21 |
+| 审计故障注入 | AUDIT-01–AUDIT-04 | T25（审计静默失败）、T26（审计失败时仍执行）、T27（阶段 D 后重复执行） |
+| 质量门禁 | QA-01–QA-08 | T28（安全告警失败）、T29（备份泄漏）、T30（panic/取消/超时） |
+
+T19（审计 metadata 含原始错误）由 P0-04 的 AUDIT-11 覆盖（`docs/tasks/P0-04-proposal-contract-and-parser.md` §9.5）。
