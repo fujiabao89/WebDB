@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -359,6 +360,62 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 			t.Parallel()
 			if got := mapAdapterError(tt.err); got != tt.want {
 				t.Fatalf("mapAdapterError() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMapCredentialErrorPreservesStableClassifications(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want StableErrorCode
+	}{
+		{
+			name: "not found",
+			err:  credentials.ErrCredentialNotFound,
+			want: StableErrorCode(credentials.ErrCredentialNotFound),
+		},
+		{
+			name: "retired",
+			err:  credentials.ErrCredentialRetired,
+			want: StableErrorCode(credentials.ErrCredentialRetired),
+		},
+		{
+			name: "decryption failed",
+			err:  credentials.ErrDecryptionFailed,
+			want: StableErrorCode(credentials.ErrDecryptionFailed),
+		},
+		{
+			name: "unknown KEK version",
+			err:  credentials.ErrUnknownKEKVersion,
+			want: StableErrorCode(credentials.ErrUnknownKEKVersion),
+		},
+		{
+			name: "wrap quota exhausted",
+			err:  credentials.ErrWrapQuotaExhausted,
+			want: StableErrorCode(credentials.ErrWrapQuotaExhausted),
+		},
+		{
+			name: "wrapped wrap quota exhausted",
+			err:  fmt.Errorf("rotate: %w", credentials.ErrWrapQuotaExhausted),
+			want: StableErrorCode(credentials.ErrWrapQuotaExhausted),
+		},
+		{
+			name: "unknown error",
+			err:  errors.New("some random error"),
+			want: ErrInternalError,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := mapCredentialError(tt.err); got != tt.want {
+				t.Fatalf("mapCredentialError() = %q, want %q", got, tt.want)
 			}
 		})
 	}

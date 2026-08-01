@@ -356,6 +356,14 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 }
 
 func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
+	// 先确认连接行存在，避免 CTE 的 sql.ErrNoRows 混淆"连接缺失"与"凭证缺失"。
+	const checkConn = `SELECT 1 FROM connections WHERE id = $1 AND workspace_id = $2`
+	if err := s.DB.QueryRowContext(ctx, checkConn, c.ID, wsID).Scan(new(int)); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("connection %s not found in workspace %s", c.ID, wsID)
+	} else if err != nil {
+		return err
+	}
+
 	const q = `
 		WITH active_credential AS MATERIALIZED (
 			SELECT 1
