@@ -32,7 +32,7 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 
 	ver, kekKey, err := m.kek.ActiveKEK()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
 		return nil, err
@@ -56,9 +56,9 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 	env, err := m.store.EnvelopeByRef(ctx, workspaceID, secretRef, secretVersion)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return CredentialPayload{}, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return CredentialPayload{}, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return CredentialPayload{}, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if env.RetiredAt != nil {
@@ -68,9 +68,10 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 	kek, err := m.kek.GetKEK(env.KEKVersion)
 	if err != nil {
 		// 携带 KEK 版本号，供 E16 审计记录 kek_version（Codex P1）。
+		// 不把底层 KEK 提供器错误文本拼进错误链（Qodo #1）。
 		return CredentialPayload{}, &KEKVersionError{
 			Version: env.KEKVersion,
-			err:     fmt.Errorf("%w: %v", ErrUnknownKEKVersion, err),
+			err:     fmt.Errorf("%w: unknown kek version", ErrUnknownKEKVersion),
 		}
 	}
 
@@ -89,14 +90,19 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	env, err := m.store.LockEnvelopeForUpdate(ctx, tx, workspaceID, secretRef)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return nil, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return nil, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	// 2. expected_version 检查
 	if env.Version != expectedVersion {
-		return nil, fmt.Errorf("%w: expected %d, actual %d", ErrVersionConflict, expectedVersion, env.Version)
+		// 携带 expected/actual 版本，供 E5 审计记录 actual_version（Qodo #4）。
+		return nil, &VersionConflictError{
+			Expected: expectedVersion,
+			Actual:   env.Version,
+			err:      fmt.Errorf("%w", ErrVersionConflict),
+		}
 	}
 
 	// 2a. 最新版本已退役时拒绝轮换。
@@ -110,7 +116,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	// 4. 使用 active KEK 加密
 	ver, kekKey, err := m.kek.ActiveKEK()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
 		return nil, err
@@ -123,12 +129,12 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 
 	// 5. INSERT 新版本
 	if err := m.store.InsertEnvelopeTx(ctx, tx, newEnv); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	// 6. UPDATE connections
 	if err := m.conns.UpdateConnectionVersion(ctx, tx, workspaceID, secretRef, newVersion); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -150,9 +156,9 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 	env, err := m.store.LockEnvelopeVersion(ctx, tx, workspaceID, secretRef, version)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if env.RetiredAt != nil {
@@ -163,7 +169,7 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 	// 2. 检查引用
 	count, err := m.conns.CountConnectionsByVersion(ctx, tx, workspaceID, secretRef, version)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if count > 0 {
 		return fmt.Errorf("%w: %d connections still reference version %d", ErrCredentialInUse, count, version)
@@ -171,7 +177,7 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 
 	// 3. 设置 retired_at
 	if err := m.store.UpdateRetiredAt(ctx, tx, workspaceID, secretRef, version); err != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	return tx.Commit()

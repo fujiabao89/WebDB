@@ -59,7 +59,7 @@ func (m *AuditedLifecycleManager) Create(ctx context.Context, wsID, actorID uuid
 		m.newTrace(), m.clock(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		return nil, m.auditEventBuildFailed(ctx, wsID, err)
 	}
 	if err := m.writeAudit(ctx, event); err != nil {
 		return nil, err
@@ -78,8 +78,10 @@ func (m *AuditedLifecycleManager) Resolve(ctx context.Context, wsID, secretRef u
 	var action string
 	var md metadata.AuditMetadata
 	switch code {
-	case ErrCredentialNotFound, ErrCredentialRetired:
-		// E14: credential.lookup 失败（system actor）
+	case ErrCredentialNotFound, ErrCredentialRetired, ErrInternalError:
+		// E14: credential.lookup 失败（system actor）。
+		// ErrInternalError（如 EnvelopeByRef 的数据库错误）发生在查找阶段，
+		// 语义上是 lookup 而非 decrypt，避免污染解密失败审计（CodeRabbit #14）。
 		action = metadata.ActionCredentialLookup
 		md = metadata.AuditMetadata{
 			SecretRef: strPtr(secretRef.String()),
@@ -99,8 +101,8 @@ func (m *AuditedLifecycleManager) Resolve(ctx context.Context, wsID, secretRef u
 			md.KEKVersion = intPtr(kekErr.Version)
 		}
 		// 凭证解密失败/未知 KEK 版本必须触发安全告警（ADR-017 §6）。
-		if isDecryptFailureCode(code) {
-			m.alarm.Alarm(ctx, metadata.SecurityAlertEvent{
+		if IsDecryptFailureCode(code) {
+			metadata.EmitAlarm(m.alarm, ctx, metadata.SecurityAlertEvent{
 				TraceID:     m.newTrace(),
 				WorkspaceID: wsID,
 				Code:        string(code),
@@ -115,7 +117,8 @@ func (m *AuditedLifecycleManager) Resolve(ctx context.Context, wsID, secretRef u
 		metadata.OutcomeFailed, md, m.newTrace(), m.clock(),
 	)
 	if buildErr != nil {
-		return payload, buildErr
+		// 与 Create/Retire 一致：审计事件构建失败 → audit_failed + $SECURITY_ALERT（CodeRabbit #15）。
+		return payload, m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
 	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
 		return payload, auditErr
@@ -130,7 +133,8 @@ func (m *AuditedLifecycleManager) Rotate(ctx context.Context, wsID, actorID, sec
 		// E5 credential.rotate failed
 		event, buildErr := newRotateFailedEvent(wsID, actorID, secretRef, expectedVersion, err, m.newTrace(), m.clock())
 		if buildErr != nil {
-			return nil, err
+			// 不丢弃 buildErr（CodeRabbit #16）：审计事件构建失败 → audit_failed + $SECURITY_ALERT。
+			return nil, m.auditEventBuildFailed(ctx, wsID, buildErr)
 		}
 		if auditErr := m.writeAudit(ctx, event); auditErr != nil {
 			return nil, auditErr
@@ -141,7 +145,7 @@ func (m *AuditedLifecycleManager) Rotate(ctx context.Context, wsID, actorID, sec
 	// E4 credential.rotate succeeded
 	event, buildErr := newRotateSucceededEvent(wsID, actorID, secretRef, expectedVersion, newEnv, m.newTrace(), m.clock())
 	if buildErr != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, buildErr)
+		return nil, m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
 	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
 		return nil, auditErr
@@ -157,7 +161,7 @@ func (m *AuditedLifecycleManager) Retire(ctx context.Context, wsID, actorID, sec
 
 	event, buildErr := newRetireSucceededEvent(wsID, actorID, secretRef, version, m.newTrace(), m.clock())
 	if buildErr != nil {
-		return fmt.Errorf("%w: %v", ErrAuditFailed, buildErr)
+		return m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
 	if auditErr := m.writeAudit(ctx, event); auditErr != nil {
 		return auditErr
@@ -191,6 +195,11 @@ func newRotateFailedEvent(wsID, actorID, secretRef uuid.UUID, expectedVersion in
 	}
 	if code == ErrVersionConflict {
 		md.ExpectedVersion = intPtr(expectedVersion)
+		// 从 typed conflict 错误提取实际版本，记录 actual_version（Qodo #4）。
+		var vce *VersionConflictError
+		if errors.As(err, &vce) {
+			md.ActualVersion = intPtr(vce.Actual)
+		}
 	}
 	return newLifecycleAuditEvent(
 		wsID, metadata.ActorTypeUser, &actorID, nil, nil,
@@ -218,15 +227,29 @@ func newRetireSucceededEvent(wsID, actorID, secretRef uuid.UUID, version int, tr
 // writeAudit 写审计；审计追加失败触发 $SECURITY_ALERT 并返回 audit_failed（ADR-017 §6）。
 func (m *AuditedLifecycleManager) writeAudit(ctx context.Context, event *metadata.AuditEvent) error {
 	if err := m.audit.AppendAudit(ctx, event); err != nil {
-		m.alarm.Alarm(ctx, metadata.SecurityAlertEvent{
+		metadata.EmitAlarm(m.alarm, ctx, metadata.SecurityAlertEvent{
 			TraceID:     event.TraceID,
 			WorkspaceID: event.WorkspaceID,
 			Code:        string(ErrAuditFailed),
 			OccurredAt:  m.clock(),
 		})
-		return fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		// 不把底层审计存储错误文本拼进返回错误（Qodo #1）。
+		return fmt.Errorf("%w: audit write failed", ErrAuditFailed)
 	}
 	return nil
+}
+
+// auditEventBuildFailed 统一处理审计事件构建失败（Create/Resolve/Rotate/Retire）：
+// 返回 audit_failed 并触发 $SECURITY_ALERT（ADR-017 §6，CodeRabbit #16）。
+func (m *AuditedLifecycleManager) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, buildErr error) error {
+	metadata.EmitAlarm(m.alarm, ctx, metadata.SecurityAlertEvent{
+		TraceID:     m.newTrace(),
+		WorkspaceID: wsID,
+		Code:        string(ErrAuditFailed),
+		OccurredAt:  m.clock(),
+	})
+	// 不把构建错误文本拼进返回错误（Qodo #1）。
+	return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 }
 
 // newLifecycleAuditEvent 构建凭证生命周期审计事件（user/system actor 判别）。
@@ -287,8 +310,11 @@ func credentialErrorCode(err error) ErrorCode {
 	}
 }
 
-// isDecryptFailureCode 判断是否属于必须触发安全告警的解密类失败。
-func isDecryptFailureCode(code ErrorCode) bool {
+// IsDecryptFailureCode 判断是否属于必须触发安全告警的解密类失败。
+// 供凭证层（audited.go）与执行/连接层（execution.Pipeline、connections.Service）
+// 复用同一判定，避免把 credential_not_found/credential_retired 等查找类失败
+// 升级为安全告警（Qodo #2 / CodeRabbit #8）。
+func IsDecryptFailureCode(code ErrorCode) bool {
 	switch code {
 	case ErrDecryptionFailed, ErrUnknownKEKVersion, ErrInvalidPayload, ErrPayloadTooLarge:
 		return true

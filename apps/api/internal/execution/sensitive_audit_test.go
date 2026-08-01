@@ -93,11 +93,13 @@ func TestAuditedExecute_ErrorNoCanary(t *testing.T) {
 	}
 }
 
-// TestStderrAlarmOutput 验证 $SECURITY_ALERT 输出不含敏感输入。
+// TestStderrAlarmOutput 验证 $SECURITY_ALERT 输出不含敏感输入且为结构化字段。
 func TestStderrAlarmOutput(t *testing.T) {
 	var buf bytes.Buffer
+	old := log.Writer()
 	log.SetOutput(&buf)
-	defer log.SetOutput(nil)
+	// 恢复原 writer，而非 SetOutput(nil)，避免后续 NewStderrAlarm 的 log.Print panic（Qodo #5 / CodeRabbit #20）。
+	t.Cleanup(func() { log.SetOutput(old) })
 
 	alarm := NewStderrAlarm()
 	alarm.Alarm(context.Background(), metadata.SecurityAlertEvent{
@@ -110,6 +112,12 @@ func TestStderrAlarmOutput(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "$SECURITY_ALERT") {
 		t.Fatalf("stderr alarm missing marker: %q", out)
+	}
+	// 结构化 key=value 字段便于监控聚合（CodeRabbit #28）。
+	for _, field := range []string{"trace=trace-1", "workspace=", "code=audit_failed", "occurred_at=2023-11-14T22:13:20Z"} {
+		if !strings.Contains(out, field) {
+			t.Fatalf("stderr alarm missing structured field %q: %q", field, out)
+		}
 	}
 	for _, sensitive := range []string{"sup3rsecret", "hunter2", "password=", "kek="} {
 		if strings.Contains(out, sensitive) {

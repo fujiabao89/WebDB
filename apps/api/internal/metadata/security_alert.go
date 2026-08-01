@@ -24,7 +24,24 @@ type SecurityAlarm interface {
 	Alarm(ctx context.Context, e SecurityAlertEvent)
 }
 
+// EmitAlarm 发送安全告警并捕获告警通道实现自身的 panic（T28）。
+// 安全告警是 E17 的最后防线：即使告警实现崩溃，也不能 panic、递归审计
+// 或改变调用方的 fail-closed 返回；失败仅记录到 stderr 由基础设施处理。
+func EmitAlarm(alarm SecurityAlarm, ctx context.Context, e SecurityAlertEvent) {
+	if alarm == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("$SECURITY_ALERT_CHANNEL_FAILED code=%s occurred_at=%s",
+				e.Code, e.OccurredAt.Format(time.RFC3339))
+		}
+	}()
+	alarm.Alarm(ctx, e)
+}
+
 // StderrSecurityAlarm 将安全告警写入 stderr（基础设施级最终 fallback，T28）。
+// 输出结构化 key=value 字段（trace/workspace/code/occurred_at），便于监控系统聚合。
 type StderrSecurityAlarm struct{}
 
 // NewStderrSecurityAlarm 创建 stderr 安全告警通道。

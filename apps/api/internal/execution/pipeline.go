@@ -235,10 +235,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 					ReasonCode:    strPtr(string(decision.ReasonCode)),
 					Engine:        strPtr(string(serverEngine)),
 				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrReadNotAllowed)
 			}
 			// 提交 execution failed + audit denied（同一事务原子持久化，ADR-017 §6）。
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
 				return result, err
 			}
 		}
@@ -260,9 +260,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 					ReasonCode:    strPtr("policy_not_configured"),
 					Engine:        strPtr(string(serverEngine)),
 				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrPolicyNotConfigured)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrPolicyNotConfigured)
 			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
 				return result, err
 			}
 		}
@@ -277,9 +277,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 					ReasonCode:    strPtr("read_not_allowed"),
 					Engine:        strPtr(string(serverEngine)),
 				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, ErrReadNotAllowed)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrReadNotAllowed)
 			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
 				return result, err
 			}
 		}
@@ -297,9 +297,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = mapCredentialError(err)
 		if mtx != nil {
 			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now, err); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID, now); err != nil {
+			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
 				return result, err
 			}
 		}
@@ -349,7 +349,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = mapAdapterError(err)
 		if exec != nil {
 			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 			}
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
@@ -379,7 +379,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = mapAdapterError(err)
 		if exec != nil {
 			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 			}
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
@@ -388,7 +388,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	result.Result = queryResult
 	if exec != nil {
 		if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, now, result.ErrorCode)
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 		}
 	}
 	return result, nil
@@ -397,19 +397,20 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 // ---- 审计与 execution 生命周期辅助（ADR-017）----------------------------------
 
 // auditFailed 处理审计写入失败：fail-closed 不返回结果；触发安全告警。
+// 告警时间戳在 emit 时用 p.clock() 采样，避免沿用执行前采样导致的时间倒错（Qodo #3）。
 func (p *Pipeline) auditFailed(
 	ctx context.Context,
 	result *ExecuteResult,
 	traceID string,
 	wsID uuid.UUID,
-	now time.Time,
 	originalCode StableErrorCode,
 ) (*ExecuteResult, error) {
-	p.alarm.Alarm(ctx, SecurityAlertEvent{
+	// 告警通道自身失败不得 panic / 改变 fail-closed 返回（T28）。
+	metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
 		TraceID:     traceID,
 		WorkspaceID: wsID,
 		Code:        string(ErrAuditFailed),
-		OccurredAt:  now,
+		OccurredAt:  p.clock(),
 	})
 	result.ErrorCode = ErrAuditFailed
 	// ADR-017 §6：审计失败不向调用方返回查询结果。
@@ -426,10 +427,9 @@ func (p *Pipeline) commitPreExecution(
 	result *ExecuteResult,
 	traceID string,
 	wsID uuid.UUID,
-	now time.Time,
 ) (*ExecuteResult, error) {
 	if err := mtx.Commit(); err != nil {
-		return p.auditFailed(ctx, result, traceID, wsID, now, ErrInternalError)
+		return p.auditFailed(ctx, result, traceID, wsID, ErrInternalError)
 	}
 	return result, nil
 }
@@ -490,13 +490,17 @@ func (p *Pipeline) recordCredentialFailure(
 ) error {
 	code := string(result.ErrorCode)
 
-	// 触发安全告警（凭证解密失败/未知 KEK 版本，ADR-017 §6）。
-	p.alarm.Alarm(ctx, SecurityAlertEvent{
-		TraceID:     traceID,
-		WorkspaceID: conn.WorkspaceID,
-		Code:        code,
-		OccurredAt:  now,
-	})
+	// 仅解密类失败触发安全告警（ADR-017 §6 / Qodo #2 / CodeRabbit #8）；
+	// credential_not_found/credential_retired 等查找类失败只记录 E14，不升级告警。
+	// 告警时间戳在 emit 时采样（Qodo #3）。
+	if credentials.IsDecryptFailureCode(credentials.ErrorCode(code)) {
+		metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+			TraceID:     traceID,
+			WorkspaceID: conn.WorkspaceID,
+			Code:        code,
+			OccurredAt:  p.clock(),
+		})
+	}
 
 	var action string
 	var md metadata.AuditMetadata
@@ -531,12 +535,14 @@ func (p *Pipeline) recordCredentialFailure(
 		return err
 	}
 
+	// E14-E16 事件矩阵要求 execution_id 为 NULL（proposal §8.1），
+	// 凭证失败事件由 system actor 记录，不关联 execution（CodeRabbit #18）。
 	event, err := newAuditEvent(
 		conn.WorkspaceID,
 		metadata.ActorTypeSystem,
 		nil,
 		&conn.ID,
-		&exec.ID,
+		nil,
 		action,
 		"credential",
 		conn.SecretRef.String(),
@@ -595,6 +601,8 @@ func (p *Pipeline) recordPostExecution(
 		if result.Result != nil {
 			rowCount := result.Result.TotalReturned
 			md.RowCount = intPtr(rowCount)
+			// 同步写入 execution 记录，使 executions.row_count 可交叉核对（CodeRabbit #19）。
+			exec.RowCount = &rowCount
 		}
 	default:
 		// E11 failed：矩阵要求 environment。

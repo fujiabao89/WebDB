@@ -21,6 +21,7 @@ type fakeMetadataTx struct {
 	auditEvents  []*metadata.AuditEvent
 	failUpdate   error
 	failAudit    error
+	failCommit   error
 	committed    bool
 	rolledBack   bool
 }
@@ -51,7 +52,13 @@ func (t *fakeMetadataTx) AppendAudit(_ context.Context, e *metadata.AuditEvent) 
 	return nil
 }
 
-func (t *fakeMetadataTx) Commit() error   { t.committed = true; return nil }
+func (t *fakeMetadataTx) Commit() error {
+	if t.failCommit != nil {
+		return t.failCommit
+	}
+	t.committed = true
+	return nil
+}
 func (t *fakeMetadataTx) Rollback() error { t.rolledBack = true; return nil }
 
 type fakeTxStore struct {
@@ -59,13 +66,14 @@ type fakeTxStore struct {
 	failBegin  error
 	failAudit  error
 	failUpdate error
+	failCommit error
 }
 
 func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failBegin != nil {
 		return nil, f.failBegin
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: f.failUpdate}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: f.failUpdate, failCommit: f.failCommit}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }
@@ -211,6 +219,10 @@ func TestAuditedExecute_Succeeded(t *testing.T) {
 	if last.FinishedAt == nil || last.FinishedAt.Before(last.StartedAt) {
 		t.Fatalf("finished_at=%v must not be before started_at=%v", last.FinishedAt, last.StartedAt)
 	}
+	// executions.row_count 必须回写，便于与审计 metadata 交叉核对（CodeRabbit #19）。
+	if last.RowCount == nil || *last.RowCount != 7 {
+		t.Fatalf("execution row_count = %v, want 7", last.RowCount)
+	}
 
 	// audit sql.execute succeeded（独立写入）
 	if len(auditStore.events) != 1 {
@@ -344,6 +356,10 @@ func TestAuditedExecute_CredentialFailure(t *testing.T) {
 	}
 	if ev.ConnectionID == nil || *ev.ConnectionID != conn.ID {
 		t.Fatalf("connection id = %v, want %v", ev.ConnectionID, conn.ID)
+	}
+	// E14-E16 事件矩阵要求 execution_id 为 NULL（proposal §8.1，CodeRabbit #18）。
+	if ev.ExecutionID != nil {
+		t.Fatalf("execution id = %v, want nil (E14-E16 matrix)", *ev.ExecutionID)
 	}
 
 	// 安全告警触发（凭证解密失败）
@@ -676,5 +692,145 @@ func assertAuditEvent(
 	}
 	if ev.OccurredAt.IsZero() {
 		t.Error("occurred_at must not be zero")
+	}
+}
+
+// ---- 元数据库事务失败注入（CodeRabbit #17）----------------------------------
+
+func TestAuditedExecute_CommitFailurePreExecution(t *testing.T) {
+	// commitPreExecution 提交失败（ADR-017 §6 关键安全路径）→ audit_failed + $SECURITY_ALERT。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	txStore.failCommit = errors.New("injected commit failure")
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "DELETE FROM users",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed (commit failure must fail-closed)", result.ErrorCode)
+	}
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", client.calls)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+func TestAuditedExecute_BeginFailure(t *testing.T) {
+	// Begin 失败 → ErrInternalError，Adapter 调用 0 次，不产生告警。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	txStore.failBegin = errors.New("injected begin failure")
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrInternalError {
+		t.Fatalf("error code = %q, want internal_error", result.ErrorCode)
+	}
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0 (begin failure)", client.calls)
+	}
+	if len(alarm.events) != 0 {
+		t.Fatalf("alarm events = %d, want 0 (begin failure is not an audit failure)", len(alarm.events))
+	}
+}
+
+func TestAuditedExecute_UpdateFailurePreExecution(t *testing.T) {
+	// UpdateExecution 失败（执行前 fail-closed）→ audit_failed + $SECURITY_ALERT，Adapter 0 次。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	txStore.failUpdate = errors.New("injected update failure")
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "DELETE FROM users",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed (update failure must fail-closed)", result.ErrorCode)
+	}
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", client.calls)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// ---- 安全告警通道自身失败（T28 / CodeRabbit #31）-----------------------------
+
+type panicAlarm struct{}
+
+func (panicAlarm) Alarm(context.Context, SecurityAlertEvent) { panic("alarm channel down") }
+
+func TestAuditedExecute_AlarmFailureDoesNotPanic(t *testing.T) {
+	// 告警通道 panic 不得改变 fail-closed 返回（T28）：Execute 仍返回 audit_failed，
+	// 不 panic、不递归审计。
+	principal, conn, policy, resolver, client, txStore, auditStore, _ := auditedPipelineInputs()
+	client.handle.result = &adapter.QueryResult{TotalReturned: 3}
+	auditStore.fail = errors.New("injected post audit failure")
+
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: policy},
+		Members:     auditedMember(principal),
+		Resolver:    resolver,
+		Adapter:     client,
+		Tx:          txStore,
+		Audit:       auditStore,
+		Alarm:       panicAlarm{},
+		Clock:       fixedClock(),
+	})
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed (alarm failure must not alter fail-closed)", result.ErrorCode)
+	}
+	if result.Result != nil {
+		t.Fatal("audit failure must not return query result")
 	}
 }

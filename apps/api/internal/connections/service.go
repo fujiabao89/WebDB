@@ -26,6 +26,10 @@ const (
 	ErrAuditFailed        StableErrorCode = "audit_failed"
 )
 
+// connectionTestTimeout 连接测试的连接级超时上限（CodeRabbit #10）。
+// 即使调用方 ctx 没有 deadline，ping 也必须在有界时间内完成。
+const connectionTestTimeout = 5 * time.Second
+
 // Principal 由可信上游提供的已验证身份。
 type Principal struct {
 	UserID      uuid.UUID
@@ -93,7 +97,8 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 	conn.WorkspaceID = p.WorkspaceID
 	conn.CreatedBy = p.UserID
 	if err := s.conns.CreateConnection(ctx, conn); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		// 不把底层存储错误文本拼进返回错误（Qodo #1）：稳定错误码 + 脱敏摘要。
+		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
 	}
 
 	event, err := newConnectionAuditEvent(
@@ -106,7 +111,7 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 		s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		return nil, fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return nil, err
@@ -121,7 +126,7 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 	}
 	conn.WorkspaceID = p.WorkspaceID
 	if err := s.conns.UpdateConnection(ctx, p.WorkspaceID, conn); err != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		return fmt.Errorf("%w: update connection failed", ErrInternalError)
 	}
 
 	event, err := newConnectionAuditEvent(
@@ -131,7 +136,7 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 		s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return err
@@ -148,18 +153,22 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 	}
 	conn, err := s.conns.ConnectionByID(ctx, p.WorkspaceID, connID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnectionNotFound, err)
+		return fmt.Errorf("%w: connection not found", ErrConnectionNotFound)
 	}
 
 	payload, err := s.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
 	if err != nil {
 		code := mapCredentialError(err)
-		s.alarm.Alarm(ctx, metadata.SecurityAlertEvent{
-			TraceID:     s.newTrace(),
-			WorkspaceID: conn.WorkspaceID,
-			Code:        code,
-			OccurredAt:  s.clock(),
-		})
+		// 仅解密类失败触发安全告警（Qodo #2 / CodeRabbit #8），与凭证层一致；
+		// credential_not_found/credential_retired 等查找类失败仅记录 E8，不升级告警。
+		if credentials.IsDecryptFailureCode(credentials.ErrorCode(code)) {
+			metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
+				TraceID:     s.newTrace(),
+				WorkspaceID: conn.WorkspaceID,
+				Code:        code,
+				OccurredAt:  s.clock(),
+			})
+		}
 		event, buildErr := newConnectionAuditEvent(
 			p, conn.ID, metadata.ActionConnectionTest, "connection", conn.ID.String(),
 			metadata.OutcomeFailed,
@@ -171,12 +180,13 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 			s.newTrace(), s.clock(),
 		)
 		if buildErr != nil {
-			return buildErr
+			return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 		}
 		if writeErr := s.writeAudit(ctx, event, conn.WorkspaceID); writeErr != nil {
 			return writeErr
 		}
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		// 返回由映射得到的稳定错误码，脱敏消息，不拼接原始凭证错误（CodeRabbit #9）。
+		return fmt.Errorf("%w: credential resolution failed", StableErrorCode(code))
 	}
 
 	cfg := adapter.ConnectConfig{
@@ -191,8 +201,12 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 		TLS:           adapter.TLSRequire,
 	}
 
+	// 为 ping 派生带上限的 context，即使调用方 ctx 无 deadline 也避免无限挂起（CodeRabbit #10）。
+	pingCtx, cancel := context.WithTimeout(ctx, connectionTestTimeout)
+	defer cancel()
+
 	start := s.clock()
-	testErr := s.tester.Ping(ctx, cfg)
+	testErr := s.tester.Ping(pingCtx, cfg)
 	durationMs := int(s.clock().Sub(start).Milliseconds())
 	if durationMs < 0 {
 		durationMs = 0
@@ -214,13 +228,14 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 		outcome, md, s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return err
 	}
 	if testErr != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, testErr)
+		// 返回稳定错误码，脱敏消息，不拼接原始 ping 错误（CodeRabbit #9）。
+		return fmt.Errorf("%w", StableErrorCode(mapConnectionTestError(testErr)))
 	}
 	return nil
 }
@@ -228,13 +243,14 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 // writeAudit 写审计；失败触发安全告警并返回 audit_failed。
 func (s *Service) writeAudit(ctx context.Context, event *metadata.AuditEvent, wsID uuid.UUID) error {
 	if err := s.audit.AppendAudit(ctx, event); err != nil {
-		s.alarm.Alarm(ctx, metadata.SecurityAlertEvent{
+		metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
 			TraceID:     event.TraceID,
 			WorkspaceID: wsID,
 			Code:        string(ErrAuditFailed),
-			OccurredAt:  event.OccurredAt,
+			// 统一告警时间戳来源为服务时钟（CodeRabbit #11），与凭证层 audited.go 一致。
+			OccurredAt: s.clock(),
 		})
-		return fmt.Errorf("%w: %v", ErrAuditFailed, err)
+		return fmt.Errorf("%w: audit write failed", ErrAuditFailed)
 	}
 	return nil
 }
@@ -246,7 +262,8 @@ func (s *Service) requireManager(ctx context.Context, p Principal) error {
 	}
 	member, err := s.members.MemberByWorkspaceAndUser(ctx, p.WorkspaceID, p.UserID)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrForbidden, err)
+		// 不把成员存储的底层错误文本拼进返回错误（Qodo #1）。
+		return fmt.Errorf("%w: member lookup failed", ErrForbidden)
 	}
 	if member == nil {
 		return fmt.Errorf("%w", ErrForbidden)
@@ -309,6 +326,9 @@ func mapCredentialError(err error) string {
 func mapConnectionTestError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "execution_timeout"
+	}
+	if errors.Is(err, context.Canceled) {
+		return "query_cancelled"
 	}
 	var adapterErr *adapter.AdapterError
 	if errors.As(err, &adapterErr) {

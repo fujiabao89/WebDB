@@ -3,6 +3,7 @@ package credentials
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -179,7 +180,7 @@ func TestAuditedCredential_CreateAuditFailureReturnsAuditFailed(t *testing.T) {
 	store := &createOnlyCredentialStore{}
 	audit := &fakeAuditStore{fail: errors.New("injected audit failure")}
 	alarm := &fakeAlarmRecorder{}
-	m, _, alarm := auditedManager(store, nil, goodKEK(), audit, alarm)
+	m, _, _ := auditedManager(store, nil, goodKEK(), audit, alarm)
 
 	_, err := m.Create(context.Background(), uuid.New(), uuid.New(), CredentialPayload{User: "u", Password: "p"})
 	if !IsErrorCode(err, ErrAuditFailed) {
@@ -344,7 +345,11 @@ func TestAuditedCredential_RotateFailedEvent(t *testing.T) {
 	actorID := uuid.New()
 	secretRef := uuid.New()
 
-	conflictErr := fmt.Errorf("%w: expected 1, actual 3", ErrVersionConflict)
+	conflictErr := &VersionConflictError{
+		Expected: 1,
+		Actual:   3,
+		err:      fmt.Errorf("%w", ErrVersionConflict),
+	}
 	ev, err := newRotateFailedEvent(wsID, actorID, secretRef, 1, conflictErr, "trace-1", timeNow())
 	if err != nil {
 		t.Fatalf("newRotateFailedEvent error = %v", err)
@@ -361,6 +366,10 @@ func TestAuditedCredential_RotateFailedEvent(t *testing.T) {
 	}
 	if md["expected_version"] != float64(1) {
 		t.Errorf("expected_version = %v, want 1", md["expected_version"])
+	}
+	// Qodo #4：version_conflict 必须记录 actual_version。
+	if md["actual_version"] != float64(3) {
+		t.Errorf("actual_version = %v, want 3", md["actual_version"])
 	}
 }
 
@@ -388,3 +397,93 @@ func TestAuditedCredential_RetireSucceededEvent(t *testing.T) {
 }
 
 func timeNow() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
+
+// ---- 审计写入失败负向测试（CodeRabbit #13）----------------------------------
+//
+// Resolve/Rotate 的业务操作持久化后写审计；审计追加失败必须返回 audit_failed
+// 并触发一次 $SECURITY_ALERT（ADR-017 §6）。Rotate 需要真实 *sql.DB 事务，
+// 这里用最小 fake driver 提供 Begin/Commit，SQL 由 fakeCredentialStore 短路。
+
+type fakeTxDriver struct{}
+
+func (fakeTxDriver) Open(string) (driver.Conn, error) { return fakeTxConn{}, nil }
+
+type fakeTxConn struct{}
+
+func (fakeTxConn) Prepare(string) (driver.Stmt, error) { return fakeTxStmt{}, nil }
+func (fakeTxConn) Close() error                        { return nil }
+func (fakeTxConn) Begin() (driver.Tx, error)           { return fakeTx{}, nil }
+
+type fakeTxStmt struct{}
+
+func (fakeTxStmt) Close() error { return nil }
+func (fakeTxStmt) NumInput() int {
+	return 0
+}
+func (fakeTxStmt) Exec([]driver.Value) (driver.Result, error) { return fakeTxResult{}, nil }
+func (fakeTxStmt) Query([]driver.Value) (driver.Rows, error) {
+	return nil, errors.New("unexpected query in fake tx driver")
+}
+
+type fakeTx struct{}
+
+func (fakeTx) Commit() error   { return nil }
+func (fakeTx) Rollback() error { return nil }
+
+type fakeTxResult struct{}
+
+func (fakeTxResult) LastInsertId() (int64, error) { return 0, nil }
+func (fakeTxResult) RowsAffected() (int64, error) { return 1, nil }
+
+func fakeTxDB() *sql.DB {
+	sql.Register("fake-wb23-audit-tx", fakeTxDriver{})
+	db, err := sql.Open("fake-wb23-audit-tx", "")
+	if err != nil {
+		panic(err)
+	}
+	return db
+}
+
+// TestAuditedCredential_ResolveAuditFailureReturnsAuditFailed 覆盖 Resolve 失败路径
+// 的审计写入失败：返回 audit_failed 且触发一次告警。
+func TestAuditedCredential_ResolveAuditFailureReturnsAuditFailed(t *testing.T) {
+	store := &fakeCredentialStore{envErr: metadata.ErrEnvelopeNotFound}
+	audit := &fakeAuditStore{fail: errors.New("injected audit failure")}
+	alarm := &fakeAlarmRecorder{}
+	m, _, _ := auditedManager(store, nil, goodKEK(), audit, alarm)
+
+	_, err := m.Resolve(context.Background(), uuid.New(), uuid.New(), 1)
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// TestAuditedCredential_RotateAuditFailureReturnsAuditFailed 覆盖 Rotate 失败路径
+// 的审计写入失败（E5 事件追加失败）：返回 audit_failed 且触发一次告警。
+func TestAuditedCredential_RotateAuditFailureReturnsAuditFailed(t *testing.T) {
+	wsID := uuid.New()
+	actorID := uuid.New()
+	secretRef := uuid.New()
+	// 实际版本为 3，期望版本为 1 → version_conflict，走 E5 失败分支。
+	store := &fakeCredentialStore{
+		env: &metadata.CredentialEnvelope{
+			WorkspaceID: wsID, SecretRef: secretRef, Version: 3,
+			EnvelopeSuite: SuiteAES256GCMv1, KEKVersion: 1,
+		},
+	}
+	audit := &fakeAuditStore{fail: errors.New("injected audit failure")}
+	alarm := &fakeAlarmRecorder{}
+	lm := NewLifecycleManager(fakeTxDB(), store, store, goodKEK())
+	m := NewAuditedLifecycleManager(lm, audit, alarm)
+
+	_, err := m.Rotate(context.Background(), wsID, actorID, secretRef, 1, CredentialPayload{User: "u", Password: "p"})
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
