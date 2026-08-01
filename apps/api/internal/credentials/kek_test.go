@@ -217,9 +217,11 @@ func TestKEK_WrappingCounterLimit(t *testing.T) {
 		t.Fatalf("expected wrap at near-limit to succeed: %v", err)
 	}
 
-	// Now at limit - should fail
+	// Now at limit - should fail with ErrWrapQuotaExhausted
 	if err := provider.ReserveWrap(ver); err == nil {
 		t.Fatal("expected wrap at limit to be rejected")
+	} else if !IsErrorCode(err, ErrWrapQuotaExhausted) {
+		t.Fatalf("expected ErrWrapQuotaExhausted, got %v", err)
 	}
 }
 
@@ -249,6 +251,7 @@ func TestKEK_WrappingCounterConcurrent(t *testing.T) {
 }
 
 func TestKEK_WrapReservationNeverExceedsLimitConcurrently(t *testing.T) {
+	unsetWebDBEnv(t)
 	setEnv(t, "WEBDB_KEK_V1", testKEKBase64())
 	setEnv(t, "WEBDB_ACTIVE_KEK_VERSION", "1")
 	provider, err := NewEnvKEKProvider()

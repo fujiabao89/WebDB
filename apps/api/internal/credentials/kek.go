@@ -156,7 +156,7 @@ func (p *envKEKProvider) ReserveWrap(version int) error {
 		if current >= maxWrapsPerKEK {
 			return fmt.Errorf(
 				"%w: KEK version %d reached wrap limit of %d",
-				ErrInternalError,
+				ErrWrapQuotaExhausted,
 				version,
 				maxWrapsPerKEK,
 			)

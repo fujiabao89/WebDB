@@ -7,6 +7,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -512,11 +513,15 @@ func TestConnectionWritesRejectRetiredCredential(t *testing.T) {
 	newConn.SecretVersion = 1
 	if err := store.CreateConnection(ctx, &newConn); err == nil {
 		t.Fatal("创建连接引用已退役凭证：error = nil，期望 fail-closed")
+	} else if !errors.Is(err, ErrEnvelopeNotFound) {
+		t.Fatalf("创建连接引用已退役凭证：返回意外错误 %v，期望 ErrEnvelopeNotFound", err)
 	}
 
 	conn.SecretVersion = 1
 	if err := store.UpdateConnection(ctx, conn.WorkspaceID, conn); err == nil {
 		t.Fatal("更新连接引用已退役凭证：error = nil，期望 fail-closed")
+	} else if !errors.Is(err, ErrEnvelopeNotFound) {
+		t.Fatalf("更新连接引用已退役凭证：返回意外错误 %v，期望 ErrEnvelopeNotFound", err)
 	}
 }
 

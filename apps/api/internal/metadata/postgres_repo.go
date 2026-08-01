@@ -379,11 +379,11 @@ func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Conne
 	).Scan(&c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf(
-			"connection %s or active credential (%s, %d) not found in workspace %s",
-			c.ID,
+			"active credential envelope (%s, %s, %d): %w",
+			wsID,
 			c.SecretRef,
 			c.SecretVersion,
-			wsID,
+			ErrEnvelopeNotFound,
 		)
 	}
 	return err

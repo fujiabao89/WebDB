@@ -30,7 +30,8 @@ const (
 	ErrConnectionBusy      StableErrorCode = "connection_busy"
 	ErrExecutionTimeout    StableErrorCode = "execution_timeout"
 	ErrExecutionCancelled  StableErrorCode = "execution_cancelled"
-	ErrUnsupportedQuery    StableErrorCode = "unsupported_query"
+	ErrUnsupportedQuery          StableErrorCode = "unsupported_query"
+	ErrConnectionConfigConflict  StableErrorCode = "connection_config_conflict"
 )
 
 // Engine 数据库引擎。

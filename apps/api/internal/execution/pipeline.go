@@ -268,6 +268,9 @@ func mapCredentialError(err error) StableErrorCode {
 	if credentials.IsErrorCode(err, credentials.ErrUnknownKEKVersion) {
 		return StableErrorCode(credentials.ErrUnknownKEKVersion)
 	}
+	if credentials.IsErrorCode(err, credentials.ErrWrapQuotaExhausted) {
+		return StableErrorCode(credentials.ErrWrapQuotaExhausted)
+	}
 	return ErrInternalError
 }
 
@@ -293,6 +296,8 @@ func mapAdapterError(err error) StableErrorCode {
 			return ErrExecutionCancelled
 		case adapter.ErrUnsupportedQuery:
 			return ErrUnsupportedQuery
+		case adapter.ErrConfigConflict:
+			return ErrConnectionConfigConflict
 		}
 	}
 	return ErrInternalError

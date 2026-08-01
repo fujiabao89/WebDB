@@ -148,6 +148,7 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 		sql               string
 		connErr           error
 		policy            *metadata.ConnectionPolicy
+		policySet         bool // true: 使用 tt.policy（含 nil）；false: 使用 defaultPolicy
 		policyErr         error
 		resolverErr       error
 		adapterErr        error
@@ -174,6 +175,7 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 			name:              "missing connection policy",
 			sql:               "SELECT 1",
 			policy:            nil,
+			policySet:         true,
 			wantCode:          ErrPolicyNotConfigured,
 			wantResolverCalls: 0,
 			wantAdapterCalls:  0,
@@ -182,6 +184,7 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 			name:              "connection policy denies reads",
 			sql:               "SELECT 1",
 			policy:            &metadata.ConnectionPolicy{AllowRead: boolPtr(false), MaxRows: 100, StatementTimeoutMs: 1_000},
+			policySet:         true,
 			wantCode:          ErrReadNotAllowed,
 			wantResolverCalls: 0,
 			wantAdapterCalls:  0,
@@ -225,7 +228,7 @@ func TestPipelineFailClosedStageBoundaries(t *testing.T) {
 				client.err = tt.adapterErr
 			}
 			policy := defaultPolicy
-			if tt.name == "missing connection policy" || tt.policy != nil {
+			if tt.policySet {
 				policy = tt.policy
 			}
 			store := &fakeConnectionReader{connections: []*metadata.Connection{conn}, err: tt.connErr}
@@ -337,6 +340,11 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 			name: "query cancelled",
 			err:  &adapter.AdapterError{Code: adapter.ErrQueryCanceled},
 			want: ErrExecutionCancelled,
+		},
+		{
+			name: "config conflict",
+			err:  &adapter.AdapterError{Code: adapter.ErrConfigConflict},
+			want: ErrConnectionConfigConflict,
 		},
 		{
 			name: "wrapped deadline",
