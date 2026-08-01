@@ -632,7 +632,7 @@ KEK 不得出现在：
 
 ### 8.2 Metadata 允许列表（合并字段表，16 字段）
 
-下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段（已在此表中），另有 3 个 P0-04 现有字段（`summary`、`rows_affected`、`cached`）仅由 P0-04 维护且不适用于凭证事件，未重复列出。WEB-23 实现时需将 sanitizer 扩展至完整 16 字段（6 新增 + 10 现有）并添加兼容性测试：
+下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段。P0-04 的 `summary`、`rows_affected`、`cached` 三个自由文本字段无生产者且与事件矩阵不符，已随 WEB-23 强类型 metadata 迁移移除，不再作为审计允许字段（CodeRabbit #22）。完整允许列表为 13 字段 + credential.rotate 专用 `expected_version`/`actual_version`：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
@@ -650,7 +650,7 @@ KEK 不得出现在：
 | `engine` | string | `postgresql` \| `mysql` | E1, E3, E4, E7-E13 | P0-04 现有 |
 | `environment` | string | `development` \| `staging` \| `production` | E1, E2, E7, E8, E10, E11 | P0-04 现有 |
 
-> P0-04 另有 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件类型。完整合并后的 sanitizer 允许列表为 16 字段。
+> P0-04 的 `summary`、`rows_affected`、`cached` 三个字段无生产者，已随 WEB-23 强类型 metadata 迁移移除；允许列表为 13 字段 + `expected_version`/`actual_version`。
 
 ### 8.3 禁止字段
 

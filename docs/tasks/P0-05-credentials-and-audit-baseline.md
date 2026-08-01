@@ -1,11 +1,11 @@
 # P0-05：凭证与审计基线
 
-> 状态：Ready｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：In Progress｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
 >
 > **子任务**：
-> - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（当前任务）
-> - [WEB-22](https://linear.app/webdb/issue/WEB-22)：P0-05B 凭证信封加密、版本轮换与 Adapter 接入（被 WEB-21 阻塞）
-> - [WEB-23](https://linear.app/webdb/issue/WEB-23)：P0-05C 追加式审计、脱敏、故障策略与最终验收（被 WEB-21、WEB-22 阻塞）
+> - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（✅ 已完成，Owner Gate 通过）
+> - [WEB-22](https://linear.app/webdb/issue/WEB-22)：P0-05B 凭证信封加密、版本轮换与 Adapter 接入（✅ 已完成，PR #31 已合并）
+> - [WEB-23](https://linear.app/webdb/issue/WEB-23)：P0-05C 追加式审计、脱敏、故障策略与最终验收（进行中，PR #32 独立审查）
 >
 > **方案文档**：[P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md)
 > **威胁模型**：[P0-05-threat-model.md](P0-05-threat-model.md)
@@ -42,7 +42,7 @@
 | 威胁模型 | 已批准 |
 | 测试矩阵 | 已编制（待 WEB-22/WEB-23 执行） |
 | WEB-22 阻塞 | 已解除 |
-| WEB-23 阻塞 | 待 WEB-22 完成后解除 |
+| WEB-23 阻塞 | 已解除（WEB-22 已合并，2026-08-01） |
 
 ## 升级条件
 
