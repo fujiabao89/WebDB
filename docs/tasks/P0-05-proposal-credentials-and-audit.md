@@ -229,7 +229,7 @@ AAD = version_tag(4B) || workspace_id(16B) || secret_ref(16B) || secret_version(
 | `secret_version` | 跨版本密文替换 |
 | `envelope_suite_tag` | Suite 混淆/downgrade |
 | `kek_version` | KEK 版本混淆 |
-| `version_tag` | AAD 格式演进兼容
+| `version_tag` | AAD 格式演进兼容 |
 
 ### 4.5 加密流程
 
@@ -454,9 +454,10 @@ KEK 不得出现在：
 11. 写入审计事件: credential.rotate.success
     → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
        轮换幂等性：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
-       服务端在步骤 3 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
-       若 expected_version 已落后（即已有其他轮换成功），返回现有最新版本信息
-      （credential.rotate.already_rotated, outcome=succeeded），不执行插入。
+       服务端在步骤 4 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
+       若 expected_version 已落后（即已有其他轮换成功），返回现有最新版本信息，
+       写入审计事件 credential.rotate（outcome=succeeded，metadata 含 already_rotated=true、
+       current_version），不执行插入。
        版本匹配时才继续计算新版本并插入。这样避免依赖唯一约束作为幂等机制，
        也防止重试产生误报的版本冲突错误
 ```
@@ -475,18 +476,22 @@ KEK 不得出现在：
 
 ```text
 1. 验证调用者角色
-2. 检查该版本未被任何 connection 引用（SELECT COUNT(*) FROM connections
-   WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3）
-   → 被引用时拒绝退役，返回 credential_in_use
-3. UPDATE credential_envelopes SET retired_at = now()
-   WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3 AND retired_at IS NULL
-4. 写入审计事件: credential.retire
+2. BEGIN TRANSACTION
+3.   SELECT version FROM credential_envelopes
+        WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
+        AND retired_at IS NULL FOR UPDATE
+     → 行不存在或已退役：ROLLBACK，返回 credential_not_found
+4.   -- 在同一持锁事务内原子检查引用
+     SELECT COUNT(*) FROM connections
+     WHERE workspace_id = $1 AND secret_ref = $2 AND secret_version = $3
+     → 计数 > 0：ROLLBACK，返回 credential_in_use
+5.   UPDATE credential_envelopes SET retired_at = now()
+     WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
+6. COMMIT
+7. 写入审计事件: credential.retire
 ```
-
-- **被引用的版本不得直接退役**（Owner D8 拒绝）。必须先更新所有引用连接或等待连接被删除。
-- 退役记录不覆盖或删除历史密文。
-- 退役后**不得用于普通执行**（凭证解析阶段 C' 拒绝 `retired_at IS NOT NULL` 的版本）。
-- 退役版本仅可用于审计追溯（通过直接查询 envelope 表，不经过正常凭证解析路径）。
+- 步骤 4 在持锁事务内执行，防止与并发连接引用更新或创建产生竞态。
+- 退役操作与引用检查在同一事务中原子完成。
 
 #### 6.2.5 连接引用更新
 
@@ -675,9 +680,11 @@ WHERE workspace_id = $ws AND id = $conn_id AND secret_ref = $ref
 | **阶段 C'**（凭证解析失败） | 返回 `audit_failed` | 否 | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **阶段 D-0**（running 更新失败） | 返回 `audit_failed` | 否 | 否 | `pending`（未更新） | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE 单条 |
 | **阶段 D 完成后** | 返回 `audit_failed` | 已调用 | **否**（不返回查询结果） | `completed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
-| **拒绝事件**（rate_limited/connection_busy） | 返回 `audit_failed` | 已调用（失败） | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
+| **拒绝事件**（rate_limited/connection_busy） | 返回 `audit_failed` | 已调用（失败）* | 否 | `failed` | `audit_failed` | 是（E17 通道） | 否 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **取消/超时事件** | 返回 `audit_failed` | 已调用（已取消/超时） | 否 | `cancelled`/`failed` | `audit_failed` | 是（E17 通道） | 客户端决定 | Execution UPDATE + AuditEvent INSERT 原子 |
 | **告警系统自身失败** | 写入 stderr/syslog | N/A | N/A | N/A | N/A | 基础设施级告警 | N/A | N/A |
+
+> \* `rate_limited` 和 `connection_busy` 发生在 Adapter 内部的 `TryAcquire`/pool acquire 阶段（P0-04 §4.3.1: `Adapter.Query=1`），但目标数据库连接未建立（DB acquire/SQL Query 均为 0 或超时）。标记为"已调用（失败）"以准确反映 Adapter 被调用但未成功执行查询的事实。
 
 ### 9.2 关键原则
 

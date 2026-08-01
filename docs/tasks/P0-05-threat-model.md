@@ -185,15 +185,15 @@ DEK 流:
 
 | # | 风险 | 不可缓解原因 | 接受条件 |
 |---|---|---|---|
-| R1 | Go GC 移动内存导致明文残留 | Go 语言设计限制 | 文档记录；最小化明文生命周期（Owner D15） |
-| R2 | 主机 root 入侵可读取 KEK/密码 | 无法防止具有 root 权限的攻击者 | 部署环境保护；P0 阶段不承诺内存加密（Owner D15） |
-| R3 | PostgreSQL SUPERUSER 可绕过审计触发器 | 数据库权限模型的根本限制 | 生产部署拆分数据库角色；P0 Compose 环境记录此限制（Owner D15） |
-| R4 | 96-bit nonce 碰撞（概率 ~2^-96） | 密码学概率极限 | 每次加密使用新 DEK，进一步降低风险（Owner D15） |
-| R5 | `crypto/rand` 在极端熵耗尽时返回错误 | 系统级故障，概率极低 | fail-closed，不降级弱随机源（Owner D15） |
-| R6 | `SELECT func()` 副作用（含 SECURITY DEFINER） | AST 无法判断函数副作用 | P0-04 已有缓解：测试账号不授予危险函数权限（P0-04 残余风险） |
-| R7 | 服务重启后 Continuation Token 全部失效 | ADR-015 已接受的限制 | 内存 Registry 的设计取舍 |
+| R1 | Go GC 移动内存导致明文残留 | Go 语言设计限制 | 文档记录；最小化明文生命周期（D15 条件接受） |
+| R2 | `crypto/rand` 在极端熵耗尽时返回错误 | 系统级故障，概率极低 | fail-closed，不降级弱随机源（D15 条件接受） |
+| R3 | 96-bit GCM nonce 在 >2^32 次加密后可能重用 | 密码学概率极限 | 加入每 KEK 2^24 次加密上限，远低于 nonce 重用阈值（D15 接受） |
+| R4 | KEK 环境变量在进程内存中可被调试器读取 | 需要主机 root 权限 | 部署环境保护（D15 条件接受） |
+| R5 | `SELECT func()` 副作用（含 SECURITY DEFINER） | AST 无法判断函数副作用 | P0-04 已有缓解（沿用 P0-04 既有决策） |
+| R6 | 审计事件不防内部 DBA 篡改（触发器可被 SUPERUSER 绕过） | 数据库权限模型的根本限制 | 创建生产角色拆分任务（D15） |
+| R7 | 服务重启后 Continuation Token 全部失效 | ADR-015 已接受的限制 | 内存 Registry 的设计取舍（沿用 ADR-015） |
 
-> 上述 R1-R7 与 `P0-05-proposal-credentials-and-audit.md` §13 残余风险清单保持一致。
+> 上述 R1-R7 编号、内容和接受条件与 `P0-05-proposal-credentials-and-audit.md` §13 残余风险清单严格一致。
 
 ---
 
@@ -205,7 +205,7 @@ DEK 流:
 2. **不保证内存清零**：Go 语言限制，明文最小化生命周期缓解（ADR-017 已接受，D15 条件接受）
 3. **审计触发器可被 SUPERUSER 绕过**：生产部署需拆分数据库角色（ADR-013 已实现，D15 创建生产角色拆分任务）
 4. **服务重启使 Continuation Token 失效**：ADR-015 已接受
-5. **不防止主机 root 入侵**：超出 P0 威胁模型范围（残余风险 R2）
+5. **不防止主机 root 入侵**：超出 P0 威胁模型范围（残余风险 R4）
 
 ---
 
