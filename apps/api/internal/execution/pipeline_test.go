@@ -111,12 +111,17 @@ func testPipeline(
 	resolver credentials.CredentialResolver,
 	adapterClient AdapterClient,
 ) *Pipeline {
+	// finding 1：生产 Execute 要求 Tx 与 Audit 同时配置（fail-closed），
+	// 旧的无审计行为测试改用同包的 fake Tx/Audit/Alarm。
 	return NewPipeline(PipelineConfig{
 		Store:       connReader,
 		PolicyStore: policyReader,
 		Members:     members,
 		Resolver:    resolver,
 		Adapter:     adapterClient,
+		Tx:          &fakeTxStore{},
+		Audit:       &fakeAuditStore{},
+		Alarm:       &fakeAlarm{},
 	})
 }
 

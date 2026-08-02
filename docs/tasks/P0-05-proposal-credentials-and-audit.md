@@ -911,10 +911,10 @@ KEK 不得出现在：
 |---|---|---|
 | QA-01 | `go test ./...` | PASS |
 | QA-02 | `go vet ./...` | PASS |
-| QA-03 | `go test -race ./...` | PASS |
-| QA-04 | `go test -fuzz=. -fuzztime=30s` | 无 panic、无越界 |
-| QA-05 | `GOOS=windows go build ./...` | PASS |
-| QA-06 | `GOOS=linux go build ./...` | PASS |
+| QA-03 | `go test -race ./...` | PASS（由 GitHub Actions 覆盖） |
+| QA-04 | `go test -fuzz=. -fuzztime=30s` | 本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic；完整 30s 待后续验证 |
+| QA-05 | `GOOS=windows go build ./...` | PASS（本机） |
+| QA-06 | `GOOS=linux go build ./...` | PASS（本机） |
 | QA-07 | 许可证检查 | 无新增非兼容许可证 |
 | QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏 |
 

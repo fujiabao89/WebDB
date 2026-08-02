@@ -62,18 +62,24 @@ func (t *fakeMetadataTx) Commit() error {
 func (t *fakeMetadataTx) Rollback() error { t.rolledBack = true; return nil }
 
 type fakeTxStore struct {
-	txs        []*fakeMetadataTx
-	failBegin  error
-	failAudit  error
-	failUpdate error
-	failCommit error
+	txs            []*fakeMetadataTx
+	failBegin      error
+	failAudit      error
+	failUpdate     error
+	failCommit     error
+	failCommitTxID int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
 }
 
 func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failBegin != nil {
 		return nil, f.failBegin
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: f.failUpdate, failCommit: f.failCommit}
+	idx := len(f.txs) + 1
+	var fc error
+	if f.failCommitTxID > 0 && idx == f.failCommitTxID {
+		fc = f.failCommit
+	}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: f.failUpdate, failCommit: fc}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }
@@ -292,9 +298,10 @@ func TestAuditedExecute_PolicyDenied(t *testing.T) {
 		t.Fatalf("execution status = %s, want failed", last.Status)
 	}
 
-	// 执行前审计事务必须已提交（Codex P1），而非被 defer Rollback 丢弃。
-	if len(txStore.txs) != 1 || !txStore.txs[0].committed {
-		t.Fatal("denied path must commit the pre-execution transaction")
+	// 执行前事务必须已提交（Codex P1），而非被 defer Rollback 丢弃；
+	// 阶段 B（pending 创建）与失败分支（failed + audit）均为短事务并提交（finding 2）。
+	if len(txStore.txs) != 2 || !txStore.txs[0].committed || !txStore.txs[1].committed {
+		t.Fatal("denied path must commit both the pending-create and fail-record transactions")
 	}
 
 	// audit sql.execute denied（mtx 内原子写入）
@@ -698,9 +705,11 @@ func assertAuditEvent(
 // ---- 元数据库事务失败注入（CodeRabbit #17）----------------------------------
 
 func TestAuditedExecute_CommitFailurePreExecution(t *testing.T) {
-	// commitPreExecution 提交失败（ADR-017 §6 关键安全路径）→ audit_failed + $SECURITY_ALERT。
+	// 失败分支的 commitPreExecution 提交失败（ADR-017 §6 关键安全路径）→ audit_failed + $SECURITY_ALERT；
+	// 阶段 B（tx[1]）提交成功，失败分支（tx[2]）提交失败（finding 2 短事务）。
 	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
 	txStore.failCommit = errors.New("injected commit failure")
+	txStore.failCommitTxID = 2
 
 	pipeline := auditedPipeline(
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
@@ -830,10 +839,12 @@ func TestAuditedExecute_D0RunningUpdateFailure(t *testing.T) {
 }
 
 func TestAuditedExecute_D0CommitFailure(t *testing.T) {
-	// D-0 running 更新后提交失败 → audit_failed + $SECURITY_ALERT，Adapter 0 次。
+	// D-0 running 更新后提交失败 → audit_failed + $SECURITY_ALERT，Adapter 0 次；
+	// 阶段 B（tx[1]）提交成功，D-0（tx[2]）提交失败（finding 2 短事务）。
 	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
 	client.handle.result = &adapter.QueryResult{TotalReturned: 1}
 	txStore.failCommit = errors.New("injected commit failure")
+	txStore.failCommitTxID = 2
 
 	pipeline := auditedPipeline(
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
@@ -922,6 +933,41 @@ func TestAuditedExecute_PostExecutionAuditWriteTimeout(t *testing.T) {
 	}
 	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
 		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// TestAuditedExecute_StageBCommitFailureClearsExecutionID 验证阶段 B pending 创建后
+// Commit 失败时，未持久化的 execution 的 ExecutionID 从返回结果清除（finding 5）。
+func TestAuditedExecute_StageBCommitFailureClearsExecutionID(t *testing.T) {
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	txStore.failCommit = errors.New("injected commit failure")
+	txStore.failCommitTxID = 1 // 阶段 B（tx[1]）Commit 失败
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, realClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "DELETE FROM users",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrInternalError {
+		t.Fatalf("error code = %q, want internal_error (stage B commit failure)", result.ErrorCode)
+	}
+	if result.ExecutionID != nil {
+		t.Fatalf("ExecutionID must be nil when pending execution is not persisted, got %v", *result.ExecutionID)
+	}
+	// 阶段 B 失败触发 E17 告警（internal_error）。
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrInternalError) {
+		t.Fatalf("expected internal_error alarm, got %+v", alarm.events)
 	}
 }
 

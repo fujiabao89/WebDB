@@ -164,7 +164,9 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
-	if (p.txs == nil) != (p.audit == nil) {
+	// 生产 Pipeline 必须同时配置 Tx 与 Audit（fail-closed）；任一缺失都拒绝，
+	// 避免 pending execution 无法持久化终态或审计写入缺失（finding 1）。
+	if p.txs == nil || p.audit == nil {
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w: Tx 与 Audit 必须同时配置", result.ErrorCode)
 	}
@@ -209,11 +211,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	result.TraceID = traceID
 	now := p.clock()
 
-	// 阶段 B': 创建 Execution（pending）— 仅在配置了元数据库事务时启用。
+	// 阶段 B': 创建 Execution（pending）。
 	var exec *metadata.Execution
-	var mtx metadata.MetadataTx
 	if p.txs != nil {
-		mtx, err = p.txs.Begin(ctx)
+		mtx, err := p.txs.Begin(ctx)
 		if err != nil {
 			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
 			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
@@ -222,8 +223,6 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 			result.ErrorCode = ErrInternalError
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}
-		defer mtx.Rollback()
-
 		exec = &metadata.Execution{
 			WorkspaceID:   conn.WorkspaceID,
 			ConnectionID:  conn.ID,
@@ -232,34 +231,34 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 			Status:        metadata.ExecStatusPending,
 			TraceID:       traceID,
 		}
-		if err := mtx.CreateExecution(ctx, exec); err != nil {
+		createErr := mtx.CreateExecution(ctx, exec)
+		commitErr := mtx.Commit()
+		if createErr != nil || commitErr != nil {
 			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
 			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
 				TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
 			})
 			result.ErrorCode = ErrInternalError
+			// finding 5：pending execution 未持久化时清除未提交的 ExecutionID。
+			result.ExecutionID = nil
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}
+		// finding 2：pending execution 创建后立即提交并释放事务，
+		// 不跨越 PolicyByConnection / ResolveCredential，避免长事务占用连接。
 		result.ExecutionID = &exec.ID
 	}
 
 	// 阶段 C 拒绝：Execution=failed + Audit(sql.execute, denied)，Adapter 调用 0 次。
 	if !decision.Allowed {
 		result.ErrorCode = code
-		if mtx != nil {
-			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
-				metadata.OutcomeDenied, metadata.AuditMetadata{
-					StatementHash: &statementHash,
-					ReasonCode:    strPtr(string(decision.ReasonCode)),
-					Engine:        strPtr(string(serverEngine)),
-				}); err != nil {
-				// 传入实际拒绝原因 code（如 statement_not_allowed），而非笼统的 ErrReadNotAllowed（VuXZQ）。
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, code)
-			}
-			// 提交 execution failed + audit denied（同一事务原子持久化，ADR-017 §6）。
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
-				return result, err
-			}
+		// 传入实际拒绝原因 code（如 statement_not_allowed），而非笼统的 ErrReadNotAllowed（VuXZQ）。
+		if r, err := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeDenied, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ReasonCode:    strPtr(string(decision.ReasonCode)),
+				Engine:        strPtr(string(serverEngine)),
+			}, code); err != nil {
+			return r, err
 		}
 		return result, fmt.Errorf("%w: %s", ErrReadNotAllowed, code)
 	}
@@ -272,40 +271,39 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 	if policy == nil {
 		result.ErrorCode = ErrPolicyNotConfigured
-		if mtx != nil {
-			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
-				metadata.OutcomeDenied, metadata.AuditMetadata{
-					StatementHash: &statementHash,
-					ReasonCode:    strPtr("policy_not_configured"),
-					Engine:        strPtr(string(serverEngine)),
-				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrPolicyNotConfigured)
-			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
-				return result, err
-			}
+		if r, err := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeDenied, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ReasonCode:    strPtr("policy_not_configured"),
+				Engine:        strPtr(string(serverEngine)),
+			}, ErrPolicyNotConfigured); err != nil {
+			return r, err
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	if policy.AllowRead == nil || !*policy.AllowRead {
 		result.ErrorCode = ErrReadNotAllowed
-		if mtx != nil {
-			if err := p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now,
-				metadata.OutcomeDenied, metadata.AuditMetadata{
-					StatementHash: &statementHash,
-					ReasonCode:    strPtr("read_not_allowed"),
-					Engine:        strPtr(string(serverEngine)),
-				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrReadNotAllowed)
-			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
-				return result, err
-			}
+		if r, err := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeDenied, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ReasonCode:    strPtr("read_not_allowed"),
+				Engine:        strPtr(string(serverEngine)),
+			}, ErrReadNotAllowed); err != nil {
+			return r, err
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	if policy.StatementTimeoutMs <= 0 || policy.MaxRows <= 0 {
+		// finding 3：策略参数校验失败统一写 failed + 审计，而非直接返回。
 		result.ErrorCode = ErrInternalError
+		if r, err := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeFailed, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ErrorCode:     strPtr(string(ErrInternalError)),
+				Engine:        strPtr(string(serverEngine)),
+			}, ErrInternalError); err != nil {
+			return r, err
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
@@ -314,13 +312,12 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	if err != nil {
 		result.CredentialResolved = false
 		result.ErrorCode = mapCredentialError(err)
-		if mtx != nil {
-			if err := p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now, err); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
-			}
-			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
-				return result, err
-			}
+		credErr := err
+		if r, e := p.failExecutionWith(ctx, exec, result, conn, traceID, now,
+			func(mtx metadata.MetadataTx) error {
+				return p.recordCredentialFailure(ctx, mtx, exec, result, conn, traceID, now, credErr)
+			}, result.ErrorCode); e != nil {
+			return r, e
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -328,22 +325,35 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	configRevision, err := connectionConfigRevision(conn)
 	if err != nil {
+		// finding 3：配置修订失败统一写 failed + 审计，而非直接返回。
 		result.ErrorCode = ErrInternalError
+		if r, e := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeFailed, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ErrorCode:     strPtr(string(ErrInternalError)),
+				Engine:        strPtr(string(serverEngine)),
+			}, ErrInternalError); e != nil {
+			return r, e
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
-	// 阶段 D-0: execution running 更新并在执行前提交元数据库事务。
+	// 阶段 D-0: execution running 更新（短生命周期事务，finding 2）。
 	// pending→running 更新或提交失败意味着元数据库故障，按审计失败处理
 	// （返回 audit_failed + $SECURITY_ALERT），而非降级为 internal_error（vpvC7 outside）。
-	if mtx != nil {
+	if exec != nil {
+		mtx, err := p.txs.Begin(ctx)
+		if err != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
+		}
 		exec.Status = metadata.ExecStatusRunning
 		if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+			mtx.Rollback()
 			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 		}
 		if err := mtx.Commit(); err != nil {
 			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 		}
-		mtx = nil
 	}
 
 	// 阶段 D: Adapter。
@@ -448,6 +458,55 @@ func (p *Pipeline) auditFailed(
 	// ADR-017 §6：审计失败不向调用方返回查询结果。
 	result.Result = nil
 	return result, fmt.Errorf("%w (original error: %s)", result.ErrorCode, originalCode)
+}
+
+// failExecutionWith 在执行前失败时开启短生命周期事务：按 record 回调更新 execution=failed
+// + 追加失败审计并提交（finding 2/3）。任一失败经 auditFailed 返回 audit_failed + $SECURITY_ALERT，
+// 避免 deferred Rollback 撤销已记录的 execution 与审计状态。
+func (p *Pipeline) failExecutionWith(
+	ctx context.Context,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	record func(mtx metadata.MetadataTx) error,
+	originalCode StableErrorCode,
+) (*ExecuteResult, error) {
+	if exec == nil {
+		return result, nil
+	}
+	mtx, err := p.txs.Begin(ctx)
+	if err != nil {
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, originalCode)
+	}
+	defer mtx.Rollback()
+	if err := record(mtx); err != nil {
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, originalCode)
+	}
+	if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+// failPreExecution 在执行前失败时开启短生命周期事务：更新 execution=failed + 追加失败审计并提交
+// （finding 2/3）。
+func (p *Pipeline) failPreExecution(
+	ctx context.Context,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	outcome metadata.AuditOutcome,
+	md metadata.AuditMetadata,
+	originalCode StableErrorCode,
+) (*ExecuteResult, error) {
+	return p.failExecutionWith(ctx, exec, result, conn, traceID, now,
+		func(mtx metadata.MetadataTx) error {
+			return p.recordPreExecution(ctx, mtx, exec, result, conn, traceID, now, outcome, md)
+		}, originalCode)
 }
 
 // commitPreExecution 提交执行前的事务（execution failed + audit 原子持久化，ADR-017 §6）。

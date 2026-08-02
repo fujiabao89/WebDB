@@ -92,7 +92,7 @@ WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
-- **验证**：单元测试、metadata/adapter 集成测试、fuzz（`FuzzPayloadDecoder`/`FuzzAAD`）、vet、Windows/Linux 构建通过；`go test -race` 由 GitHub Actions 覆盖。PR #32 CI run（<https://github.com/fujiabao89/WebDB/actions/runs/30735515337>）已通过 gofmt / vet / test / `-race` / metadata / adapter 集成测试。
+- **验证**：单元测试、metadata/adapter 集成测试、vet、Windows/Linux 构建通过；`go test -race` 与 metadata/adapter 集成测试由 GitHub Actions 覆盖（PR #32 最新 CI run <https://github.com/fujiabao89/WebDB/actions/runs/30736007025> 通过 gofmt / vet / test / `-race` / metadata / adapter）。fuzz：本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic（完整 30s fuzz 待后续 CI/常驻验证）。
 
 ## 验证与回滚
 
