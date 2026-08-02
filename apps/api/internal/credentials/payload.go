@@ -47,6 +47,10 @@ type rawPayload struct {
 const (
 	// maxPayloadBytes Payload 最大字节数。
 	maxPayloadBytes = 4096
+	// maxUserBytes user 字段最大 UTF-8 字节数（proposal §3.2，PAY-06）。
+	maxUserBytes = 255
+	// maxPasswordBytes password 字段最大 UTF-8 字节数（proposal §3.2，PAY-07）。
+	maxPasswordBytes = 1024
 )
 
 // ---- 编码 -------------------------------------------------------------------
@@ -145,6 +149,23 @@ func validatePayloadFields(p CredentialPayload) error {
 	}
 	if p.Password == "" {
 		return fmt.Errorf("%w: password is required", ErrInvalidPayload)
+	}
+
+	// 拒绝非 UTF-8 字符串（EncodePayload 路径也必须校验，避免 JSON 编码替换无效字节
+	// 改变字节数后导致 DecodePayload 的 per-field 长度校验不一致，使加密凭证无法打开）。
+	if !utf8.ValidString(p.User) {
+		return fmt.Errorf("%w: user is not valid UTF-8", ErrInvalidPayload)
+	}
+	if !utf8.ValidString(p.Password) {
+		return fmt.Errorf("%w: password is not valid UTF-8", ErrInvalidPayload)
+	}
+
+	// per-field 长度限制按 UTF-8 字节数（proposal §3.2，PAY-06/PAY-07）。
+	if len([]byte(p.User)) > maxUserBytes {
+		return fmt.Errorf("%w: user exceeds %d bytes", ErrInvalidPayload, maxUserBytes)
+	}
+	if len([]byte(p.Password)) > maxPasswordBytes {
+		return fmt.Errorf("%w: password exceeds %d bytes", ErrInvalidPayload, maxPasswordBytes)
 	}
 
 	for _, r := range p.User {
