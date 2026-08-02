@@ -47,6 +47,10 @@ type rawPayload struct {
 const (
 	// maxPayloadBytes Payload 最大字节数。
 	maxPayloadBytes = 4096
+	// maxUserBytes user 字段最大 UTF-8 字节数（proposal §3.2，PAY-06）。
+	maxUserBytes = 255
+	// maxPasswordBytes password 字段最大 UTF-8 字节数（proposal §3.2，PAY-07）。
+	maxPasswordBytes = 1024
 )
 
 // ---- 编码 -------------------------------------------------------------------
@@ -145,6 +149,14 @@ func validatePayloadFields(p CredentialPayload) error {
 	}
 	if p.Password == "" {
 		return fmt.Errorf("%w: password is required", ErrInvalidPayload)
+	}
+
+	// per-field 长度限制按 UTF-8 字节数（proposal §3.2，PAY-06/PAY-07）。
+	if len([]byte(p.User)) > maxUserBytes {
+		return fmt.Errorf("%w: user exceeds %d bytes", ErrInvalidPayload, maxUserBytes)
+	}
+	if len([]byte(p.Password)) > maxPasswordBytes {
+		return fmt.Errorf("%w: password exceeds %d bytes", ErrInvalidPayload, maxPasswordBytes)
 	}
 
 	for _, r := range p.User {

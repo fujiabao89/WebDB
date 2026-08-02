@@ -148,44 +148,35 @@ func TestPayload_PasswordControlChar_Allowed(t *testing.T) {
 	}
 }
 
-// ---- 4096 bytes 边界 ----
+// ---- 总大小与 per-field 长度边界 ----
 
-func TestPayload_Exactly4096Bytes(t *testing.T) {
-	overhead := len(`{"v":1,"user":"","password":""}`)
-	remaining := 4096 - overhead
-	if remaining < 3 {
-		t.Skip("overhead too large")
-	}
-	userLen := remaining - 1
+// per-field 限制（user≤255/password≤1024）使合法 payload 无法达到 4096 字节总上限；
+// 此测试验证最大合法 per-field 长度的 round-trip。
+func TestPayload_MaxPerFieldLengths_RoundTrip(t *testing.T) {
 	payload := CredentialPayload{
-		User:     strings.Repeat("x", userLen),
-		Password: "p",
+		User:     strings.Repeat("u", maxUserBytes),
+		Password: strings.Repeat("p", maxPasswordBytes),
 	}
 	encoded, err := EncodePayload(payload)
 	if err != nil {
-		t.Fatalf("encode 4096 bytes: %v", err)
-	}
-	if len(encoded) != 4096 {
-		t.Errorf("expected exactly 4096 bytes, got %d", len(encoded))
+		t.Fatalf("encode max-length payload: %v", err)
 	}
 	decoded, err := DecodePayload(encoded)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if decoded.User != payload.User {
-		t.Error("user mismatch")
+	if decoded.User != payload.User || decoded.Password != payload.Password {
+		t.Error("round-trip mismatch")
 	}
 }
 
-func TestPayload_Exceeds4096Bytes_Rejected(t *testing.T) {
-	overhead := len(`{"v":1,"user":"","password":""}`)
-	remaining := 4097 - overhead
-	payload := CredentialPayload{
-		User:     strings.Repeat("x", remaining),
-		Password: "p",
+// DecodePayload 保留总大小 4096 兜底（对原始输入），即使合法 payload 达不到该上限。
+func TestPayload_DecodeOver4096Bytes_Rejected(t *testing.T) {
+	data := make([]byte, 4097)
+	for i := range data {
+		data[i] = 'a'
 	}
-	_, err := EncodePayload(payload)
-	if err == nil {
+	if _, err := DecodePayload(data); err == nil {
 		t.Fatal("expected error for >4096 bytes")
 	}
 }
@@ -239,5 +230,61 @@ func TestPayload_NoPlaintextInError(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "secret_pw") {
 		t.Error("password should not appear in error message")
+	}
+}
+
+// ---- per-field 长度限制（PAY-06/PAY-07，UTF-8 字节数）----
+
+func TestPayload_UserMax255Bytes_Valid(t *testing.T) {
+	// 恰好 255 字节（ASCII）应通过
+	user := strings.Repeat("a", 255)
+	if _, err := EncodePayload(CredentialPayload{User: user, Password: "p"}); err != nil {
+		t.Fatalf("expected 255-byte user to be valid, got: %v", err)
+	}
+}
+
+func TestPayload_UserOver255Bytes_Rejected(t *testing.T) {
+	// 256 字节（ASCII）应拒绝
+	user := strings.Repeat("a", 256)
+	if _, err := EncodePayload(CredentialPayload{User: user, Password: "p"}); err == nil {
+		t.Fatal("expected error for user over 255 bytes")
+	}
+}
+
+func TestPayload_UserMultiByteBoundary_Valid(t *testing.T) {
+	// 多字节 UTF-8：127 个 "é"（2 字节）= 254 字节，加 1 ASCII = 255 字节，应通过
+	user := strings.Repeat("é", 127) + "a"
+	if len([]byte(user)) != 255 {
+		t.Fatalf("test setup: expected 255 bytes, got %d", len([]byte(user)))
+	}
+	if _, err := EncodePayload(CredentialPayload{User: user, Password: "p"}); err != nil {
+		t.Fatalf("expected 255-byte multi-byte user to be valid, got: %v", err)
+	}
+}
+
+func TestPayload_PasswordMax1024Bytes_Valid(t *testing.T) {
+	// 恰好 1024 字节（ASCII）应通过
+	pw := strings.Repeat("p", 1024)
+	if _, err := EncodePayload(CredentialPayload{User: "u", Password: pw}); err != nil {
+		t.Fatalf("expected 1024-byte password to be valid, got: %v", err)
+	}
+}
+
+func TestPayload_PasswordOver1024Bytes_Rejected(t *testing.T) {
+	// 1025 字节（ASCII）应拒绝
+	pw := strings.Repeat("p", 1025)
+	if _, err := EncodePayload(CredentialPayload{User: "u", Password: pw}); err == nil {
+		t.Fatal("expected error for password over 1024 bytes")
+	}
+}
+
+func TestPayload_PasswordMultiByteBoundary_Valid(t *testing.T) {
+	// 多字节 UTF-8：341 个 "密"（3 字节）= 1023 字节，加 1 ASCII = 1024 字节，应通过
+	pw := strings.Repeat("密", 341) + "a"
+	if len([]byte(pw)) != 1024 {
+		t.Fatalf("test setup: expected 1024 bytes, got %d", len([]byte(pw)))
+	}
+	if _, err := EncodePayload(CredentialPayload{User: "u", Password: pw}); err != nil {
+		t.Fatalf("expected 1024-byte multi-byte password to be valid, got: %v", err)
 	}
 }
