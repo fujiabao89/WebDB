@@ -32,6 +32,9 @@ const (
 	ErrExecutionCancelled       StableErrorCode = "execution_cancelled"
 	ErrUnsupportedQuery         StableErrorCode = "unsupported_query"
 	ErrConnectionConfigConflict StableErrorCode = "connection_config_conflict"
+	// ErrAuditFailed 审计写入失败（ADR-017 §6）：执行前 fail-closed 不调用 Adapter；
+	// 执行后不返回结果但 execution 已记录为 completed。禁止自动重试。
+	ErrAuditFailed StableErrorCode = "audit_failed"
 )
 
 // Engine 数据库引擎。

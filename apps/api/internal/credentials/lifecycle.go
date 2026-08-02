@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/fujiabao89/webdb/internal/metadata"
 	"github.com/google/uuid"
@@ -13,16 +14,31 @@ import (
 
 // LifecycleManager 管理凭证创建、解析、轮换和退役。
 type LifecycleManager struct {
-	store metadata.CredentialTXStore
-	conns metadata.ConnectionTXStore
-	kek   KEKProvider
-	db    *sql.DB
+	store  metadata.CredentialTXStore
+	conns  metadata.ConnectionTXStore
+	kek    KEKProvider
+	db     *sql.DB
+	logger *slog.Logger
 }
 
 // NewLifecycleManager 创建 LifecycleManager。
-// db 用于开启事务。
-func NewLifecycleManager(db *sql.DB, store metadata.CredentialTXStore, conns metadata.ConnectionTXStore, kek KEKProvider) *LifecycleManager {
-	return &LifecycleManager{store: store, conns: conns, kek: kek, db: db}
+// db 用于开启事务。logger 为可选注入（vtiLS）：不传或传 nil 时使用 slog.Default()，
+// 供脱敏返回前记录根因（vpvC7），测试可注入以捕获并断言日志内容。
+func NewLifecycleManager(db *sql.DB, store metadata.CredentialTXStore, conns metadata.ConnectionTXStore, kek KEKProvider, logger ...*slog.Logger) *LifecycleManager {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+	return &LifecycleManager{store: store, conns: conns, kek: kek, db: db, logger: l}
+}
+
+// logStorageFailure 记录底层存储/KEK 故障的根因（服务端日志），
+// 保持对外返回的稳定错误码脱敏（vpvC7）；写入日志前对 err 消息统一脱敏，
+// 禁止原始敏感内容进入日志（vti-OZ）。
+func (m *LifecycleManager) logStorageFailure(op string, workspaceID, secretRef uuid.UUID, err error) {
+	m.logger.Error("credential lifecycle failure",
+		"op", op, "workspace_id", workspaceID.String(), "secret_ref", secretRef.String(),
+		"error", metadata.RedactSensitive(err.Error()))
 }
 
 // Create 创建新凭证并返回 Envelope。
@@ -32,7 +48,9 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 
 	ver, kekKey, err := m.kek.ActiveKEK()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		// 与 Resolve/Rotate/Retire 一致：根因仅进服务端日志，返回保持脱敏（outside）。
+		m.logStorageFailure("create.active_kek", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
 		return nil, err
@@ -44,7 +62,8 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 	}
 
 	if err := m.store.CreateEnvelope(ctx, env); err != nil {
-		return nil, err
+		m.logStorageFailure("create.create_envelope", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	return env, nil
@@ -56,9 +75,11 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 	env, err := m.store.EnvelopeByRef(ctx, workspaceID, secretRef, secretVersion)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return CredentialPayload{}, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return CredentialPayload{}, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrInternalError, err)
+		// 根因仅进服务端日志，返回保持脱敏（vpvC7）。
+		m.logStorageFailure("resolve.envelope_by_ref", workspaceID, secretRef, err)
+		return CredentialPayload{}, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if env.RetiredAt != nil {
@@ -67,7 +88,13 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 
 	kek, err := m.kek.GetKEK(env.KEKVersion)
 	if err != nil {
-		return CredentialPayload{}, fmt.Errorf("%w: %v", ErrUnknownKEKVersion, err)
+		// 携带 KEK 版本号，供 E16 审计记录 kek_version（Codex P1）。
+		// 不把底层 KEK 提供器错误文本拼进错误链（Qodo #1），根因仅进服务端日志（vpvC7）。
+		m.logStorageFailure("resolve.get_kek", workspaceID, secretRef, err)
+		return CredentialPayload{}, &KEKVersionError{
+			Version: env.KEKVersion,
+			err:     fmt.Errorf("%w: unknown kek version", ErrUnknownKEKVersion),
+		}
 	}
 
 	return OpenEnvelope(env, workspaceID, secretRef, kek)
@@ -77,7 +104,8 @@ func (m *LifecycleManager) Resolve(ctx context.Context, workspaceID, secretRef u
 func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uuid.UUID, expectedVersion int, newPayload CredentialPayload) (*metadata.CredentialEnvelope, error) {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, fmt.Errorf("%w: begin tx: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.begin_tx", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	defer tx.Rollback()
 
@@ -85,14 +113,20 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	env, err := m.store.LockEnvelopeForUpdate(ctx, tx, workspaceID, secretRef)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return nil, fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return nil, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.lock_envelope", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	// 2. expected_version 检查
 	if env.Version != expectedVersion {
-		return nil, fmt.Errorf("%w: expected %d, actual %d", ErrVersionConflict, expectedVersion, env.Version)
+		// 携带 expected/actual 版本，供 E5 审计记录 actual_version（Qodo #4）。
+		return nil, &VersionConflictError{
+			Expected: expectedVersion,
+			Actual:   env.Version,
+			err:      fmt.Errorf("%w", ErrVersionConflict),
+		}
 	}
 
 	// 2a. 最新版本已退役时拒绝轮换。
@@ -106,29 +140,37 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 	// 4. 使用 active KEK 加密
 	ver, kekKey, err := m.kek.ActiveKEK()
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.active_kek", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
+		// 保留 wrap_quota_exhausted 稳定错误码契约（credentialErrorCode 依赖它，outside h），
+		// 同时记录根因供服务端排障，不把 KEK 提供器内部错误直接暴露。
+		m.logStorageFailure("rotate.reserve_wrap", workspaceID, secretRef, err)
 		return nil, err
 	}
 
 	newEnv, err := SealEnvelope(newPayload, workspaceID, secretRef, newVersion, SuiteAES256GCMv1, ver, kekKey, rand.Reader)
 	if err != nil {
+		// payload 验证类错误（ErrInvalidPayload/ErrPayloadTooLarge）保留错误码，不降级。
 		return nil, err
 	}
 
 	// 5. INSERT 新版本
 	if err := m.store.InsertEnvelopeTx(ctx, tx, newEnv); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.insert_envelope", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	// 6. UPDATE connections
 	if err := m.conns.UpdateConnectionVersion(ctx, tx, workspaceID, secretRef, newVersion); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.update_connection_version", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("%w: commit: %v", ErrInternalError, err)
+		m.logStorageFailure("rotate.commit", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	return newEnv, nil
@@ -138,7 +180,8 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uuid.UUID, version int) error {
 	tx, err := m.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("%w: begin tx: %v", ErrInternalError, err)
+		m.logStorageFailure("retire.begin_tx", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	defer tx.Rollback()
 
@@ -146,20 +189,26 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 	env, err := m.store.LockEnvelopeVersion(ctx, tx, workspaceID, secretRef, version)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			return fmt.Errorf("%w: %v", ErrCredentialNotFound, err)
+			return fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("retire.lock_envelope_version", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if env.RetiredAt != nil {
 		// 幂等：已退役
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			m.logStorageFailure("retire.commit_idempotent", workspaceID, secretRef, err)
+			return fmt.Errorf("%w: internal failure", ErrInternalError)
+		}
+		return nil
 	}
 
 	// 2. 检查引用
 	count, err := m.conns.CountConnectionsByVersion(ctx, tx, workspaceID, secretRef, version)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("retire.count_connections", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if count > 0 {
 		return fmt.Errorf("%w: %d connections still reference version %d", ErrCredentialInUse, count, version)
@@ -167,10 +216,16 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 
 	// 3. 设置 retired_at
 	if err := m.store.UpdateRetiredAt(ctx, tx, workspaceID, secretRef, version); err != nil {
-		return fmt.Errorf("%w: %v", ErrInternalError, err)
+		m.logStorageFailure("retire.update_retired_at", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		// 参照 Rotate 提交流程：记录根因并返回脱敏 ErrInternalError（outside g）。
+		m.logStorageFailure("retire.commit", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
+	}
+	return nil
 }
 
 // ---- 与 execution/adapter 的集成接口 ------------------------------------------

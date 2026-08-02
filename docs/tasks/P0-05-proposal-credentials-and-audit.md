@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-22（凭证信封加密）可基于本方案启动生产实现。WEB-23（审计接入）须等待 WEB-22 完成。
+> WEB-22（凭证信封加密）已基于本方案完成生产实现。WEB-23（审计接入）已完成实现并在 PR #32 独立审查中（WEB-21/WEB-22 阻塞均已解除）。
 
 ---
 
@@ -65,16 +65,16 @@ type ConnectConfig struct {
 
 凭证解密发生在阶段 D 之前、阶段 C 之后——即在授权通过、SQL 策略允许后，才解析凭证并传给 Adapter。
 
-### 1.4 现有审计脱敏（P0-04，已实现）
+### 1.4 审计脱敏（WEB-23 已实现，替代 P0-04 启发式）
 
-`sanitizeAuditMetadata()` 当前允许列表：`summary`、`rows_affected`、`row_count`、`cached`。启发式检测 `looksLikeSQL()` 和 `looksLikeCredential()` 仍存在。**P0-04 提案 §8.5 计划的扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）和基线收紧（移除 `summary`/启发式函数）当前尚未实现**，待 P0-04 后续迭代完成。
+WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（ADR-017 D10 已批准的 16 字段允许列表 + E5 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
 
-### 1.5 当前不可用的能力
+### 1.5 当前可用能力（WEB-22/WEB-23 已实现）
 
-- 凭证加解密未实现：`Connection.SecretRef`/`SecretVersion` 存在，但无法解密为 `ConnectConfig.User`/`ConnectConfig.Password`
-- KEK Provider 未实现
-- 凭证生命周期（创建/轮换/退役）未实现
-- 审计事件接入未完成（仅 execute 相关事件已定义）
+- 凭证加解密已实现：`Connection.SecretRef`/`SecretVersion` 通过信封解密为 `ConnectConfig.User`/`ConnectConfig.Password`
+- KEK Provider 已实现（环境变量注入，ADR-006）
+- 凭证生命周期（创建/轮换/退役）已实现，并接入 E3-E6 审计
+- 审计事件接入已完成：E1-E16 持久化审计 + E17 独立安全告警通道
 
 ---
 
@@ -616,7 +616,7 @@ KEK 不得出现在：
 | E3 | 凭证创建 | `credential.create` | `succeeded` | `user` | NULL | NULL | `secret_ref`(UUID), `secret_version`, `envelope_suite`, `kek_version` |
 | E4 | 凭证轮换成功 | `credential.rotate` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `old_version`, `new_version`, `envelope_suite`, `kek_version` |
 | E5 | 凭证轮换失败 | `credential.rotate` | `failed` | `user` | NULL | NULL | `secret_ref`, `error_code`, `expected_version`（如适用）, `actual_version`（如适用） |
-| E6 | 凭证退役 | `credential.retire` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `version` |
+| E6 | 凭证退役 | `credential.retire` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `secret_version` |
 | E7 | 连接测试成功 | `connection.test` | `succeeded` | `user` | 连接 ID | NULL | `engine`, `environment`, `duration_ms` |
 | E8 | 连接测试失败 | `connection.test` | `failed` | `user` | 连接 ID | NULL | `engine`, `environment`, `error_code` |
 | E9 | SQL 策略拒绝 | `sql.execute` | `denied` | `user` | 连接 ID | execution ID | `statement_hash`, `reason_code`, `engine` |
@@ -630,18 +630,20 @@ KEK 不得出现在：
 
 > **E17（审计写入失败）**：不持久化为 audit_events 行（失败的审计系统不可写入）。作为独立安全告警通过应用日志/监控通道发出，携带 `trace_id`、`error_code` 和发生时间。此告警通道独立于 `audit_events` 表，不受审计表触发器或写入失败的影响。
 
-### 8.2 Metadata 允许列表（合并字段表，16 字段）
+### 8.2 Metadata 允许列表（16 字段 + credential.rotate 专用 expected_version/actual_version，共 18 个字段）
 
-下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段（已在此表中），另有 3 个 P0-04 现有字段（`summary`、`rows_affected`、`cached`）仅由 P0-04 维护且不适用于凭证事件，未重复列出。WEB-23 实现时需将 sanitizer 扩展至完整 16 字段（6 新增 + 10 现有）并添加兼容性测试：
+下表列出 P0-05 方案涉及的完整 metadata 字段。16 字段允许列表包含 6 个 P0-05 新增凭证字段与 10 个 P0-04 现有字段；其中 P0-04 的 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件（表中未重复列出）。另加 credential.rotate 专用的 `expected_version`/`actual_version`（E5 专用，不属于原 16 字段拆解），共 18 个字段：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
 | `secret_ref` | string | UUID 格式 (36 chars) | E3-E6, E14-E16 | P0-05 新增 |
-| `secret_version` | integer | > 0 | E3, E16 | P0-05 新增 |
+| `secret_version` | integer | > 0 | E3, E6, E15, E16 | P0-05 新增 |
 | `old_version` | integer | > 0 | E4 | P0-05 新增 |
 | `new_version` | integer | > old_version | E4 | P0-05 新增 |
 | `envelope_suite` | string | 精确枚举值 | E3, E4 | P0-05 新增 |
 | `kek_version` | integer | > 0 | E3, E4, E16 | P0-05 新增 |
+| `expected_version` | integer | > 0 | E5 | credential.rotate 专用（见 §8.1 E5） |
+| `actual_version` | integer | > 0 | E5 | credential.rotate 专用（见 §8.1 E5） |
 | `statement_hash` | string | 64 char hex | E9-E13 | P0-04 现有 |
 | `row_count` | integer | 0..2^31-1 | E10 | P0-04 现有 |
 | `duration_ms` | integer | ≥ 0 | E7, E10 | P0-04 现有 |
@@ -708,7 +710,7 @@ KEK 不得出现在：
 
 1. **禁止静默降级**：审计写入失败必须返回 `audit_failed`，不返回 `succeeded`
 2. **禁止自动重试**：审计写入失败不触发服务端自动重试（避免重复执行副作用）
-3. **阶段 D 后特殊处理**：查询已真实执行，不返回结果给客户端，但 execution 已记录为 `completed`。客户端可通过 ExecutionID 查询状态（需 P0-05 认证后提供接口），但不承诺审计失败后结果一定可恢复
+3. **阶段 D 后特殊处理**：查询已真实执行，不返回结果给客户端，但 execution 已记录为终态（`completed`/`failed`/`cancelled`，与 ADR-017 一致）。客户端可通过 ExecutionID 查询状态（需 P0-05 认证后提供接口），但不承诺审计失败后结果一定可恢复
 4. **$SECURITY_ALERT**：凭证解密失败、未知 KEK 版本和审计写入失败必须产生安全告警
 
 ### 9.3 与 P0-04 契约的一致性
@@ -909,10 +911,10 @@ KEK 不得出现在：
 |---|---|---|
 | QA-01 | `go test ./...` | PASS |
 | QA-02 | `go vet ./...` | PASS |
-| QA-03 | `go test -race ./...` | PASS |
-| QA-04 | `go test -fuzz=. -fuzztime=30s` | 无 panic、无越界 |
-| QA-05 | `GOOS=windows go build ./...` | PASS |
-| QA-06 | `GOOS=linux go build ./...` | PASS |
+| QA-03 | `go test -race ./...` | PASS（由 GitHub Actions 覆盖） |
+| QA-04 | `go test -fuzz=. -fuzztime=30s` | 本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic；完整 30s 待后续验证 |
+| QA-05 | `GOOS=windows go build ./...` | PASS（本机） |
+| QA-06 | `GOOS=linux go build ./...` | PASS（本机） |
 | QA-07 | 许可证检查 | 无新增非兼容许可证 |
 | QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏 |
 
@@ -957,3 +959,5 @@ KEK 不得出现在：
 | 日期 | 修订内容 |
 |---|---|
 | 2026-08-01 | 初版 — 提交 Owner Gate |
+| 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
+| 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
