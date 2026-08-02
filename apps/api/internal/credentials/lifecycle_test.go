@@ -170,8 +170,9 @@ func TestLifecycleCreateDoesNotReturnReservationAfterPersistenceFailure(t *testi
 		uuid.New(),
 		CredentialPayload{User: "synthetic_user", Password: "synthetic_password"},
 	)
-	if !errors.Is(err, storeErr) {
-		t.Fatalf("Create() error = %v, want persistence error", err)
+	// 存储故障返回脱敏 internal_error（outside finding 18），不再把底层错误文本透出。
+	if !IsErrorCode(err, ErrInternalError) {
+		t.Fatalf("Create() error = %v, want internal_error (sanitized)", err)
 	}
 	if kek.reserveCalls != 1 {
 		t.Fatalf("ReserveWrap calls = %d, want 1", kek.reserveCalls)

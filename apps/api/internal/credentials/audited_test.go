@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -398,6 +399,25 @@ func TestAuditedCredential_RetireSucceededEvent(t *testing.T) {
 
 func timeNow() time.Time { return time.Unix(1_700_000_000, 0).UTC() }
 
+// TestAuditedCredential_ResolveCancelledContextStillWritesAudit 验证调用方 ctx 取消后
+// 审计事件仍被写入（writeAudit 与取消解耦，VuXZI）。
+func TestAuditedCredential_ResolveCancelledContextStillWritesAudit(t *testing.T) {
+	store := &fakeCredentialStore{envErr: metadata.ErrEnvelopeNotFound}
+	audit := &fakeAuditStore{}
+	alarm := &fakeAlarmRecorder{}
+	m, _, _ := auditedManager(store, nil, goodKEK(), audit, alarm)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.Resolve(ctx, uuid.New(), uuid.New(), 1)
+	if !IsErrorCode(err, ErrCredentialNotFound) {
+		t.Fatalf("error = %v, want credential_not_found", err)
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (audit must survive caller cancellation)", len(audit.events))
+	}
+}
+
 // ---- 审计写入失败负向测试（CodeRabbit #13）----------------------------------
 //
 // Resolve/Rotate 的业务操作持久化后写审计；审计追加失败必须返回 audit_failed
@@ -435,8 +455,13 @@ type fakeTxResult struct{}
 func (fakeTxResult) LastInsertId() (int64, error) { return 0, nil }
 func (fakeTxResult) RowsAffected() (int64, error) { return 1, nil }
 
+// fakeTxDBOnce 保证驱动只注册一次（VuXZH）；重复 sql.Register 同名驱动会 panic。
+var fakeTxDBOnce sync.Once
+
 func fakeTxDB() *sql.DB {
-	sql.Register("fake-wb23-audit-tx", fakeTxDriver{})
+	fakeTxDBOnce.Do(func() {
+		sql.Register("fake-wb23-audit-tx", fakeTxDriver{})
+	})
 	db, err := sql.Open("fake-wb23-audit-tx", "")
 	if err != nil {
 		panic(err)

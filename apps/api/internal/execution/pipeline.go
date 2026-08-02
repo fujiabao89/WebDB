@@ -29,11 +29,12 @@ type Pipeline struct {
 	adapter   AdapterClient
 	mysqlMode sqlpolicy.MySQLLexerMode
 
-	txs      metadata.TxStore
-	audit    metadata.AuditEventStore
-	alarm    SecurityAlarm
-	clock    func() time.Time
-	newTrace func() string
+	txs               metadata.TxStore
+	audit             metadata.AuditEventStore
+	alarm             SecurityAlarm
+	clock             func() time.Time
+	newTrace          func() string
+	auditWriteTimeout time.Duration // 可注入的审计持久化超时（VuXZW）
 }
 
 // ConnectionReader 仅暴露管线所需的工作区绑定连接读取能力。
@@ -88,12 +89,16 @@ type PipelineConfig struct {
 	MySQLMode   sqlpolicy.MySQLLexerMode
 
 	// WEB-23：审计感知管线。Tx 与 Audit 需同时配置；nil 时保持无审计旧行为。
-	Tx    metadata.TxStore
-	Audit metadata.AuditEventStore
-	Alarm SecurityAlarm
-	Clock func() time.Time
-	Trace func() string
+	Tx                metadata.TxStore
+	Audit             metadata.AuditEventStore
+	Alarm             SecurityAlarm
+	Clock             func() time.Time
+	Trace             func() string
+	AuditWriteTimeout time.Duration // 可注入的审计持久化超时（VuXZW）
 }
+
+// defaultAuditWriteTimeout 审计持久化默认超时（与 connections/credentials 一致）。
+const defaultAuditWriteTimeout = 5 * time.Second
 
 // NewPipeline 创建执行管线。
 func NewPipeline(cfg PipelineConfig) *Pipeline {
@@ -109,18 +114,23 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 	if alarm == nil {
 		alarm = NewStderrAlarm()
 	}
+	auditWriteTimeout := cfg.AuditWriteTimeout
+	if auditWriteTimeout <= 0 {
+		auditWriteTimeout = defaultAuditWriteTimeout
+	}
 	return &Pipeline{
-		store:       cfg.Store,
-		policyStore: cfg.PolicyStore,
-		members:     cfg.Members,
-		resolver:    cfg.Resolver,
-		adapter:     cfg.Adapter,
-		mysqlMode:   cfg.MySQLMode,
-		txs:         cfg.Tx,
-		audit:       cfg.Audit,
-		alarm:       alarm,
-		clock:       clock,
-		newTrace:    newTrace,
+		store:             cfg.Store,
+		policyStore:       cfg.PolicyStore,
+		members:           cfg.Members,
+		resolver:          cfg.Resolver,
+		adapter:           cfg.Adapter,
+		mysqlMode:         cfg.MySQLMode,
+		txs:               cfg.Tx,
+		audit:             cfg.Audit,
+		alarm:             alarm,
+		clock:             clock,
+		newTrace:          newTrace,
+		auditWriteTimeout: auditWriteTimeout,
 	}
 }
 
@@ -205,6 +215,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	if p.txs != nil {
 		mtx, err = p.txs.Begin(ctx)
 		if err != nil {
+			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
+			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+				TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
+			})
 			result.ErrorCode = ErrInternalError
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}
@@ -219,6 +233,10 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 			TraceID:       traceID,
 		}
 		if err := mtx.CreateExecution(ctx, exec); err != nil {
+			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
+			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+				TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
+			})
 			result.ErrorCode = ErrInternalError
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}
@@ -235,7 +253,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 					ReasonCode:    strPtr(string(decision.ReasonCode)),
 					Engine:        strPtr(string(serverEngine)),
 				}); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrReadNotAllowed)
+				// 传入实际拒绝原因 code（如 statement_not_allowed），而非笼统的 ErrReadNotAllowed（VuXZQ）。
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, code)
 			}
 			// 提交 execution failed + audit denied（同一事务原子持久化，ADR-017 §6）。
 			if _, err := p.commitPreExecution(ctx, mtx, result, traceID, conn.WorkspaceID); err != nil {
@@ -512,8 +531,8 @@ func (p *Pipeline) recordCredentialFailure(
 			SecretRef: strPtr(conn.SecretRef.String()),
 			ErrorCode: strPtr(code),
 		}
-	default:
-		// E15/E16: credential.decrypt 失败（system actor）
+	case StableErrorCode(credentials.ErrDecryptionFailed), StableErrorCode(credentials.ErrUnknownKEKVersion):
+		// E15/E16: 仅真正的解密失败 / 未知 KEK 版本记 credential.decrypt（VuXZU）。
 		action = metadata.ActionCredentialDecrypt
 		md = metadata.AuditMetadata{
 			SecretRef:     strPtr(conn.SecretRef.String()),
@@ -524,6 +543,13 @@ func (p *Pipeline) recordCredentialFailure(
 		var kekErr *credentials.KEKVersionError
 		if errors.As(credErr, &kekErr) {
 			md.KEKVersion = intPtr(kekErr.Version)
+		}
+	default:
+		// wrap_quota_exhausted / internal_error 等非解密失败：归为 E14 lookup（VuXZU）。
+		action = metadata.ActionCredentialLookup
+		md = metadata.AuditMetadata{
+			SecretRef: strPtr(conn.SecretRef.String()),
+			ErrorCode: strPtr(code),
 		}
 	}
 
@@ -570,10 +596,10 @@ func (p *Pipeline) recordPostExecution(
 	statementHash string,
 ) error {
 	// 调用方取消 ctx 时，仍需用未取消的 context 持久化 execution 终态与审计（Codex P1），
-	// 否则 running execution 永不终结、E13 永不追加。
-	if ctx.Err() != nil {
-		ctx = context.WithoutCancel(ctx)
-	}
+	// 否则 running execution 永不终结、E13 永不追加；同时设置独立超时，避免元数据库
+	// 无响应时无限阻塞请求 goroutine（VuXZW）。
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
 
 	var status metadata.ExecutionStatus
 	var outcome metadata.AuditOutcome
@@ -613,7 +639,13 @@ func (p *Pipeline) recordPostExecution(
 	}
 
 	exec.Status = status
-	exec.ErrorCode = md.ErrorCode
+	// executions.error_code 使用稳定的 result 错误码（成功为 nil），与 recordPreExecution
+	// 词汇表一致；md.ErrorCode 保持 metadata 专用码（query_cancelled/query_timeout，VuXZZ）。
+	if result.ErrorCode != "" {
+		exec.ErrorCode = strPtr(string(result.ErrorCode))
+	} else {
+		exec.ErrorCode = nil
+	}
 	// finished_at 在 adapter 工作完成后采样，避免早于 started_at（Codex P1）。
 	finished := p.clock()
 	exec.FinishedAt = &finished
@@ -624,12 +656,12 @@ func (p *Pipeline) recordPostExecution(
 	}
 
 	// 阶段 D 后：execution 更新独立事务提交（proposal §9.1）。
-	mtx, err := p.txs.Begin(ctx)
+	mtx, err := p.txs.Begin(auditCtx)
 	if err != nil {
 		return err
 	}
 	defer mtx.Rollback()
-	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+	if err := mtx.UpdateExecution(auditCtx, conn.WorkspaceID, exec); err != nil {
 		return err
 	}
 	if err := mtx.Commit(); err != nil {
@@ -655,7 +687,7 @@ func (p *Pipeline) recordPostExecution(
 	if err != nil {
 		return err
 	}
-	return p.audit.AppendAudit(ctx, event)
+	return p.audit.AppendAudit(auditCtx, event)
 }
 
 func connectionConfigRevision(conn *metadata.Connection) (int64, error) {

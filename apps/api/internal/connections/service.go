@@ -134,7 +134,8 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 	conn.WorkspaceID = p.WorkspaceID
 	conn.CreatedBy = p.UserID
 	if err := s.conns.CreateConnection(ctx, conn); err != nil {
-		// 不把底层存储错误文本拼进返回错误（Qodo #1）：稳定错误码 + 脱敏摘要。
+		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
+		s.logStorageFailure("create.connection", p.WorkspaceID, conn.ID, err)
 		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
 	}
 
@@ -163,6 +164,8 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 	}
 	conn.WorkspaceID = p.WorkspaceID
 	if err := s.conns.UpdateConnection(ctx, p.WorkspaceID, conn); err != nil {
+		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
+		s.logStorageFailure("update.connection", p.WorkspaceID, conn.ID, err)
 		return fmt.Errorf("%w: update connection failed", ErrInternalError)
 	}
 
@@ -315,7 +318,9 @@ func (s *Service) requireManager(ctx context.Context, p Principal) error {
 	}
 	member, err := s.members.MemberByWorkspaceAndUser(ctx, p.WorkspaceID, p.UserID)
 	if err != nil {
-		// 不把成员存储的底层错误文本拼进返回错误（Qodo #1）。
+		// 成员存储故障与真正的权限拒绝区分：根因仅进服务端日志（VuXZG），
+		// 返回保持脱敏 forbidden。
+		s.logStorageFailure("require_manager.member_lookup", p.WorkspaceID, uuid.Nil, err)
 		return fmt.Errorf("%w: member lookup failed", ErrForbidden)
 	}
 	if member == nil {

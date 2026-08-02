@@ -48,6 +48,8 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 
 	ver, kekKey, err := m.kek.ActiveKEK()
 	if err != nil {
+		// 与 Resolve/Rotate/Retire 一致：根因仅进服务端日志，返回保持脱敏（outside）。
+		m.logStorageFailure("create.active_kek", workspaceID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
@@ -60,7 +62,8 @@ func (m *LifecycleManager) Create(ctx context.Context, workspaceID uuid.UUID, pa
 	}
 
 	if err := m.store.CreateEnvelope(ctx, env); err != nil {
-		return nil, err
+		m.logStorageFailure("create.create_envelope", workspaceID, secretRef, err)
+		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	return env, nil

@@ -27,7 +27,7 @@ func TestAuditedExecute_MetadataNoCanary(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	_, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -70,7 +70,7 @@ func TestAuditedExecute_ErrorNoCanary(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{

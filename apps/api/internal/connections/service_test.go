@@ -658,7 +658,7 @@ func TestConnection_TestTimeoutContextRealDeadline(t *testing.T) {
 	if !errors.Is(err, StableErrorCode("execution_timeout")) {
 		t.Fatalf("error = %v, want execution_timeout", err)
 	}
-	if elapsed > 5*time.Second {
+	if elapsed > 1*time.Second {
 		t.Fatalf("ping not cancelled within server timeout: %v", elapsed)
 	}
 	if len(audit.events) != 1 {
@@ -758,7 +758,7 @@ func TestConnection_TestAuditWriteTimeoutRealDeadline(t *testing.T) {
 			if !errors.Is(err, ErrAuditFailed) {
 				t.Fatalf("error = %v, want audit_failed", err)
 			}
-			if elapsed > 5*time.Second {
+			if elapsed > 1*time.Second {
 				t.Fatalf("audit write not cancelled within server timeout: %v", elapsed)
 			}
 			if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {

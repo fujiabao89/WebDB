@@ -168,9 +168,9 @@ func auditedMember(principal AuthenticatedPrincipal) *fakeMemberReader {
 	}
 }
 
-// fixedClock 返回动态时钟（time.Now），使 finished_at 采样不早于 execution started_at
+// realClock 返回动态时钟（time.Now），使 finished_at 采样不早于 execution started_at
 // 且发生于 adapter 工作之后（Codex P1 修复 4 的验证基础）。
-func fixedClock() func() time.Time {
+func realClock() func() time.Time {
 	return func() time.Time { return time.Now() }
 }
 
@@ -184,7 +184,7 @@ func TestAuditedExecute_Succeeded(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -260,7 +260,7 @@ func TestAuditedExecute_PolicyDenied(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -320,7 +320,7 @@ func TestAuditedExecute_CredentialFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -379,7 +379,7 @@ func TestAuditedExecute_Timeout(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -426,7 +426,7 @@ func TestAuditedExecute_Cancelled(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -465,7 +465,7 @@ func TestAuditedExecute_CancelledContextStillPersists(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(ctx, ExecuteRequest{
@@ -506,7 +506,7 @@ func TestAuditedExecute_PreExecutionAuditFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -539,7 +539,7 @@ func TestAuditedExecute_PostExecutionAuditFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -578,7 +578,7 @@ func TestAuditedExecute_CredentialAuditFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -612,7 +612,7 @@ func TestAuditedExecute_AssociationCorrectness(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -706,7 +706,7 @@ func TestAuditedExecute_CommitFailurePreExecution(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -738,7 +738,7 @@ func TestAuditedExecute_BeginFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -756,8 +756,9 @@ func TestAuditedExecute_BeginFailure(t *testing.T) {
 	if client.calls != 0 {
 		t.Fatalf("adapter calls = %d, want 0 (begin failure)", client.calls)
 	}
-	if len(alarm.events) != 0 {
-		t.Fatalf("alarm events = %d, want 0 (begin failure is not an audit failure)", len(alarm.events))
+	// 阶段 B 失败触发 $SECURITY_ALERT（proposal §9.1，VuXZO）。
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrInternalError) {
+		t.Fatalf("expected internal_error alarm, got %+v", alarm.events)
 	}
 }
 
@@ -770,7 +771,7 @@ func TestAuditedExecute_UpdateFailurePreExecution(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -805,7 +806,7 @@ func TestAuditedExecute_D0RunningUpdateFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -838,7 +839,7 @@ func TestAuditedExecute_D0CommitFailure(t *testing.T) {
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
 		auditedMember(principal),
-		resolver, client, txStore, auditStore, alarm, fixedClock(),
+		resolver, client, txStore, auditStore, alarm, realClock(),
 	)
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
@@ -855,6 +856,69 @@ func TestAuditedExecute_D0CommitFailure(t *testing.T) {
 	}
 	if client.calls != 0 {
 		t.Fatalf("adapter calls = %d, want 0", client.calls)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// blockingAuditStore 在 block=true 时阻塞直到 ctx 到期，用于验证审计写入真实超时（VuXZW）。
+type blockingAuditStore struct {
+	events []*metadata.AuditEvent
+	block  bool
+}
+
+func (f *blockingAuditStore) AppendAudit(ctx context.Context, e *metadata.AuditEvent) error {
+	if f.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	e.ID = uuid.New()
+	f.events = append(f.events, e)
+	return nil
+}
+
+func (f *blockingAuditStore) QueryAudit(context.Context, metadata.AuditQuery) ([]metadata.AuditEvent, error) {
+	return nil, nil
+}
+
+// TestAuditedExecute_PostExecutionAuditWriteTimeout 验证 recordPostExecution 的审计写入
+// 受 AuditWriteTimeout 约束：审计 store 阻塞到 ctx 到期 → 返回 audit_failed + $SECURITY_ALERT（VuXZW）。
+func TestAuditedExecute_PostExecutionAuditWriteTimeout(t *testing.T) {
+	principal, conn, policy, resolver, client, txStore, _, _ := auditedPipelineInputs()
+	client.handle.result = &adapter.QueryResult{TotalReturned: 1}
+	blocking := &blockingAuditStore{block: true}
+	alarm := &fakeAlarm{}
+
+	pipeline := NewPipeline(PipelineConfig{
+		Store:             &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore:       &fakePolicyReader{policy: policy},
+		Members:           auditedMember(principal),
+		Resolver:          resolver,
+		Adapter:           client,
+		Tx:                txStore,
+		Audit:             blocking,
+		Alarm:             alarm,
+		Clock:             realClock(),
+		AuditWriteTimeout: 50 * time.Millisecond,
+	})
+
+	start := time.Now()
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed", result.ErrorCode)
+	}
+	if elapsed > 1*time.Second {
+		t.Fatalf("audit write not cancelled within server timeout: %v", elapsed)
 	}
 	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
 		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
@@ -883,7 +947,7 @@ func TestAuditedExecute_AlarmFailureDoesNotPanic(t *testing.T) {
 		Tx:          txStore,
 		Audit:       auditStore,
 		Alarm:       panicAlarm{},
-		Clock:       fixedClock(),
+		Clock:       realClock(),
 	})
 
 	result, err := pipeline.Execute(context.Background(), ExecuteRequest{

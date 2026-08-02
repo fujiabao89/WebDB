@@ -13,15 +13,19 @@ import (
 // ErrAuditFailed 凭证生命周期审计写入失败稳定错误码（ADR-017 §6）。
 const ErrAuditFailed ErrorCode = "audit_failed"
 
+// auditWriteTimeout 审计持久化的独立超时上限（与调用方取消解耦，VuXZI）。
+const auditWriteTimeout = 5 * time.Second
+
 // AuditedLifecycleManager 为凭证生命周期接入追加式审计（E3-E6, E14-E16）。
 // 生命周期操作持久化后写审计；审计写入失败返回 audit_failed（业务操作已持久化，
 // 调用方可按 proposal §6.2 重试审计写入）。
 type AuditedLifecycleManager struct {
-	lm       *LifecycleManager
-	audit    metadata.AuditEventStore
-	alarm    metadata.SecurityAlarm
-	clock    func() time.Time
-	newTrace func() string
+	lm                *LifecycleManager
+	audit             metadata.AuditEventStore
+	alarm             metadata.SecurityAlarm
+	clock             func() time.Time
+	newTrace          func() string
+	auditWriteTimeout time.Duration // 可注入的审计持久化超时（VuXZI）
 }
 
 // NewAuditedLifecycleManager 创建审计感知的凭证生命周期管理器。
@@ -31,12 +35,19 @@ func NewAuditedLifecycleManager(
 	alarm metadata.SecurityAlarm,
 ) *AuditedLifecycleManager {
 	return &AuditedLifecycleManager{
-		lm:       lm,
-		audit:    audit,
-		alarm:    alarm,
-		clock:    func() time.Time { return time.Now().UTC() },
-		newTrace: func() string { return uuid.NewString() },
+		lm:                lm,
+		audit:             audit,
+		alarm:             alarm,
+		clock:             func() time.Time { return time.Now().UTC() },
+		newTrace:          func() string { return uuid.NewString() },
+		auditWriteTimeout: auditWriteTimeout,
 	}
+}
+
+// auditContext 从调用方 ctx 派生审计持久化上下文：剥离取消信号并加上独立超时，
+// 确保客户端断开后 E3-E6/E14-E16 审计仍被写入（VuXZI）。
+func (m *AuditedLifecycleManager) auditContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), m.auditWriteTimeout)
 }
 
 // Create 创建凭证并写入 E3 credential.create。
@@ -225,9 +236,12 @@ func newRetireSucceededEvent(wsID, actorID, secretRef uuid.UUID, version int, tr
 // ---- helpers ----------------------------------------------------------------
 
 // writeAudit 写审计；审计追加失败触发 $SECURITY_ALERT 并返回 audit_failed（ADR-017 §6）。
+// 审计持久化与调用方取消解耦：即使请求 ctx 已取消，审计事件仍须写入（VuXZI）。
 func (m *AuditedLifecycleManager) writeAudit(ctx context.Context, event *metadata.AuditEvent) error {
-	if err := m.audit.AppendAudit(ctx, event); err != nil {
-		metadata.EmitAlarm(m.alarm, ctx, metadata.SecurityAlertEvent{
+	auditCtx, cancel := m.auditContext(ctx)
+	defer cancel()
+	if err := m.audit.AppendAudit(auditCtx, event); err != nil {
+		metadata.EmitAlarm(m.alarm, auditCtx, metadata.SecurityAlertEvent{
 			TraceID:     event.TraceID,
 			WorkspaceID: event.WorkspaceID,
 			Code:        string(ErrAuditFailed),
@@ -241,8 +255,11 @@ func (m *AuditedLifecycleManager) writeAudit(ctx context.Context, event *metadat
 
 // auditEventBuildFailed 统一处理审计事件构建失败（Create/Resolve/Rotate/Retire）：
 // 返回 audit_failed 并触发 $SECURITY_ALERT（ADR-017 §6，CodeRabbit #16）。
+// 告警使用非取消 context + 独立超时，调用方取消时仍发出 audit_failed（VuXZI）。
 func (m *AuditedLifecycleManager) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, buildErr error) error {
-	metadata.EmitAlarm(m.alarm, ctx, metadata.SecurityAlertEvent{
+	auditCtx, cancel := m.auditContext(ctx)
+	defer cancel()
+	metadata.EmitAlarm(m.alarm, auditCtx, metadata.SecurityAlertEvent{
 		TraceID:     m.newTrace(),
 		WorkspaceID: wsID,
 		Code:        string(ErrAuditFailed),
