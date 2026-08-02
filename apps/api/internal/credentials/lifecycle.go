@@ -22,9 +22,14 @@ type LifecycleManager struct {
 }
 
 // NewLifecycleManager 创建 LifecycleManager。
-// db 用于开启事务。logger 默认 slog.Default()，供脱敏返回前记录根因（vpvC7）。
-func NewLifecycleManager(db *sql.DB, store metadata.CredentialTXStore, conns metadata.ConnectionTXStore, kek KEKProvider) *LifecycleManager {
-	return &LifecycleManager{store: store, conns: conns, kek: kek, db: db, logger: slog.Default()}
+// db 用于开启事务。logger 为可选注入（vtiLS）：不传或传 nil 时使用 slog.Default()，
+// 供脱敏返回前记录根因（vpvC7），测试可注入以捕获并断言日志内容。
+func NewLifecycleManager(db *sql.DB, store metadata.CredentialTXStore, conns metadata.ConnectionTXStore, kek KEKProvider, logger ...*slog.Logger) *LifecycleManager {
+	l := slog.Default()
+	if len(logger) > 0 && logger[0] != nil {
+		l = logger[0]
+	}
+	return &LifecycleManager{store: store, conns: conns, kek: kek, db: db, logger: l}
 }
 
 // logStorageFailure 记录底层存储/KEK 故障的根因（服务端日志，不含凭证/KEK/明文），
@@ -135,6 +140,9 @@ func (m *LifecycleManager) Rotate(ctx context.Context, workspaceID, secretRef uu
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	if err := m.kek.ReserveWrap(ver); err != nil {
+		// 保留 wrap_quota_exhausted 稳定错误码契约（credentialErrorCode 依赖它，outside h），
+		// 同时记录根因供服务端排障，不把 KEK 提供器内部错误直接暴露。
+		m.logStorageFailure("rotate.reserve_wrap", workspaceID, secretRef, err)
 		return nil, err
 	}
 
@@ -185,7 +193,11 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 
 	if env.RetiredAt != nil {
 		// 幂等：已退役
-		return tx.Commit()
+		if err := tx.Commit(); err != nil {
+			m.logStorageFailure("retire.commit_idempotent", workspaceID, secretRef, err)
+			return fmt.Errorf("%w: internal failure", ErrInternalError)
+		}
+		return nil
 	}
 
 	// 2. 检查引用
@@ -204,7 +216,12 @@ func (m *LifecycleManager) Retire(ctx context.Context, workspaceID, secretRef uu
 		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		// 参照 Rotate 提交流程：记录根因并返回脱敏 ErrInternalError（outside g）。
+		m.logStorageFailure("retire.commit", workspaceID, secretRef, err)
+		return fmt.Errorf("%w: internal failure", ErrInternalError)
+	}
+	return nil
 }
 
 // ---- 与 execution/adapter 的集成接口 ------------------------------------------

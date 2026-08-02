@@ -1,9 +1,12 @@
 package credentials
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/fujiabao89/webdb/internal/metadata"
@@ -123,6 +126,29 @@ func TestLifecycleCreateRejectsBeforeSealAndPersistenceWhenWrapLimitReached(t *t
 	}
 	if store.createCalls != 0 {
 		t.Fatalf("CreateEnvelope calls = %d, want 0", store.createCalls)
+	}
+}
+
+// TestLifecycleLogStorageFailureRedactsSensitive 验证 logger 可注入（vtiLS）：
+// 脱敏返回前用注入 logger 记录底层根因，且日志不含密码/KEK/明文。
+func TestLifecycleLogStorageFailureRedactsSensitive(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	store := &fakeCredentialStore{envErr: errors.New("synthetic db error")}
+	manager := NewLifecycleManager(nil, store, nil, goodKEK(), logger)
+
+	_, err := manager.Resolve(context.Background(), uuid.New(), uuid.New(), 1)
+	if !IsErrorCode(err, ErrInternalError) {
+		t.Fatalf("error = %v, want internal_error", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "synthetic db error") {
+		t.Errorf("root cause not logged: %q", out)
+	}
+	for _, sensitive := range []string{"password", "kek=", "BEGIN"} {
+		if strings.Contains(out, sensitive) {
+			t.Errorf("log leaked sensitive data %q: %q", sensitive, out)
+		}
 	}
 }
 
