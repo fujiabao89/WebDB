@@ -1,6 +1,8 @@
 # P0-05：凭证与审计基线
 
-> 状态：Done｜完成日期：2026-08-02｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：In Progress｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
+>
+> **状态说明（Owner 2026-08-02 决策）**：P0-05 生产实现已完成并合并（PR #30/#31/#32），但收尾审查发现 3 个 P1 缺口，Owner 决策创建修复任务 [WEB-24](https://linear.app/webdb/issue/WEB-24)（并发轮换/回滚集成测试）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性）、[WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证字段长度）。**WEB-24/25/26 完成前，WEB-11 保持 In Progress**。[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产角色拆分，截止 2026-08-09）建立追踪后不阻断代码验收。
 >
 > **子任务**：
 > - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（✅ Done，[PR #30](https://github.com/fujiabao89/WebDB/pull/30) 已合并，合并后 main commit（单父）`3b9e5bd8c9af68fca56b069f3c39ad0b83872511`）
@@ -109,10 +111,10 @@
 
 全部残余风险 R1-R7 与已接受决策见 [P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md) §13 与 [P0-05-threat-model.md](P0-05-threat-model.md) §6，以及 [ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)。本任务不新增、不改写任何 Owner 决策。要点：
 
-- **R6（审计事件不防内部 DBA 篡改）**：D15 已批准创建"生产环境数据库角色拆分"任务，但**尚未创建实际 Linear issue / 无 Owner 与期限**（Codex P2）。需 Owner 建立有负责人和截止日期的后续任务后才可追溯关闭。
-- **凭证 per-field 长度限制未实现（Codex P1）**：`validatePayloadFields` 未校验 user≤255 / password≤1024 字节（见验收矩阵"凭证 Payload 严格校验"）。需 Owner 决策补实现+测试，或记录有期限例外。
-- **审计原子性契约矛盾（Codex P1）**：D11 声明元数据变更与审计原子提交，但 credential/connection mutation 实际为 post-commit 再写审计（proposal §6.2.1/6.2.3 描述）。需 Owner 决策：原子化+失败注入测试，或同步 ADR-017/任务契约。
-- **并发轮换与事务回滚测试缺口（Codex P1）**：`credentials/kek_test.go` 覆盖并发 wrap 计数、`credentials/audited_test.go` 覆盖轮换审计事件，但缺少直接验证并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的 PostgreSQL 集成测试。轮换事务原子性与回滚语义由实现（`SELECT ... FOR UPDATE` + INSERT + UPDATE connections 同一事务）保证，但未由自动化测试直接验证；需 Owner 决定补充集成测试或记录有期限的后续任务。
+- **凭证 per-field 长度限制未实现（Codex P1 → [WEB-26](https://linear.app/webdb/issue/WEB-26)）**：`validatePayloadFields` 未校验 user≤255 / password≤1024 字节（按 UTF-8 字节数，Owner 已授权实现）。Owner 决策：不修改字段长度契约，按 UTF-8 字节数实现并补 PAY-06/07 边界测试。
+- **审计原子性契约矛盾（Codex P1 → [WEB-25](https://linear.app/webdb/issue/WEB-25)）**：D11 保留但明确作用域——同一元数据库内 credential/connection mutation 必须与 AuditEvent 原子提交；目标库查询后审计为外部副作用例外，沿用 ADR-017 post-execution fail-closed。Owner 决策：创建 P1 实现任务修复 post-commit 审计。
+- **并发轮换与事务回滚测试缺口（Codex P1 → [WEB-24](https://linear.app/webdb/issue/WEB-24)）**：`credentials/kek_test.go` 覆盖并发 wrap 计数、`credentials/audited_test.go` 覆盖轮换审计事件，但缺少直接验证并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的 PostgreSQL 集成测试。Owner 决策：不接受例外，创建 P1 修复任务在真实 PostgreSQL 集成环境补测。
+- **R6（审计事件不防内部 DBA 篡改 → [WEB-27](https://linear.app/webdb/issue/WEB-27)）**：D15 已批准创建"生产环境数据库角色拆分"任务。Owner 2026-08-02 决策已创建 WEB-27（Backend/Security Owner，截止 2026-08-09，首次 production-like 部署前完成）；建立追踪关系后**不阻断 WEB-11 代码验收**，但阻断首次 production-like 部署。
 - KEK 丢失等于对应 envelope 永久失去解密能力（ADR-017 后果）。
 - 本任务全部验证基于合成/脱敏数据；未使用真实 KEK、生产凭证或生产数据库。
 

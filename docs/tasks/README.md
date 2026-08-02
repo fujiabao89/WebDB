@@ -8,7 +8,7 @@
 | 1 | [P0-04 SQL 安全执行策略](P0-04-sql-safety-policy.md) | Done | P0-03 的执行边界 |
 | 2 | [P0-01 工程骨架与 Compose](P0-01-project-skeleton-and-compose.md) | Done | 无 |
 | 2 | [P0-02 元数据库与迁移](P0-02-metadata-and-migrations.md) | Done | P0-01、ADR-013 |
-| 2 | [P0-05 凭证与审计基线](P0-05-credentials-and-audit-baseline.md) | Done | P0-02、P0-04、ADR-006、ADR-010、ADR-013 |
+| 2 | [P0-05 凭证与审计基线](P0-05-credentials-and-audit-baseline.md) | In Progress | P0-02、P0-04、ADR-006、ADR-010、ADR-013；P1 修复 [WEB-24](https://linear.app/webdb/issue/WEB-24)/[WEB-25](https://linear.app/webdb/issue/WEB-25)/[WEB-26](https://linear.app/webdb/issue/WEB-26)；R6 [WEB-27](https://linear.app/webdb/issue/WEB-27) |
 | — | [P0-05A 凭证与审计方案（Owner Gate）](P0-05-proposal-credentials-and-audit.md) | 已批准 | P0-05 |
 | — | [P0-05 威胁模型](P0-05-threat-model.md) | 已批准 | P0-05A |
 | 3 | [P0-06 最小 Web 工作台](P0-06-minimal-web-workbench.md) | Backlog | P0-01、P0-03、P0-04；集成 P0-02/P0-05 |
