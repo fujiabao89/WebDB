@@ -642,6 +642,8 @@ KEK 不得出现在：
 | `new_version` | integer | > old_version | E4 | P0-05 新增 |
 | `envelope_suite` | string | 精确枚举值 | E3, E4 | P0-05 新增 |
 | `kek_version` | integer | > 0 | E3, E4, E16 | P0-05 新增 |
+| `expected_version` | integer | > 0 | E5 | credential.rotate 专用（见 §8.1 E5） |
+| `actual_version` | integer | > 0 | E5 | credential.rotate 专用（见 §8.1 E5） |
 | `statement_hash` | string | 64 char hex | E9-E13 | P0-04 现有 |
 | `row_count` | integer | 0..2^31-1 | E10 | P0-04 现有 |
 | `duration_ms` | integer | ≥ 0 | E7, E10 | P0-04 现有 |
@@ -708,7 +710,7 @@ KEK 不得出现在：
 
 1. **禁止静默降级**：审计写入失败必须返回 `audit_failed`，不返回 `succeeded`
 2. **禁止自动重试**：审计写入失败不触发服务端自动重试（避免重复执行副作用）
-3. **阶段 D 后特殊处理**：查询已真实执行，不返回结果给客户端，但 execution 已记录为 `completed`。客户端可通过 ExecutionID 查询状态（需 P0-05 认证后提供接口），但不承诺审计失败后结果一定可恢复
+3. **阶段 D 后特殊处理**：查询已真实执行，不返回结果给客户端，但 execution 已记录为终态（`completed`/`failed`/`cancelled`，与 ADR-017 一致）。客户端可通过 ExecutionID 查询状态（需 P0-05 认证后提供接口），但不承诺审计失败后结果一定可恢复
 4. **$SECURITY_ALERT**：凭证解密失败、未知 KEK 版本和审计写入失败必须产生安全告警
 
 ### 9.3 与 P0-04 契约的一致性
