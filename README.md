@@ -1,6 +1,6 @@
 # WebDB
 
-WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架和 Docker Compose 本地环境；P0-02 已完成元数据库迁移；P0-03 已完成数据库 Adapter（双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）；P0-04 已完成服务端 SQL 安全策略（方言 AST 分类 + ECM lexer + Policy 决策引擎 + 内部执行编排）。API 仍只公开 `/health`；凭证与审计基线由 P0-05 继续完成，最小 Web 工作台由 P0-06 完成。
+WebDB 是面向团队的自托管数据库工作台。当前处于 P0 阶段，目标范围是 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和追加式审计。P0-01 已完成工程骨架和 Docker Compose 本地环境；P0-02 已完成元数据库迁移；P0-03 已完成数据库 Adapter（双引擎连接池、Schema 拉取、SQL 透传执行与 keyset 分页）；P0-04 已完成服务端 SQL 安全策略（方言 AST 分类 + ECM lexer + Policy 决策引擎 + 内部执行编排）。API 仍只公开 `/health`；P0-05 已完成凭证与审计基线（信封加密、轮换、追加式审计与脱敏），最小 Web 工作台由 P0-06 完成。
 
 ## 仓库结构
 

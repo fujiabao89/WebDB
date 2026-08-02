@@ -83,21 +83,24 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 - 审计事件至少保留 90 天（从 `occurred_at` 起算），P0 阶段不实施自动删除（D12 已批准）
 - 精确清理机制和归档策略另建独立任务
 
-## 实施与验证状态（WEB-23，2026-08-01）
+## 实施与验证状态（WEB-22/WEB-23，2026-08-02 已合并）
 
-WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策略：
+WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期；WEB-23（P0-05C）实现了本 ADR 定义的追加式审计、脱敏与故障策略，已于 2026-08-02 合并（PR #31 / #32）。
 
 - **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 ADR-017 D10 已批准的 16 字段（6 P0-05 新增 + 10 P0-04 现有）+ credential.rotate 专用 expected_version/actual_version，共 18 个 JSON 字段，事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
 - **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
-- **验证**：`go test -race`、metadata/adapter 集成测试以及 CI run（<https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）中的 gofmt / vet / test 均为 **CI 覆盖**；fuzz 与 Windows/Linux 构建为**未由该 CI 覆盖的本机结果**（本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic、Windows/Linux `go build ./...` 通过；完整 30s fuzz 与跨平台构建的常驻验证待后续）。
+- **验证（合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>，head `94eb3ca`，全部 success）**：gofmt / vet / test / **race** / metadata 集成 / PostgreSQL·MySQL adapter 集成均为 **CI 覆盖**。
+- **本机验证（Windows，Go 1.26.5，`GOPROXY=off`）**：`go test ./...`、`go vet ./...`、Windows/Linux `go build ./...` 均 exit 0；`FuzzPayloadDecoder` 30s（~228k execs）与 `FuzzAAD` 30s（~51k execs）均 **PASS**（无 panic/crash）。
+- **本机 race 限制**：Windows `CGO_ENABLED=0`，`go test -race ./...` 报 `-race requires cgo`（exit 2），**本机不声明 race PASS**；由 main CI Race test success 覆盖。
+- 完整 30s fuzz 已在本机完成并通过（上述实际结果），不再有"待后续"项。
 
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
-- 回滚：`git revert` WEB-22/WEB-23 合并提交；credential_envelopes 仅追加写，数据不受影响
+- 回滚：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）、`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）；credential_envelopes 与 audit_events 仅追加写，数据不受影响
 - KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 
 ## 相关资料

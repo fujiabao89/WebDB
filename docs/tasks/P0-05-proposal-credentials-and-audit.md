@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-22（凭证信封加密）已基于本方案完成生产实现。WEB-23（审计接入）已完成实现并在 PR #32 独立审查中（WEB-21/WEB-22 阻塞均已解除）。
+> WEB-21（方案/威胁模型/Owner Gate）、WEB-22（凭证信封加密）、WEB-23（审计接入）均已合并：[PR #30](https://github.com/fujiabao89/WebDB/pull/30)、[PR #31](https://github.com/fujiabao89/WebDB/pull/31)、[PR #32](https://github.com/fujiabao89/WebDB/pull/32)。父任务 WEB-11 已于 2026-08-02 完成收尾。
 
 ---
 
@@ -909,14 +909,14 @@ KEK 不得出现在：
 
 | ID | 验证项 | 预期 |
 |---|---|---|
-| QA-01 | `go test ./...` | PASS |
-| QA-02 | `go vet ./...` | PASS |
-| QA-03 | `go test -race ./...` | PASS（由 GitHub Actions 覆盖） |
-| QA-04 | `go test -fuzz=. -fuzztime=30s` | 本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic；完整 30s 待后续验证 |
-| QA-05 | `GOOS=windows go build ./...` | PASS（本机） |
-| QA-06 | `GOOS=linux go build ./...` | PASS（本机） |
-| QA-07 | 许可证检查 | 无新增非兼容许可证 |
-| QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏 |
+| QA-01 | `go test ./...` | PASS（本机 exit 0；CI Test success） |
+| QA-02 | `go vet ./...` | PASS（本机 exit 0；CI Vet success） |
+| QA-03 | `go test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
+| QA-04 | `go test -fuzz=. -fuzztime=30s` | **PASS**：本机 `FuzzPayloadDecoder` 30s（~228k execs）、`FuzzAAD` 30s（~51k execs）均无 panic/crash，exit 0 |
+| QA-05 | `GOOS=windows go build ./...` | PASS（本机，exit 0） |
+| QA-06 | `GOOS=linux go build ./...` | PASS（本机，exit 0） |
+| QA-07 | 许可证检查 | 无新增非兼容许可证（全部 Go stdlib） |
+| QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏（canary 测试，见 baseline 验收矩阵） |
 
 ---
 
@@ -924,16 +924,20 @@ KEK 不得出现在：
 
 ### 15.1 回滚 WEB-22
 
-- **代码回滚**：`git revert <WEB-22 merge commit>`
+- **代码回滚**：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（PR #31 实际 merge commit）
 - **数据回滚**：credential_envelopes 表仅追加，回滚代码不会破坏历史数据
 - **KEK 回滚**：保留旧版 KEK 环境变量，新 envelope 仍可解密
 
 ### 15.2 回滚 WEB-23
 
-- **代码回滚**：`git revert <WEB-23 merge commit>`
+- **代码回滚**：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（PR #32 实际 merge commit）
 - **审计数据**：审计事件不可变（append-only），回滚代码不影响已写入的审计数据
 
-### 15.3 KEK 紧急轮换
+### 15.3 回滚 WEB-21（仅文档设计门，如需完整链路）
+
+- **代码回滚**：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（PR #30 实际 merge commit，方案/威胁模型/ADR 文档，无生产行为）
+
+### 15.4 KEK 紧急轮换
 
 1. 在所有实例上添加新 `WEBDB_KEK_V{N+1}` 环境变量（但不修改 `WEBDB_ACTIVE_KEK_VERSION`）
 2. 滚动重启所有实例（此时仍使用旧版 KEK 写入，新版 KEK 已加载可用于解密）
@@ -961,3 +965,4 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
+| 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 merge commit；D1-D15 已批准决策未修改 |
