@@ -86,7 +86,7 @@
 | AES-256-GCM 信封加密与 AAD | PASS | `credentials/envelope_test.go` + `aad_validation_test.go`：`TestEnvelope_*`（RoundTrip、WrongKEK、DataAAD/WrapAAD、各类篡改）、`TestAAD_*`（48B、CrossWorkspace/SecretRef/Version） |
 | KEK Provider 与版本行为 | PASS | `credentials/kek_test.go`：`TestKEK_*`（ActiveKEK、版本、Base64/长度/弱值拒绝、2^24 包装上限、并发） |
 | create/resolve/rotate/retire | PASS | `credentials/audited_test.go`：`TestAuditedCredential_*`（CreateWritesE3、RotateSucceeded/Failed、RetireSucceeded、E14-E16） |
-| 并发轮换与事务回滚 | PASS | `credentials/kek_test.go`（并发计数）+ `metadata/integration_test.go`（FOR SHARE/FOR KEY SHARE，见下） |
+| 并发轮换与事务回滚 | **部分覆盖** | 并发 wrap 预留：`credentials/kek_test.go`（`TestKEK_WrappingCounterConcurrent`、`TestKEK_WrapReservationNeverExceedsLimitConcurrently`）；轮换审计事件：`credentials/audited_test.go`（`TestAuditedCredential_RotateSucceededEvent`、`RotateFailedEvent`）。**PostgreSQL 并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的直接集成测试缺失**，作为后续任务跟踪（见「残余风险」） |
 | 退役引用并发保护 | PASS | `metadata/integration_test.go`：`TestCountConnectionsByVersionLocksMatchingReferences`、`TestConnectionWritesRejectRetiredCredential` |
 | Policy 拒绝不解密 | PASS | `execution/audited_pipeline_test.go`：`TestAuditedExecute_PolicyDenied`（Adapter 0 次） |
 | 凭证失败 Adapter 0 次 | PASS | `execution/audited_pipeline_test.go`：`TestAuditedExecute_CredentialFailure` |
@@ -110,18 +110,20 @@
 全部残余风险 R1-R7 与已接受决策见 [P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md) §13 与 [P0-05-threat-model.md](P0-05-threat-model.md) §6，以及 [ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)。本任务不新增、不改写任何 Owner 决策。要点：
 
 - R6（审计事件不防内部 DBA 篡改）已创建生产数据库角色拆分后续任务（D15）。
+- **并发轮换与事务回滚测试缺口（Codex P1）**：`credentials/kek_test.go` 覆盖并发 wrap 计数、`credentials/audited_test.go` 覆盖轮换审计事件，但缺少直接验证并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的 PostgreSQL 集成测试。轮换事务原子性与回滚语义由实现（`SELECT ... FOR UPDATE` + INSERT + UPDATE connections 同一事务）保证，但未由自动化测试直接验证；需 Owner 决定补充集成测试或记录有期限的后续任务。
 - KEK 丢失等于对应 envelope 永久失去解密能力（ADR-017 后果）。
 - 本任务全部验证基于合成/脱敏数据；未使用真实 KEK、生产凭证或生产数据库。
 
 ## 回滚与前向修复
 
 - **本收尾文档 PR**：仅影响文档状态，回滚/前向修复只涉及文档，不影响任何生产行为。
-- **功能回滚**（引用实际 merge commit）：
-  - WEB-22：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（凭证信封/轮换/Adapter 接入）
-  - WEB-23：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（追加式审计/脱敏/故障策略）
-  - WEB-21（仅文档设计门）：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`
+- **功能回滚**（引用实际 merge commit，**注意顺序**）：由于 WEB-23 修改了 WEB-22 引入的 credential/execution 文件，且本收尾 PR 修改了同一批文档，直接按任意顺序 `git revert` 会触发 modify/delete 冲突，需人工解决。完整回滚顺序：
+  1. 先回滚本收尾 PR（仅影响文档状态）；
+  2. `git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32，追加式审计/脱敏/故障策略）；
+  3. `git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31，凭证信封/轮换/Adapter 接入）；
+  4. WEB-21（仅文档设计门，可选）：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（无生产行为）。
   - credential_envelopes 与 audit_events 仅追加写，代码回滚不影响已写入数据。
-- **KEK 紧急轮换（两阶段）**：见 proposal §15.3 / ADR-017「验证与回滚」。
+- **KEK 紧急轮换（两阶段）**：见 proposal §15.4 / ADR-017「验证与回滚」。
 
 ## 升级条件
 
