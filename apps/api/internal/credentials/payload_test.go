@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -286,5 +287,56 @@ func TestPayload_PasswordMultiByteBoundary_Valid(t *testing.T) {
 	}
 	if _, err := EncodePayload(CredentialPayload{User: "u", Password: pw}); err != nil {
 		t.Fatalf("expected 1024-byte multi-byte password to be valid, got: %v", err)
+	}
+}
+
+// ---- 多字节超限（防 rune 计数错误；PAY-06/PAY-07）----
+
+// 若实现错误地按 rune 计数而非 UTF-8 字节数，以下用例会被错误接受。
+// 同时用 errors.Is 断言错误类型为 ErrInvalidPayload，且对 EncodePayload 与 DecodePayload 都验证。
+func TestPayload_MultiByteOverLimit_Rejected(t *testing.T) {
+	tests := []struct {
+		name     string
+		user     string
+		password string
+	}{
+		// 128 个 "é"（2 字节）= 256 字节 > 255，但 rune 数 128 < 255
+		{"user 128×é=256 bytes", strings.Repeat("é", 128), "p"},
+		// 341 个 "密"（3 字节）+ "é"（2 字节）= 1025 字节 > 1024，但 rune 数 342 < 1024
+		{"password 341×密+é=1025 bytes", "u", strings.Repeat("密", 341) + "é"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := CredentialPayload{User: tt.user, Password: tt.password}
+
+			// EncodePayload 路径：必须拒绝为 ErrInvalidPayload
+			if _, err := EncodePayload(payload); !errors.Is(err, ErrInvalidPayload) {
+				t.Fatalf("EncodePayload: expected ErrInvalidPayload, got %v", err)
+			}
+
+			// DecodePayload 路径（总载荷 < 4096 时）：必须拒绝为 ErrInvalidPayload
+			raw := []byte(`{"v":1,"user":"` + tt.user + `","password":"` + tt.password + `"}`)
+			if len(raw) < maxPayloadBytes {
+				if _, err := DecodePayload(raw); !errors.Is(err, ErrInvalidPayload) {
+					t.Fatalf("DecodePayload: expected ErrInvalidPayload, got %v", err)
+				}
+			}
+		})
+	}
+}
+
+// ---- 非 UTF-8 字符串（qodo：EncodePayload 路径必须拒绝）----
+
+// Go 字符串可含任意字节；非 UTF-8 若被 EncodePayload 接受，JSON 编码会替换无效字节
+// 改变字节数，导致 DecodePayload 的 per-field 长度校验不一致，加密凭证无法打开。
+func TestPayload_InvalidUTF8String_Rejected(t *testing.T) {
+	invalid := string([]byte{0xff, 0xfe, 0xfd}) // 非法 UTF-8 字节序列
+
+	if _, err := EncodePayload(CredentialPayload{User: "u", Password: invalid}); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("password invalid UTF-8: expected ErrInvalidPayload, got %v", err)
+	}
+	if _, err := EncodePayload(CredentialPayload{User: invalid, Password: "p"}); !errors.Is(err, ErrInvalidPayload) {
+		t.Fatalf("user invalid UTF-8: expected ErrInvalidPayload, got %v", err)
 	}
 }
