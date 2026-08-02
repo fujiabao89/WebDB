@@ -912,7 +912,7 @@ KEK 不得出现在：
 | QA-01 | `go test ./...` | PASS（本机 exit 0；CI Test success） |
 | QA-02 | `go vet ./...` | PASS（本机 exit 0；CI Vet success） |
 | QA-03 | `go test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
-| QA-04 | `go test -fuzz=. -fuzztime=30s` | **PASS**：本机 `FuzzPayloadDecoder` 30s（~228k execs）、`FuzzAAD` 30s（~51k execs）均无 panic/crash，exit 0 |
+| QA-04 | 在 `apps/api` 目录分别执行 `go test -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go test -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：本机两个 target 各完整 30s（`FuzzPayloadDecoder` ~228k execs、`FuzzAAD` ~51k execs），均无 panic/crash，exit 0 |
 | QA-05 | `GOOS=windows go build ./...` | PASS（本机，exit 0） |
 | QA-06 | `GOOS=linux go build ./...` | PASS（本机，exit 0） |
 | QA-07 | 许可证检查 | 无新增非兼容许可证（全部 Go stdlib） |
