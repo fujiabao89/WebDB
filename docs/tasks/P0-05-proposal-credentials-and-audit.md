@@ -67,7 +67,7 @@ type ConnectConfig struct {
 
 ### 1.4 审计脱敏（WEB-23 已实现，替代 P0-04 启发式）
 
-WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（16 字段允许列表 + E5 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
+WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（15 个 JSON 字段：13 个通用字段 + credential.rotate 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
 
 ### 1.5 当前可用能力（WEB-22/WEB-23 已实现）
 
@@ -616,7 +616,7 @@ KEK 不得出现在：
 | E3 | 凭证创建 | `credential.create` | `succeeded` | `user` | NULL | NULL | `secret_ref`(UUID), `secret_version`, `envelope_suite`, `kek_version` |
 | E4 | 凭证轮换成功 | `credential.rotate` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `old_version`, `new_version`, `envelope_suite`, `kek_version` |
 | E5 | 凭证轮换失败 | `credential.rotate` | `failed` | `user` | NULL | NULL | `secret_ref`, `error_code`, `expected_version`（如适用）, `actual_version`（如适用） |
-| E6 | 凭证退役 | `credential.retire` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `version` |
+| E6 | 凭证退役 | `credential.retire` | `succeeded` | `user` | NULL | NULL | `secret_ref`, `secret_version` |
 | E7 | 连接测试成功 | `connection.test` | `succeeded` | `user` | 连接 ID | NULL | `engine`, `environment`, `duration_ms` |
 | E8 | 连接测试失败 | `connection.test` | `failed` | `user` | 连接 ID | NULL | `engine`, `environment`, `error_code` |
 | E9 | SQL 策略拒绝 | `sql.execute` | `denied` | `user` | 连接 ID | execution ID | `statement_hash`, `reason_code`, `engine` |
@@ -637,7 +637,7 @@ KEK 不得出现在：
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
 | `secret_ref` | string | UUID 格式 (36 chars) | E3-E6, E14-E16 | P0-05 新增 |
-| `secret_version` | integer | > 0 | E3, E16 | P0-05 新增 |
+| `secret_version` | integer | > 0 | E3, E6, E15, E16 | P0-05 新增 |
 | `old_version` | integer | > 0 | E4 | P0-05 新增 |
 | `new_version` | integer | > old_version | E4 | P0-05 新增 |
 | `envelope_suite` | string | 精确枚举值 | E3, E4 | P0-05 新增 |
@@ -786,7 +786,7 @@ KEK 不得出现在：
 | D7 | 轮换并发语义 | **修改后批准**：稳定行 SELECT FOR UPDATE + expected_version + 唯一约束 + 固定锁顺序（先 envelope 后 connections） | ✅ |
 | D8 | 退役规则 | **拒绝原方案**：retired 版本不得用于普通执行；被引用版本不得直接退役（须先解除所有引用） | ❌→✅ |
 | D9 | 审计事件枚举 | **修改后批准**：E1-E16 持久化审计；E17 作为独立安全告警通道，不写回失败的审计系统 | ✅ |
-| D10 | Metadata 允许列表 | **修改后批准**：事件级精确 metadata schema；统一为 16 字段（6 P0-05 新增 + 10 P0-04 现有） | ✅ |
+| D10 | Metadata 允许列表 | **修改后批准**：事件级精确 metadata schema；统一为 15 个 JSON 字段（6 P0-05 新增 + 7 P0-04 现有 + 2 个 credential.rotate 专用） | ✅ |
 | D11 | 审计失败策略 | **修改后批准**：元数据库变更与 audit 在同一事务中原子提交；外部查询执行后遵循 P0-04 失败矩阵 | ✅ |
 | D12 | 审计保留期 | **修改后批准**：至少保留 90 天；P0 不实施自动删除；精确清理另建独立任务 | ✅ |
 | D13 | Schema migration | **条件批准**：按 D8/D12 决定时无需 migration；否则重新升级 Owner | ✅ |
