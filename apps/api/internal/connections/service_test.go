@@ -97,6 +97,26 @@ func (f *fakeAuditSink) QueryAudit(context.Context, metadata.AuditQuery) ([]meta
 	return nil, nil
 }
 
+// blockingAuditSink 在 block=true 时阻塞直到 ctx 到期，用于验证审计写入真实超时（vtiLM）。
+type blockingAuditSink struct {
+	events []*metadata.AuditEvent
+	block  bool
+}
+
+func (f *blockingAuditSink) AppendAudit(ctx context.Context, e *metadata.AuditEvent) error {
+	if f.block {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	e.ID = uuid.New()
+	f.events = append(f.events, e)
+	return nil
+}
+
+func (f *blockingAuditSink) QueryAudit(context.Context, metadata.AuditQuery) ([]metadata.AuditEvent, error) {
+	return nil, nil
+}
+
 type fakeAlarmSink struct {
 	events []metadata.SecurityAlertEvent
 }
@@ -676,7 +696,10 @@ func TestConnection_TestCancelledContextStillWritesAudit(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_ = s.Test(ctx, p, connID)
+	err := s.Test(ctx, p, connID)
+	if !errors.Is(err, StableErrorCode("query_cancelled")) {
+		t.Fatalf("error = %v, want query_cancelled", err)
+	}
 
 	// ping 因取消返回 Canceled → E8 query_cancelled；审计仍写入（使用非取消 context）。
 	if len(audit.events) != 1 {
@@ -692,6 +715,53 @@ func TestConnection_TestCancelledContextStillWritesAudit(t *testing.T) {
 	}
 	if md["error_code"] != "query_cancelled" {
 		t.Errorf("error_code = %v, want query_cancelled", md["error_code"])
+	}
+}
+
+// ---- vtiLM：审计写入真实超时回归测试（PG 与 MySQL）--------------------------
+
+func TestConnection_TestAuditWriteTimeoutRealDeadline(t *testing.T) {
+	// auditWriteTimeout 注入为短超时，审计 store 阻塞直到 ctx 到期 →
+	// Test 返回 audit_failed 且触发 $SECURITY_ALERT（vtiLM）。
+	for _, engine := range []metadata.Engine{metadata.EnginePostgreSQL, metadata.EngineMySQL} {
+		t.Run(string(engine), func(t *testing.T) {
+			p := testPrincipal()
+			connID := uuid.New()
+			conns := &fakeConnectionStore{
+				conns: []*metadata.Connection{{
+					ID:            connID,
+					WorkspaceID:   p.WorkspaceID,
+					Engine:        engine,
+					Environment:   metadata.EnvDevelopment,
+					SecretRef:     uuid.New(),
+					SecretVersion: 1,
+				}},
+			}
+			audit := &blockingAuditSink{block: true}
+			alarm := &fakeAlarmSink{}
+			s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+				&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
+				fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
+					return nil // ping 成功，进入审计写入
+				}))
+			s.auditWriteTimeout = 50 * time.Millisecond
+
+			start := time.Now()
+			err := s.Test(context.Background(), p, connID)
+			elapsed := time.Since(start)
+			if err == nil {
+				t.Fatal("expected audit_failed")
+			}
+			if !errors.Is(err, ErrAuditFailed) {
+				t.Fatalf("error = %v, want audit_failed", err)
+			}
+			if elapsed > 5*time.Second {
+				t.Fatalf("audit write not cancelled within server timeout: %v", elapsed)
+			}
+			if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+				t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+			}
+		})
 	}
 }
 

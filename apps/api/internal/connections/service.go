@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/fujiabao89/webdb/internal/adapter"
@@ -72,6 +73,28 @@ type Service struct {
 	clock                 func() time.Time
 	newTrace              func() string
 	connectionTestTimeout time.Duration // 可注入的连接测试超时（vpvC5）
+	auditWriteTimeout     time.Duration // 可注入的审计持久化超时（vtiLM）
+	logger                *slog.Logger
+}
+
+// logStorageFailure 记录底层存储故障的根因（服务端日志，不含凭证/明文），
+// 与 credentials.LifecycleManager.logStorageFailure 保持一致（vtiLQ）。
+func (s *Service) logStorageFailure(op string, wsID, connID uuid.UUID, err error) {
+	s.logger.Error("connection service failure",
+		"op", op, "workspace_id", wsID.String(), "connection_id", connID.String(),
+		"error", err)
+}
+
+// auditEventBuildFailed 统一处理审计事件构建失败：返回 audit_failed 并触发
+// $SECURITY_ALERT（与 writeAudit 一致，outside f）。
+func (s *Service) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, buildErr error) error {
+	metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
+		TraceID:     s.newTrace(),
+		WorkspaceID: wsID,
+		Code:        string(ErrAuditFailed),
+		OccurredAt:  s.clock(),
+	})
+	return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
 }
 
 // NewService 创建连接服务。
@@ -93,6 +116,8 @@ func NewService(
 		clock:                 func() time.Time { return time.Now().UTC() },
 		newTrace:              func() string { return uuid.NewString() },
 		connectionTestTimeout: connectionTestTimeout,
+		auditWriteTimeout:     auditWriteTimeout,
+		logger:                slog.Default(),
 	}
 }
 
@@ -118,7 +143,7 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 		s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
+		return nil, s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return nil, err
@@ -143,7 +168,7 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 		s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
+		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return err
@@ -160,22 +185,28 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 	}
 	conn, err := s.conns.ConnectionByID(ctx, p.WorkspaceID, connID)
 	if err != nil {
-		// 仅 sql.ErrNoRows 视为连接不存在；超时/池耗尽等元数据库故障映射为 internal_error
-		// 并保留根因供服务端排障，避免掩盖存储故障（vpvC6）。
+		// 仅 sql.ErrNoRows 视为连接不存在；超时/池耗尽等元数据库故障映射为 internal_error，
+		// 根因写入服务端结构化日志（不含凭证/明文，vtiLQ），避免掩盖存储故障（vpvC6）。
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("%w: connection not found", ErrConnectionNotFound)
 		}
+		s.logStorageFailure("test.connection_by_id", p.WorkspaceID, connID, err)
 		return fmt.Errorf("%w: connection lookup failed", ErrInternalError)
 	}
 
 	payload, err := s.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
 	if err != nil {
 		code := mapCredentialError(err)
+		// 只生成一次 trace，供告警与审计事件共用，确保两条记录可关联（outside e）。
+		traceID := s.newTrace()
+		// 告警与审计使用非取消 context + 独立超时，避免调用方取消丢失审计（outside e）。
+		auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.auditWriteTimeout)
+		defer cancel()
 		// 仅解密类失败触发安全告警（Qodo #2 / CodeRabbit #8），与凭证层一致；
 		// credential_not_found/credential_retired 等查找类失败仅记录 E8，不升级告警。
 		if credentials.IsDecryptFailureCode(credentials.ErrorCode(code)) {
-			metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
-				TraceID:     s.newTrace(),
+			metadata.EmitAlarm(s.alarm, auditCtx, metadata.SecurityAlertEvent{
+				TraceID:     traceID,
 				WorkspaceID: conn.WorkspaceID,
 				Code:        code,
 				OccurredAt:  s.clock(),
@@ -189,12 +220,12 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 				Environment: strPtr(string(conn.Environment)),
 				ErrorCode:   strPtr(code),
 			},
-			s.newTrace(), s.clock(),
+			traceID, s.clock(),
 		)
 		if buildErr != nil {
-			return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
+			return s.auditEventBuildFailed(auditCtx, conn.WorkspaceID, buildErr)
 		}
-		if writeErr := s.writeAudit(ctx, event, conn.WorkspaceID); writeErr != nil {
+		if writeErr := s.writeAudit(auditCtx, event, conn.WorkspaceID); writeErr != nil {
 			return writeErr
 		}
 		// 返回由映射得到的稳定错误码，脱敏消息，不拼接原始凭证错误（CodeRabbit #9）。
@@ -241,7 +272,7 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 		outcome, md, s.newTrace(), s.clock(),
 	)
 	if err != nil {
-		return fmt.Errorf("%w: audit event build failed", ErrAuditFailed)
+		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
 	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
 		return err
@@ -255,9 +286,9 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 
 // writeAudit 写审计；失败触发安全告警并返回 audit_failed。
 // 审计持久化与调用方取消解耦（vpvC6）：即使请求 ctx 已取消，审计事件仍须写入，
-// 使用 context.WithoutCancel + 独立超时避免无界阻塞。
+// 使用 context.WithoutCancel + 独立超时避免无界阻塞；超时上限可注入（vtiLM）。
 func (s *Service) writeAudit(ctx context.Context, event *metadata.AuditEvent, wsID uuid.UUID) error {
-	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.auditWriteTimeout)
 	defer cancel()
 	if err := s.audit.AppendAudit(auditCtx, event); err != nil {
 		metadata.EmitAlarm(s.alarm, auditCtx, metadata.SecurityAlertEvent{
