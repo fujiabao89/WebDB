@@ -5,21 +5,86 @@ import (
 	"testing"
 )
 
-// TestRedactSensitive_QuotedPassword 验证引号包裹的密码值（含空格）被整体脱敏（vti-EhP）。
-func TestRedactSensitive_QuotedPassword(t *testing.T) {
-	cases := []string{
-		`password="sup3r secret value with spaces"`,
-		`password='sup3r secret value'`,
-		`passwd='another secret'`,
-		`pwd="x y z"`,
+// assertRedacted 断言脱敏输出不含完整敏感值、其可识别片段，且包含 [redacted] 占位符（vti-LIt）。
+// 片段检查从 value 的第二个字段起：首 token 被 [redacted] 替换后，若泄漏会出现在后续字段中；
+// 与键名重合的词（如 token= 的键名）不纳入检查。
+func assertRedacted(t *testing.T, input, value, out string) {
+	t.Helper()
+	if strings.Contains(out, value) {
+		t.Errorf("value leaked: input=%q out=%q", input, out)
 	}
-	for _, input := range cases {
-		out := RedactSensitive(input)
-		if strings.Contains(out, "sup3r") || strings.Contains(out, "another secret") {
-			t.Errorf("quoted password leaked: %q -> %q", input, out)
+	fields := strings.Fields(value)
+	for _, frag := range fields[1:] {
+		if strings.Contains(out, frag) {
+			t.Errorf("value fragment %q leaked: input=%q out=%q", frag, input, out)
+		}
+	}
+	if !strings.Contains(out, "[redacted]") {
+		t.Errorf("value not redacted: input=%q out=%q", input, out)
+	}
+}
+
+// TestRedactSensitive_QuotedPassword 验证引号包裹的密码值（含空格）被整体脱敏，
+// 输出不含完整值与任何可识别片段（vti-EhP/vti-LIt）。
+func TestRedactSensitive_QuotedPassword(t *testing.T) {
+	cases := []struct {
+		input string
+		value string
+	}{
+		{`password="sup3r secret value with spaces"`, `sup3r secret value with spaces`},
+		{`password='sup3r secret value'`, `sup3r secret value`},
+		{`passwd='another secret'`, `another secret`},
+		{`pwd="x y z"`, `x y z`},
+	}
+	for _, c := range cases {
+		assertRedacted(t, c.input, c.value, RedactSensitive(c.input))
+	}
+}
+
+// TestRedactSensitive_EscapedQuote 验证转义引号内的密码值被整体脱敏（vti-LIx）。
+func TestRedactSensitive_EscapedQuote(t *testing.T) {
+	cases := []struct {
+		input string
+		value string
+	}{
+		{`password="ab\"cd ef"`, `ab"cd ef`},
+		{`password='ab\'cd ef'`, `ab'cd ef`},
+	}
+	for _, c := range cases {
+		assertRedacted(t, c.input, c.value, RedactSensitive(c.input))
+	}
+}
+
+// TestRedactSensitive_JSONValue 验证 JSON 键名冒号形式被整体脱敏（vti-LIx）。
+func TestRedactSensitive_JSONValue(t *testing.T) {
+	cases := []struct {
+		input string
+		value string
+	}{
+		{`{"password":"secret"`, `secret`},
+		{`{"kek":"WnVqLWNvbmZpZzEy"}`, `WnVqLWNvbmZpZzEy`},
+	}
+	for _, c := range cases {
+		assertRedacted(t, c.input, c.value, RedactSensitive(c.input))
+	}
+}
+
+// TestRedactSensitive_UppercaseDSN 验证大写 DSN scheme 被脱敏（vti-LIx）。
+func TestRedactSensitive_UppercaseDSN(t *testing.T) {
+	cases := []struct {
+		input string
+		value string
+	}{
+		{`POSTGRES://dbuser:secretpw@db.invalid:5432/webdb`, `dbuser:secretpw`},
+		{`MYSQL://dbuser:hunter2@db.invalid:3306/db`, `dbuser:hunter2`},
+	}
+	for _, c := range cases {
+		out := RedactSensitive(c.input)
+		if strings.Contains(out, c.value) {
+			t.Errorf("DSN user:pass leaked: input=%q out=%q", c.input, out)
 		}
 		if !strings.Contains(out, "[redacted]") {
-			t.Errorf("quoted password not redacted: %q -> %q", input, out)
+			t.Errorf("DSN not redacted: input=%q out=%q", c.input, out)
 		}
 	}
 }
@@ -35,20 +100,18 @@ func TestRedactSensitive_UnquotedPassword(t *testing.T) {
 	}
 }
 
-// TestRedactSensitive_QuotedKEKToken 验证引号包裹的 KEK/token 值被整体脱敏（vti-EhP）。
+// TestRedactSensitive_QuotedKEKToken 验证引号包裹的 KEK/token 值被整体脱敏，
+// 输出不含完整值与任何可识别片段（vti-EhP/vti-LIt）。
 func TestRedactSensitive_QuotedKEKToken(t *testing.T) {
-	cases := []string{
-		`kek="WnVq LWNvbmZpZzEy"`,
-		`token='super secret token value'`,
+	cases := []struct {
+		input string
+		value string
+	}{
+		{`kek="WnVq LWNvbmZpZzEy"`, `WnVq LWNvbmZpZzEy`},
+		{`token='super secret value'`, `super secret value`},
 	}
-	for _, input := range cases {
-		out := RedactSensitive(input)
-		if strings.Contains(out, "WnVq") || strings.Contains(out, "super secret") {
-			t.Errorf("quoted kek/token leaked: %q -> %q", input, out)
-		}
-		if !strings.Contains(out, "[redacted]") {
-			t.Errorf("quoted kek/token not redacted: %q -> %q", input, out)
-		}
+	for _, c := range cases {
+		assertRedacted(t, c.input, c.value, RedactSensitive(c.input))
 	}
 }
 

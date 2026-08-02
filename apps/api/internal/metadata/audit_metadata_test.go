@@ -72,13 +72,14 @@ func TestAuditMetadataValidate_E6E15UseSecretVersion(t *testing.T) {
 		}
 	}
 
-	// 负向：old_version 不在 E6/E15 允许集内，必须 fail-closed 拒绝（vti-EhN）。
+	// 负向：old_version 不在 E6/E15 允许集内，必须 fail-closed 拒绝（vti-EhN/vti-LIn）。
+	// E6 用例保留合法 secret_version，使 old_version 成为唯一非法字段。
 	negative := []struct {
 		action  string
 		outcome AuditOutcome
 		md      AuditMetadata
 	}{
-		{ActionCredentialRetire, OutcomeSucceeded, AuditMetadata{SecretRef: strPtr(uuidStr), OldVersion: intPtr(1)}},
+		{ActionCredentialRetire, OutcomeSucceeded, AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), OldVersion: intPtr(1)}},
 		{ActionCredentialDecrypt, OutcomeFailed, AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), ErrorCode: strPtr("decryption_failed"), OldVersion: intPtr(1)}},
 	}
 	for _, c := range negative {
