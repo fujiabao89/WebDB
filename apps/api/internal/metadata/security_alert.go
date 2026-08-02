@@ -3,6 +3,7 @@ package metadata
 import (
 	"context"
 	"log"
+	"regexp"
 	"time"
 
 	"github.com/google/uuid"
@@ -38,6 +39,28 @@ func EmitAlarm(alarm SecurityAlarm, ctx context.Context, e SecurityAlertEvent) {
 		}
 	}()
 	alarm.Alarm(ctx, e)
+}
+
+// sensitiveLogPatterns 匹配结构化日志中可能出现的敏感内容
+// （密码、KEK/DEK、密钥、token、连接串用户密码、私钥）。
+var sensitiveLogPatterns = []struct {
+	re   *regexp.Regexp
+	repl string
+}{
+	{regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(kek|wrap_dek|data_nonce|wrap_nonce|dek)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(secret|token|api[_-]?key)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(postgres|postgresql|mysql|redis)://[^@\s]+@`), "$1://[redacted]@"},
+	{regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----.*?(-----END [A-Z ]+PRIVATE KEY-----|$)`), "[redacted: private key]"},
+}
+
+// RedactSensitive 对日志/错误文本做统一脱敏，禁止原始敏感内容进入结构化日志
+// （credentials/connections 的 logStorageFailure 共用，vti-OS/vti-OZ）。
+func RedactSensitive(s string) string {
+	for _, p := range sensitiveLogPatterns {
+		s = p.re.ReplaceAllString(s, p.repl)
+	}
+	return s
 }
 
 // StderrSecurityAlarm 将安全告警写入 stderr（基础设施级最终 fallback，T28）。

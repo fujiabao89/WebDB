@@ -1,10 +1,13 @@
 package connections
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -762,6 +765,31 @@ func TestConnection_TestAuditWriteTimeoutRealDeadline(t *testing.T) {
 				t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
 			}
 		})
+	}
+}
+
+// TestConnectionLogStorageFailureRedactsSensitive 验证 connections.logStorageFailure
+// 在写入结构化日志前统一脱敏（vti-OS）：注入含真实凭证内容的错误，断言敏感值不出现。
+func TestConnectionLogStorageFailureRedactsSensitive(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	s := NewService(&fakeConnectionStore{}, &fakeMemberStore{}, &fakeAuditSink{}, &fakeAlarmSink{}, &fakeResolver{}, &fakeTester{})
+	s.logger = logger
+
+	sensitive := "password=classified123"
+	s.logStorageFailure("test.op", uuid.New(), uuid.New(), errors.New("db error: "+sensitive))
+
+	out := buf.String()
+	if !strings.Contains(out, "db error") {
+		t.Errorf("root cause context not logged: %q", out)
+	}
+	for _, leaked := range []string{sensitive, "classified123"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("log leaked sensitive value %q: %q", leaked, out)
+		}
+	}
+	if !strings.Contains(out, "password=[redacted]") {
+		t.Errorf("sensitive value not redacted: %q", out)
 	}
 }
 

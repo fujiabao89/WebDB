@@ -77,18 +77,23 @@ type Service struct {
 	logger                *slog.Logger
 }
 
-// logStorageFailure 记录底层存储故障的根因（服务端日志，不含凭证/明文），
-// 与 credentials.LifecycleManager.logStorageFailure 保持一致（vtiLQ）。
+// logStorageFailure 记录底层存储故障的根因（服务端日志）。
+// 写入日志前对 err 消息统一脱敏，禁止原始敏感内容进入日志（vti-OS）。
 func (s *Service) logStorageFailure(op string, wsID, connID uuid.UUID, err error) {
 	s.logger.Error("connection service failure",
 		"op", op, "workspace_id", wsID.String(), "connection_id", connID.String(),
-		"error", err)
+		"error", metadata.RedactSensitive(err.Error()))
 }
 
 // auditEventBuildFailed 统一处理审计事件构建失败：返回 audit_failed 并触发
 // $SECURITY_ALERT（与 writeAudit 一致，outside f）。
+// 构建根因通过 logStorageFailure 保留（含操作上下文，脱敏，vti-OV）；
+// 告警使用非取消 context + 独立超时，即使调用方取消也发出 audit_failed（vti-OV）。
 func (s *Service) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, buildErr error) error {
-	metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
+	s.logStorageFailure("audit_event_build_failed", wsID, uuid.Nil, buildErr)
+	alarmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.auditWriteTimeout)
+	defer cancel()
+	metadata.EmitAlarm(s.alarm, alarmCtx, metadata.SecurityAlertEvent{
 		TraceID:     s.newTrace(),
 		WorkspaceID: wsID,
 		Code:        string(ErrAuditFailed),

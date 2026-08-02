@@ -129,12 +129,14 @@ func TestLifecycleCreateRejectsBeforeSealAndPersistenceWhenWrapLimitReached(t *t
 	}
 }
 
-// TestLifecycleLogStorageFailureRedactsSensitive 验证 logger 可注入（vtiLS）：
-// 脱敏返回前用注入 logger 记录底层根因，且日志不含密码/KEK/明文。
+// TestLifecycleLogStorageFailureRedactsSensitive 验证 logger 可注入（vtiLS）且
+// logStorageFailure 在写入日志前统一脱敏（vti-OZ）：注入含真实凭证内容的底层错误，
+// 断言敏感值与原始片段不出现在日志、脱敏占位符生效。
 func TestLifecycleLogStorageFailureRedactsSensitive(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	store := &fakeCredentialStore{envErr: errors.New("synthetic db error")}
+	sensitive := "password=classified123"
+	store := &fakeCredentialStore{envErr: errors.New("db error: " + sensitive)}
 	manager := NewLifecycleManager(nil, store, nil, goodKEK(), logger)
 
 	_, err := manager.Resolve(context.Background(), uuid.New(), uuid.New(), 1)
@@ -142,13 +144,16 @@ func TestLifecycleLogStorageFailureRedactsSensitive(t *testing.T) {
 		t.Fatalf("error = %v, want internal_error", err)
 	}
 	out := buf.String()
-	if !strings.Contains(out, "synthetic db error") {
-		t.Errorf("root cause not logged: %q", out)
+	if !strings.Contains(out, "db error") {
+		t.Errorf("root cause context not logged: %q", out)
 	}
-	for _, sensitive := range []string{"password", "kek=", "BEGIN"} {
-		if strings.Contains(out, sensitive) {
-			t.Errorf("log leaked sensitive data %q: %q", sensitive, out)
+	for _, leaked := range []string{sensitive, "classified123"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("log leaked sensitive value %q: %q", leaked, out)
 		}
+	}
+	if !strings.Contains(out, "password=[redacted]") {
+		t.Errorf("sensitive value not redacted: %q", out)
 	}
 }
 

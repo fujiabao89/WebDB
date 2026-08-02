@@ -32,12 +32,13 @@ func NewLifecycleManager(db *sql.DB, store metadata.CredentialTXStore, conns met
 	return &LifecycleManager{store: store, conns: conns, kek: kek, db: db, logger: l}
 }
 
-// logStorageFailure 记录底层存储/KEK 故障的根因（服务端日志，不含凭证/KEK/明文），
-// 保持对外返回的稳定错误码脱敏（vpvC7）。
+// logStorageFailure 记录底层存储/KEK 故障的根因（服务端日志），
+// 保持对外返回的稳定错误码脱敏（vpvC7）；写入日志前对 err 消息统一脱敏，
+// 禁止原始敏感内容进入日志（vti-OZ）。
 func (m *LifecycleManager) logStorageFailure(op string, workspaceID, secretRef uuid.UUID, err error) {
 	m.logger.Error("credential lifecycle failure",
 		"op", op, "workspace_id", workspaceID.String(), "secret_ref", secretRef.String(),
-		"error", err)
+		"error", metadata.RedactSensitive(err.Error()))
 }
 
 // Create 创建新凭证并返回 Envelope。
