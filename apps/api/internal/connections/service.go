@@ -4,6 +4,7 @@ package connections
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -29,6 +30,10 @@ const (
 // connectionTestTimeout 连接测试的连接级超时上限（CodeRabbit #10）。
 // 即使调用方 ctx 没有 deadline，ping 也必须在有界时间内完成。
 const connectionTestTimeout = 5 * time.Second
+
+// auditWriteTimeout 审计持久化的独立超时上限（与调用方取消解耦，vpvC6）。
+// 用户取消请求不阻止审计事件写入。
+const auditWriteTimeout = 5 * time.Second
 
 // Principal 由可信上游提供的已验证身份。
 type Principal struct {
@@ -58,14 +63,15 @@ func (t AdapterPingTester) Ping(ctx context.Context, cfg adapter.ConnectConfig) 
 
 // Service 连接生命周期服务（orchestration seam）。
 type Service struct {
-	conns    metadata.ConnectionStore
-	members  metadata.WorkspaceMemberStore
-	audit    metadata.AuditEventStore
-	alarm    metadata.SecurityAlarm
-	resolver credentials.CredentialResolver
-	tester   ConnectionTester
-	clock    func() time.Time
-	newTrace func() string
+	conns                 metadata.ConnectionStore
+	members               metadata.WorkspaceMemberStore
+	audit                 metadata.AuditEventStore
+	alarm                 metadata.SecurityAlarm
+	resolver              credentials.CredentialResolver
+	tester                ConnectionTester
+	clock                 func() time.Time
+	newTrace              func() string
+	connectionTestTimeout time.Duration // 可注入的连接测试超时（vpvC5）
 }
 
 // NewService 创建连接服务。
@@ -78,14 +84,15 @@ func NewService(
 	tester ConnectionTester,
 ) *Service {
 	return &Service{
-		conns:    conns,
-		members:  members,
-		audit:    audit,
-		alarm:    alarm,
-		resolver: resolver,
-		tester:   tester,
-		clock:    func() time.Time { return time.Now().UTC() },
-		newTrace: func() string { return uuid.NewString() },
+		conns:                 conns,
+		members:               members,
+		audit:                 audit,
+		alarm:                 alarm,
+		resolver:              resolver,
+		tester:                tester,
+		clock:                 func() time.Time { return time.Now().UTC() },
+		newTrace:              func() string { return uuid.NewString() },
+		connectionTestTimeout: connectionTestTimeout,
 	}
 }
 
@@ -153,7 +160,12 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 	}
 	conn, err := s.conns.ConnectionByID(ctx, p.WorkspaceID, connID)
 	if err != nil {
-		return fmt.Errorf("%w: connection not found", ErrConnectionNotFound)
+		// 仅 sql.ErrNoRows 视为连接不存在；超时/池耗尽等元数据库故障映射为 internal_error
+		// 并保留根因供服务端排障，避免掩盖存储故障（vpvC6）。
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: connection not found", ErrConnectionNotFound)
+		}
+		return fmt.Errorf("%w: connection lookup failed", ErrInternalError)
 	}
 
 	payload, err := s.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
@@ -202,7 +214,8 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 	}
 
 	// 为 ping 派生带上限的 context，即使调用方 ctx 无 deadline 也避免无限挂起（CodeRabbit #10）。
-	pingCtx, cancel := context.WithTimeout(ctx, connectionTestTimeout)
+	// 超时上限可注入（vpvC5），便于测试验证真实 deadline 行为。
+	pingCtx, cancel := context.WithTimeout(ctx, s.connectionTestTimeout)
 	defer cancel()
 
 	start := s.clock()
@@ -241,9 +254,13 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 }
 
 // writeAudit 写审计；失败触发安全告警并返回 audit_failed。
+// 审计持久化与调用方取消解耦（vpvC6）：即使请求 ctx 已取消，审计事件仍须写入，
+// 使用 context.WithoutCancel + 独立超时避免无界阻塞。
 func (s *Service) writeAudit(ctx context.Context, event *metadata.AuditEvent, wsID uuid.UUID) error {
-	if err := s.audit.AppendAudit(ctx, event); err != nil {
-		metadata.EmitAlarm(s.alarm, ctx, metadata.SecurityAlertEvent{
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), auditWriteTimeout)
+	defer cancel()
+	if err := s.audit.AppendAudit(auditCtx, event); err != nil {
+		metadata.EmitAlarm(s.alarm, auditCtx, metadata.SecurityAlertEvent{
 			TraceID:     event.TraceID,
 			WorkspaceID: wsID,
 			Code:        string(ErrAuditFailed),

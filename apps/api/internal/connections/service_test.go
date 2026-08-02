@@ -2,6 +2,7 @@ package connections
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -40,7 +41,8 @@ func (f *fakeConnectionStore) ConnectionByID(_ context.Context, wsID uuid.UUID, 
 			return c, nil
 		}
 	}
-	return nil, errors.New("connection not found")
+	// 与真实 PGStore 一致：不存在时返回 sql.ErrNoRows，供 Service 映射 connection_not_found（vpvC6）。
+	return nil, sql.ErrNoRows
 }
 
 func (f *fakeConnectionStore) ListConnections(context.Context, uuid.UUID) ([]metadata.Connection, error) {
@@ -553,6 +555,143 @@ func TestAdapterPingTester_GetErrorPropagates(t *testing.T) {
 	err := tester.Ping(context.Background(), cfg)
 	if err == nil {
 		t.Fatal("expected Get failure to propagate")
+	}
+}
+
+// ---- vpvC4：跨工作区成员拒绝回归测试 -----------------------------------------
+
+func TestConnection_TestMemberWorkspaceMismatchRejected(t *testing.T) {
+	// fakeMemberStore 按 wsID 过滤：调用方工作区与成员工作区不一致 → forbidden，
+	// 且不写审计、不执行 ping（vpvC4）。
+	p := testPrincipal()
+	connID := uuid.New()
+	otherWS := uuid.New()
+	conns := &fakeConnectionStore{
+		conns: []*metadata.Connection{{
+			ID:            connID,
+			WorkspaceID:   p.WorkspaceID,
+			Engine:        metadata.EnginePostgreSQL,
+			Environment:   metadata.EnvDevelopment,
+			SecretRef:     uuid.New(),
+			SecretVersion: 1,
+		}},
+	}
+	audit := &fakeAuditSink{}
+	alarm := &fakeAlarmSink{}
+	pinged := false
+	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner, wsID: otherWS}, audit, alarm,
+		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
+		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
+			pinged = true
+			return nil
+		}))
+
+	err := s.Test(context.Background(), p, connID)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("error = %v, want forbidden", err)
+	}
+	if pinged {
+		t.Fatal("member workspace mismatch must not trigger ping")
+	}
+	if len(audit.events) != 0 {
+		t.Fatalf("audit events = %d, want 0 (rejected before audit)", len(audit.events))
+	}
+}
+
+// ---- vpvC5：真实 deadline 行为回归测试 ---------------------------------------
+
+func TestConnection_TestTimeoutContextRealDeadline(t *testing.T) {
+	// tester 阻塞在 pingCtx.Done()；connectionTestTimeout 注入为短超时，
+	// 验证 ping 在服务端上限内被取消并映射 execution_timeout（vpvC5），
+	// 而非仅验证错误映射。
+	p := testPrincipal()
+	connID := uuid.New()
+	conns := &fakeConnectionStore{
+		conns: []*metadata.Connection{{
+			ID:            connID,
+			WorkspaceID:   p.WorkspaceID,
+			Engine:        metadata.EnginePostgreSQL,
+			Environment:   metadata.EnvDevelopment,
+			SecretRef:     uuid.New(),
+			SecretVersion: 1,
+		}},
+	}
+	audit := &fakeAuditSink{}
+	alarm := &fakeAlarmSink{}
+	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
+		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}))
+	s.connectionTestTimeout = 50 * time.Millisecond
+
+	start := time.Now()
+	err := s.Test(context.Background(), p, connID)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	if !errors.Is(err, StableErrorCode("execution_timeout")) {
+		t.Fatalf("error = %v, want execution_timeout", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("ping not cancelled within server timeout: %v", elapsed)
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (E8)", len(audit.events))
+	}
+	var md map[string]any
+	if err := json.Unmarshal(audit.events[0].Metadata, &md); err != nil {
+		t.Fatal(err)
+	}
+	if md["error_code"] != "execution_timeout" {
+		t.Errorf("error_code = %v, want execution_timeout", md["error_code"])
+	}
+}
+
+// ---- vpvC6：调用方取消后审计仍写入 ------------------------------------------
+
+func TestConnection_TestCancelledContextStillWritesAudit(t *testing.T) {
+	// 调用方 ctx 取消后，连接测试的审计事件仍必须追加（writeAudit 与取消解耦，vpvC6）。
+	p := testPrincipal()
+	connID := uuid.New()
+	conns := &fakeConnectionStore{
+		conns: []*metadata.Connection{{
+			ID:            connID,
+			WorkspaceID:   p.WorkspaceID,
+			Engine:        metadata.EnginePostgreSQL,
+			Environment:   metadata.EnvDevelopment,
+			SecretRef:     uuid.New(),
+			SecretVersion: 1,
+		}},
+	}
+	audit := &fakeAuditSink{}
+	alarm := &fakeAlarmSink{}
+	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
+		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
+			return ctx.Err()
+		}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_ = s.Test(ctx, p, connID)
+
+	// ping 因取消返回 Canceled → E8 query_cancelled；审计仍写入（使用非取消 context）。
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %d, want 1 (audit must survive caller cancellation)", len(audit.events))
+	}
+	ev := audit.events[0]
+	if ev.Action != metadata.ActionConnectionTest || ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("event = %s/%s, want connection.test/failed", ev.Action, ev.Outcome)
+	}
+	var md map[string]any
+	if err := json.Unmarshal(ev.Metadata, &md); err != nil {
+		t.Fatal(err)
+	}
+	if md["error_code"] != "query_cancelled" {
+		t.Errorf("error_code = %v, want query_cancelled", md["error_code"])
 	}
 }
 
