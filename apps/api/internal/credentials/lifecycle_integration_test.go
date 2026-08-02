@@ -65,6 +65,8 @@ func integDB(t *testing.T) *sql.DB {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := db.PingContext(ctx); err != nil {
+		// 关闭已成功打开的 db，避免失败路径资源泄漏
+		db.Close()
 		t.Fatalf("ping 测试数据库失败: %v", err)
 	}
 	return db
@@ -143,6 +145,11 @@ type failingConnStore struct {
 }
 
 func (f *failingConnStore) UpdateConnectionVersion(ctx context.Context, tx *sql.Tx, wsID, secretRef uuid.UUID, newVersion int) error {
+	// 先委托真实实现执行 UPDATE connections，再注入失败，
+	// 使测试同时验证真实的连接版本更新与 envelope 插入都在同一事务中被回滚。
+	if err := f.ConnectionTXStore.UpdateConnectionVersion(ctx, tx, wsID, secretRef, newVersion); err != nil {
+		return err
+	}
 	return errors.New("injected failure: update connection version")
 }
 
