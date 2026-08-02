@@ -122,6 +122,7 @@ func TestAuditMetadataValidate_TypeErrors(t *testing.T) {
 		{name: "duration_ms as string", action: ActionConnectionTest, raw: `{"engine":"postgresql","environment":"development","duration_ms":"42"}`},
 		{name: "error_code as number", action: ActionCredentialLookup, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","error_code":1}`},
 		{name: "engine as bool", action: ActionConnectionCreate, raw: `{"engine":true,"environment":"development"}`},
+		{name: "cached as string", action: ActionSQLExecute, raw: `{"statement_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","cached":"true"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -163,13 +164,15 @@ func TestAuditMetadataValidate_NestedObject(t *testing.T) {
 }
 
 // TestAuditMetadataValidate_TooLong 验证超长值 fail-closed 拒绝。
-// statement_hash 为固定 64 字符 hex；超过 64 字符必须被格式校验拒绝
-// （summary 等自由长度字段已随强类型 metadata 移除，CodeRabbit #22）。
+// summary 为 D10 已批准字段（P0-04 兼容，<=255 字节）；超过 255 字节必须被格式校验拒绝。
 func TestAuditMetadataValidate_TooLong(t *testing.T) {
-	hash := hex64("sha256placeholder00000000000000000000000000000000")[:64]
-	raw := json.RawMessage(`{"statement_hash":"` + hash + `a","error_code":"database_error","engine":"postgresql"}`)
+	long := make([]byte, 300)
+	for i := range long {
+		long[i] = 'x'
+	}
+	raw, _ := json.Marshal(map[string]any{"summary": string(long)})
 	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
-		t.Fatal("overlong statement_hash should be rejected")
+		t.Fatal("overlong summary should be rejected")
 	}
 }
 

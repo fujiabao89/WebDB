@@ -24,8 +24,8 @@ const (
 )
 
 // AuditMetadata 是审计 metadata 的强类型表示。
-// 仅包含 proposal §8.2 批准的 13 字段 + credential.rotate 事件专用的
-// expected_version/actual_version（proposal §8.1 E5 矩阵）。
+// 仅包含 ADR-017 D10 已批准的 16 字段（6 P0-05 新增 + 10 P0-04 现有）
+// + credential.rotate 事件专用的 expected_version/actual_version（proposal §8.1 E5 矩阵）。
 // 禁止任意 map[string]any 或自由文本直接进入审计仓储；
 // 所有字段经 Marshal → ValidateAuditEventMetadata 精确校验后持久化。
 type AuditMetadata struct {
@@ -42,6 +42,9 @@ type AuditMetadata struct {
 	ReasonCode      *string `json:"reason_code,omitempty"`      // 稳定拒绝原因码
 	Engine          *string `json:"engine,omitempty"`           // postgresql | mysql
 	Environment     *string `json:"environment,omitempty"`      // development | staging | production
+	Summary         *string `json:"summary,omitempty"`          // P0-04 兼容（D10 批准字段，<=255）
+	RowsAffected    *int    `json:"rows_affected,omitempty"`    // P0-04 兼容（D10 批准字段）
+	Cached          *bool   `json:"cached,omitempty"`           // P0-04 兼容（D10 批准字段）
 	ExpectedVersion *int    `json:"expected_version,omitempty"` // credential.rotate 专用
 	ActualVersion   *int    `json:"actual_version,omitempty"`   // credential.rotate 专用
 }
@@ -94,11 +97,14 @@ var auditFieldSpecs = map[string]auditFieldSpec{
 	"kek_version":      {kind: kindInt, validate: validatePositiveIntField},
 	"statement_hash":   {kind: kindString, validate: validateHex64Field},
 	"row_count":        {kind: kindInt, validate: validateNonNegIntField},
+	"rows_affected":    {kind: kindInt, validate: validateNonNegIntField},
 	"duration_ms":      {kind: kindInt, validate: validateNonNegIntField},
 	"error_code":       {kind: kindString, validate: validateStableErrorCodeField},
 	"reason_code":      {kind: kindString, validate: validateStableReasonCodeField},
 	"engine":           {kind: kindString, validate: validateEngineField},
 	"environment":      {kind: kindString, validate: validateEnvironmentField},
+	"summary":          {kind: kindString, validate: validateSummaryField},
+	"cached":           {kind: kindBool},
 }
 
 // ValidateAuditEventMetadata 对审计 metadata 做事件级精确校验（fail-closed）。
@@ -387,6 +393,14 @@ func validateEnvironmentField(name string, v any) error {
 	s, _ := v.(string)
 	if s != "development" && s != "staging" && s != "production" {
 		return fmt.Errorf("audit metadata: field %q must be development/staging/production", name)
+	}
+	return nil
+}
+
+func validateSummaryField(name string, v any) error {
+	s, _ := v.(string)
+	if len(s) > 255 {
+		return fmt.Errorf("audit metadata: field %q exceeds 255 bytes", name)
 	}
 	return nil
 }

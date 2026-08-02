@@ -67,7 +67,7 @@ type ConnectConfig struct {
 
 ### 1.4 审计脱敏（WEB-23 已实现，替代 P0-04 启发式）
 
-WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（15 个 JSON 字段：13 个通用字段 + credential.rotate 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
+WEB-23 已将审计脱敏改为强类型 `metadata.AuditMetadata`（ADR-017 D10 已批准的 16 字段允许列表 + E5 专用 expected_version/actual_version），`ValidateAuditEventMetadata` 做事件级 fail-closed 校验：畸形 JSON、未知字段、错误类型、超长值一律拒绝。`looksLikeSQL()`/`looksLikeCredential()` 启发式不再作为审计安全边界。扩展字段（`statement_hash`、`duration_ms`、`error_code`、`reason_code`、`engine`、`environment`）及凭证字段（`secret_ref`、`secret_version`、`old_version`、`new_version`、`envelope_suite`、`kek_version`）均已实现。
 
 ### 1.5 当前可用能力（WEB-22/WEB-23 已实现）
 
@@ -630,9 +630,9 @@ KEK 不得出现在：
 
 > **E17（审计写入失败）**：不持久化为 audit_events 行（失败的审计系统不可写入）。作为独立安全告警通过应用日志/监控通道发出，携带 `trace_id`、`error_code` 和发生时间。此告警通道独立于 `audit_events` 表，不受审计表触发器或写入失败的影响。
 
-### 8.2 Metadata 允许列表（13 字段 + credential.rotate 专用 expected_version/actual_version）
+### 8.2 Metadata 允许列表（合并字段表，16 字段）
 
-下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段。P0-04 的 `summary`、`rows_affected`、`cached` 三个自由文本字段无生产者且与事件矩阵不符，已随 WEB-23 强类型 metadata 迁移移除，不再作为审计允许字段（CodeRabbit #22）。完整允许列表为 13 字段 + credential.rotate 专用 `expected_version`/`actual_version`：
+下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段（已在此表中），另有 3 个 P0-04 现有字段（`summary`、`rows_affected`、`cached`）仅由 P0-04 维护且不适用于凭证事件，未重复列出。WEB-23 实现时将 sanitizer 扩展至完整 16 字段（6 新增 + 10 现有）并添加兼容性测试：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
@@ -652,7 +652,7 @@ KEK 不得出现在：
 | `engine` | string | `postgresql` \| `mysql` | E1, E3, E4, E7-E13 | P0-04 现有 |
 | `environment` | string | `development` \| `staging` \| `production` | E1, E2, E7, E8, E10, E11 | P0-04 现有 |
 
-> P0-04 的 `summary`、`rows_affected`、`cached` 三个字段无生产者，已随 WEB-23 强类型 metadata 迁移移除；允许列表为 13 字段 + `expected_version`/`actual_version`。
+> P0-04 另有 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件类型。完整合并后的 sanitizer 允许列表为 16 字段。
 
 ### 8.3 禁止字段
 
@@ -786,7 +786,7 @@ KEK 不得出现在：
 | D7 | 轮换并发语义 | **修改后批准**：稳定行 SELECT FOR UPDATE + expected_version + 唯一约束 + 固定锁顺序（先 envelope 后 connections） | ✅ |
 | D8 | 退役规则 | **拒绝原方案**：retired 版本不得用于普通执行；被引用版本不得直接退役（须先解除所有引用） | ❌→✅ |
 | D9 | 审计事件枚举 | **修改后批准**：E1-E16 持久化审计；E17 作为独立安全告警通道，不写回失败的审计系统 | ✅ |
-| D10 | Metadata 允许列表 | **修改后批准**：事件级精确 metadata schema；统一为 15 个 JSON 字段（6 P0-05 新增 + 7 P0-04 现有 + 2 个 credential.rotate 专用） | ✅ |
+| D10 | Metadata 允许列表 | **修改后批准**：事件级精确 metadata schema；统一为 16 字段（6 P0-05 新增 + 10 P0-04 现有） | ✅ |
 | D11 | 审计失败策略 | **修改后批准**：元数据库变更与 audit 在同一事务中原子提交；外部查询执行后遵循 P0-04 失败矩阵 | ✅ |
 | D12 | 审计保留期 | **修改后批准**：至少保留 90 天；P0 不实施自动删除；精确清理另建独立任务 | ✅ |
 | D13 | Schema migration | **条件批准**：按 D8/D12 决定时无需 migration；否则重新升级 Owner | ✅ |
