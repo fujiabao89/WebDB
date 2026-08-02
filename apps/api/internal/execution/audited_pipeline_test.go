@@ -965,6 +965,13 @@ func TestAuditedExecute_StageBCommitFailureClearsExecutionID(t *testing.T) {
 	if result.ExecutionID != nil {
 		t.Fatalf("ExecutionID must be nil when pending execution is not persisted, got %v", *result.ExecutionID)
 	}
+	// 阶段 B 失败必须在中止目标库调用之前（VuuxN）。
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0 (stage B failure must abort before adapter)", client.calls)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver calls = %d, want 0 (stage B failure must abort before credential resolution)", resolver.calls)
+	}
 	// 阶段 B 失败触发 E17 告警（internal_error）。
 	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrInternalError) {
 		t.Fatalf("expected internal_error alarm, got %+v", alarm.events)

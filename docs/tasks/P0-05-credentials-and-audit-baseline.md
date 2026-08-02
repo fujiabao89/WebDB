@@ -31,7 +31,7 @@
 - E1-E16 追加式审计已接入连接/凭证/SQL 执行生命周期（`metadata.AuditMetadata` 强类型 + `AppendAudit` fail-closed）。
 - execution 审计感知管线（`execution.Pipeline`）实现执行前 fail-closed、执行后 `audit_failed` 且 execution 保持终态。
 - `$SECURITY_ALERT` 独立安全告警通道覆盖凭证解密失败、未知 KEK 版本、审计写入失败。
-- 单元测试、PostgreSQL metadata/adapter 集成测试、vet、Windows/Linux 构建通过；race 与集成测试由 GitHub Actions 覆盖（PR #32 最新 CI run <https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）。fuzz：本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic（完整 30s 待后续验证）。
+- 单元测试、vet、Windows/Linux 构建通过（本机）；`go test -race`、metadata/adapter 集成测试由 GitHub Actions 覆盖（PR #32 最新 CI run <https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）。**PostgreSQL**：metadata 集成本机验证且 CI 覆盖，adapter 集成由 CI 覆盖。**MySQL**：adapter 集成由 CI 覆盖（本机 Windows 存在 `localhost:1` 连接环境限制，未在本机完成 MySQL adapter 验证，故本机不声明 MySQL 已验证）。fuzz：本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic（完整 30s 待后续验证）。
 
 ## Owner Gate 状态（WEB-21）
 

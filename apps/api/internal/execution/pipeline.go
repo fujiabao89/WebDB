@@ -211,42 +211,48 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	result.TraceID = traceID
 	now := p.clock()
 
-	// 阶段 B': 创建 Execution（pending）。
-	var exec *metadata.Execution
-	if p.txs != nil {
-		mtx, err := p.txs.Begin(ctx)
-		if err != nil {
-			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
-			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
-				TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
-			})
-			result.ErrorCode = ErrInternalError
-			return result, fmt.Errorf("%w", result.ErrorCode)
-		}
-		exec = &metadata.Execution{
-			WorkspaceID:   conn.WorkspaceID,
-			ConnectionID:  conn.ID,
-			ActorID:       req.Principal.UserID,
-			StatementHash: statementHash,
-			Status:        metadata.ExecStatusPending,
-			TraceID:       traceID,
-		}
-		createErr := mtx.CreateExecution(ctx, exec)
-		commitErr := mtx.Commit()
-		if createErr != nil || commitErr != nil {
-			// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
-			metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
-				TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
-			})
-			result.ErrorCode = ErrInternalError
-			// finding 5：pending execution 未持久化时清除未提交的 ExecutionID。
-			result.ExecutionID = nil
-			return result, fmt.Errorf("%w", result.ErrorCode)
-		}
-		// finding 2：pending execution 创建后立即提交并释放事务，
-		// 不跨越 PolicyByConnection / ResolveCredential，避免长事务占用连接。
-		result.ExecutionID = &exec.ID
+	// 阶段 B': 创建 Execution（pending）。Execute 前置校验已保证 Tx/Audit 均配置（finding 1），
+	// 因此 exec 恒非 nil（finding 2）。
+	mtx, err := p.txs.Begin(ctx)
+	if err != nil {
+		// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
+		metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+			TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
+		})
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	exec := &metadata.Execution{
+		WorkspaceID:   conn.WorkspaceID,
+		ConnectionID:  conn.ID,
+		ActorID:       req.Principal.UserID,
+		StatementHash: statementHash,
+		Status:        metadata.ExecStatusPending,
+		TraceID:       traceID,
+	}
+	if err := mtx.CreateExecution(ctx, exec); err != nil {
+		// 创建失败时回滚并跳过 Commit（finding 3，VuuxR）。
+		mtx.Rollback()
+		// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
+		metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+			TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
+		})
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	if err := mtx.Commit(); err != nil {
+		// 阶段 B 失败 → internal_error + $SECURITY_ALERT（proposal §9.1，VuXZO）。
+		metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+			TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: string(ErrInternalError), OccurredAt: p.clock(),
+		})
+		result.ErrorCode = ErrInternalError
+		// finding 5：pending execution 未持久化时清除未提交的 ExecutionID。
+		result.ExecutionID = nil
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	// finding 2：pending execution 创建后立即提交并释放事务，
+	// 不跨越 PolicyByConnection / ResolveCredential，避免长事务占用连接。
+	result.ExecutionID = &exec.ID
 
 	// 阶段 C 拒绝：Execution=failed + Audit(sql.execute, denied)，Adapter 调用 0 次。
 	if !decision.Allowed {
@@ -266,7 +272,16 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// 连接策略必须来自服务端存储；缺失或未明确允许读取时 fail-closed。
 	policy, err := p.policyStore.PolicyByConnection(ctx, conn.WorkspaceID, conn.ID)
 	if err != nil {
+		// outside：策略查询失败时先写 failed + 审计，再保留错误码映射与返回。
 		result.ErrorCode = mapPolicyStoreError(err)
+		if r, e := p.failPreExecution(ctx, exec, result, conn, traceID, now,
+			metadata.OutcomeFailed, metadata.AuditMetadata{
+				StatementHash: &statementHash,
+				ErrorCode:     strPtr(string(result.ErrorCode)),
+				Engine:        strPtr(string(serverEngine)),
+			}, result.ErrorCode); e != nil {
+			return r, e
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	if policy == nil {
@@ -341,19 +356,17 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// 阶段 D-0: execution running 更新（短生命周期事务，finding 2）。
 	// pending→running 更新或提交失败意味着元数据库故障，按审计失败处理
 	// （返回 audit_failed + $SECURITY_ALERT），而非降级为 internal_error（vpvC7 outside）。
-	if exec != nil {
-		mtx, err := p.txs.Begin(ctx)
-		if err != nil {
-			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
-		}
-		exec.Status = metadata.ExecStatusRunning
-		if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
-			mtx.Rollback()
-			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
-		}
-		if err := mtx.Commit(); err != nil {
-			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
-		}
+	mtx, err = p.txs.Begin(ctx)
+	if err != nil {
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
+	}
+	exec.Status = metadata.ExecStatusRunning
+	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
+		mtx.Rollback()
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
+	}
+	if err := mtx.Commit(); err != nil {
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 
 	// 阶段 D: Adapter。
@@ -376,10 +389,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	handle, err := p.adapter.Get(execCtx, cfg)
 	if err != nil {
 		result.ErrorCode = mapAdapterError(err)
-		if exec != nil {
-			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
-			}
+		if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -414,10 +425,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		handle.Release()
 		released = true
 		result.ErrorCode = mapAdapterError(err)
-		if exec != nil {
-			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
-			}
+		if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -428,10 +437,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	released = true
 
 	result.Result = queryResult
-	if exec != nil {
-		if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
-			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
-		}
+	if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 	}
 	return result, nil
 }
@@ -474,7 +481,10 @@ func (p *Pipeline) failExecutionWith(
 	originalCode StableErrorCode,
 ) (*ExecuteResult, error) {
 	if exec == nil {
-		return result, nil
+		// 不变量：Execute 前置校验保证 execution 已创建；缺失视为内部错误，
+		// 不静默跳过失败审计（finding 2）。
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w: execution not initialized", ErrInternalError)
 	}
 	mtx, err := p.txs.Begin(ctx)
 	if err != nil {
