@@ -48,9 +48,10 @@ func TestAuditMetadataValidate_AllowedFields(t *testing.T) {
 	}
 }
 
-// TestAuditMetadataValidate_E6E15UseSecretVersion 契约回归测试（outside 4）：
+// TestAuditMetadataValidate_E6E15UseSecretVersion 契约回归测试（outside 4 / vti-EhN）：
 // E6 credential.retire 与 E15 credential.decrypt 的版本字段必须是 secret_version
-// （proposal §8.1/§8.2 契约），携带 secret_version 必须通过允许列表校验且不导致审计失败。
+// （proposal §8.1/§8.2 契约）；携带 secret_version 必须通过允许列表校验，
+// 而 E5 专属的 old_version 不得进入 E6/E15 允许集（ADR-017 字段迁移 fail-closed）。
 func TestAuditMetadataValidate_E6E15UseSecretVersion(t *testing.T) {
 	uuidStr := "123e4567-e89b-42d3-a456-426614174000"
 	cases := []struct {
@@ -68,6 +69,25 @@ func TestAuditMetadataValidate_E6E15UseSecretVersion(t *testing.T) {
 		}
 		if err := ValidateAuditEventMetadata(c.action, c.outcome, raw); err != nil {
 			t.Fatalf("E6/E15 with secret_version should pass validation: %v", err)
+		}
+	}
+
+	// 负向：old_version 不在 E6/E15 允许集内，必须 fail-closed 拒绝（vti-EhN）。
+	negative := []struct {
+		action  string
+		outcome AuditOutcome
+		md      AuditMetadata
+	}{
+		{ActionCredentialRetire, OutcomeSucceeded, AuditMetadata{SecretRef: strPtr(uuidStr), OldVersion: intPtr(1)}},
+		{ActionCredentialDecrypt, OutcomeFailed, AuditMetadata{SecretRef: strPtr(uuidStr), SecretVersion: intPtr(1), ErrorCode: strPtr("decryption_failed"), OldVersion: intPtr(1)}},
+	}
+	for _, c := range negative {
+		raw, err := c.md.Marshal()
+		if err != nil {
+			t.Fatalf("Marshal: %v", err)
+		}
+		if err := ValidateAuditEventMetadata(c.action, c.outcome, raw); err == nil {
+			t.Fatalf("old_version must be rejected for action %s (fail-closed)", c.action)
 		}
 	}
 }

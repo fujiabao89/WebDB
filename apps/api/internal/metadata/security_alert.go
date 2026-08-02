@@ -43,15 +43,18 @@ func EmitAlarm(alarm SecurityAlarm, ctx context.Context, e SecurityAlertEvent) {
 
 // sensitiveLogPatterns 匹配结构化日志中可能出现的敏感内容
 // （密码、KEK/DEK、密钥、token、连接串用户密码、私钥）。
+// 引号包裹的值（单引号或双引号，可含空格）整体脱敏；未加引号的值按首个分隔符截断（vti-EhP）。
 var sensitiveLogPatterns = []struct {
 	re   *regexp.Regexp
 	repl string
 }{
-	{regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
-	{regexp.MustCompile(`(?i)(kek|wrap_dek|data_nonce|wrap_nonce|dek)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
-	{regexp.MustCompile(`(?i)(secret|token|api[_-]?key)\s*[=:]\s*[^\s,;]+`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(password|passwd|pwd)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s,;]+)`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(kek|wrap_dek|data_nonce|wrap_nonce|dek)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s,;]+)`), "$1=[redacted]"},
+	{regexp.MustCompile(`(?i)(secret|token|api[_-]?key)\s*[=:]\s*("[^"]*"|'[^']*'|[^\s,;]+)`), "$1=[redacted]"},
 	{regexp.MustCompile(`(?i)(postgres|postgresql|mysql|redis)://[^@\s]+@`), "$1://[redacted]@"},
-	{regexp.MustCompile(`-----BEGIN [A-Z ]+PRIVATE KEY-----.*?(-----END [A-Z ]+PRIVATE KEY-----|$)`), "[redacted: private key]"},
+	// dot-all（(?s)）：多行 PEM 私钥完整替换，而非仅首行（vti-EhP）。
+	// [A-Z ]+ 同时匹配 "PRIVATE KEY"/"RSA PRIVATE KEY"/"EC PRIVATE KEY" 等算法名。
+	{regexp.MustCompile(`(?s)-----BEGIN [A-Z ]+-----.*?(-----END [A-Z ]+-----|$)`), "[redacted: private key]"},
 }
 
 // RedactSensitive 对日志/错误文本做统一脱敏，禁止原始敏感内容进入结构化日志
