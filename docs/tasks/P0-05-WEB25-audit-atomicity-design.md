@@ -31,7 +31,7 @@
 2. **失败回滚**：审计 append 失败（或事务内任一 mutation 失败）→ 事务整体 ROLLBACK，无任何 mutation 残留。
 3. **无绕过路径**：所有 credential/connection 元数据库 mutation 必须经过带审计协调器（`credentials.LifecycleManager` / `connections.Service`）。**协调器独占 `Begin`/`Commit`/`Rollback` 与原始 mutation 方法，强制成对执行 mutation + `AppendAudit`**；外部调用方只能通过强制审计的入口（`AuditedLifecycleManager` / `Service`），无法直接拿到裸事务做"mutation 后提交不写审计"。`pgMetadataTx` 的裸 mutation 方法仅用于既有非原子路径与测试，不作为生产 mutation 入口。**`Commit` 是审计完成的闸门**：`pgMetadataTx` 的 `Commit` 在 credential/connection 原子化路径校验当前事务内已追加匹配当前 mutation 的 AuditEvent，未追加则拒绝提交并回滚（见 §3 接口注释）。
 4. **AuditTx 契约（仅追加 / 租户 / 脱敏 / 精确匹配 / operation context）**：`AppendAudit` 仅支持追加。
-   - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（含唯一 mutation ID、workspace、resource、action、connection 与 mutation 标识），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 必须精确匹配该 context。
+   - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（唯一 mutation ID、规范化 ResourceID、workspace、resource、action、connection、actor/actorType、outcome、traceID），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 的 `resource_id`、身份字段（actor/workspace/connection）、outcome 与 trace identity 必须与 context **完全匹配**；拒绝缺失、错误资源或错误身份并回滚事务。补覆盖违规输入及租户/connection 隔离的负向测试。
    - **connection 规则**：connection-scoped mutation（connection.create/update）必须提供并精确匹配 `ConnectionID`；credential-only mutation（credential.create/rotate/retire，E3-E6）允许 connection 为 null。`AppendAudit` 校验与匹配逻辑区分两类操作。
    - 强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。
    - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**（workspace、resource、action、connection、mutation ID 全部匹配）；拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
@@ -56,15 +56,52 @@ type MetadataTx interface {
     Rollback() error
 }
 
-// OperationContext 不可变操作上下文：标识一次原子化 mutation（唯一 mutation ID + 资源标识）。
-// 由协调器在 BeginCredential/BeginConnection/AppendAudit 间传递并校验（§2.4）。
+// OperationContext 不可变操作上下文：标识一次原子化 mutation（唯一 mutation ID + 规范化
+// ResourceID + 身份/结果/trace 标识）。字段私有，仅通过 NewOperationContext 构造、通过
+// 只读访问器读取；构造时**复制** ConnectionID（不保存调用方指针）。Begin 后修改原始
+// 连接 ID 或调用方上下文不会改变 Commit/AppendAudit 的校验（真正不可变契约，§2.4）。
 type OperationContext struct {
-    MutationID    string       // 唯一 mutation ID
-    WorkspaceID   uuid.UUID
-    Resource      string       // "credential" | "connection"
-    Action        string       // create / rotate / retire / update
-    ConnectionID  *uuid.UUID   // connection-scoped 时非 nil；credential-only 为 nil
+    mutationID   string
+    workspaceID  uuid.UUID
+    resource     string       // "credential" | "connection"
+    resourceID   string       // 规范化资源 id：secret_ref 或 connection_id 字符串
+    action       string       // create / rotate / retire / update
+    connectionID *uuid.UUID   // 复制值；connection-scoped 非 nil，credential-only 为 nil
+    actorID      uuid.UUID
+    actorType    string
+    outcome      string
+    traceID      string
 }
+
+func NewOperationContext(mutationID string, wsID uuid.UUID, resource, resourceID, action string, connID *uuid.UUID, actorID uuid.UUID, actorType, outcome, traceID string) *OperationContext {
+    c := &OperationContext{
+        mutationID:  mutationID,
+        workspaceID: wsID,
+        resource:    resource,
+        resourceID:  resourceID,
+        action:      action,
+        actorID:     actorID,
+        actorType:   actorType,
+        outcome:     outcome,
+        traceID:     traceID,
+    }
+    if connID != nil {
+        v := *connID // 复制值，不保存指针
+        c.connectionID = &v
+    }
+    return c
+}
+
+func (c *OperationContext) MutationID() string        { return c.mutationID }
+func (c *OperationContext) WorkspaceID() uuid.UUID    { return c.workspaceID }
+func (c *OperationContext) Resource() string          { return c.resource }
+func (c *OperationContext) ResourceID() string        { return c.resourceID }
+func (c *OperationContext) Action() string            { return c.action }
+func (c *OperationContext) ConnectionID() *uuid.UUID  { return c.connectionID }
+func (c *OperationContext) ActorID() uuid.UUID        { return c.actorID }
+func (c *OperationContext) ActorType() string         { return c.actorType }
+func (c *OperationContext) Outcome() string           { return c.outcome }
+func (c *OperationContext) TraceID() string           { return c.traceID }
 
 // AuditTx 事务内审计追加（仅追加；租户/脱敏/operation context 契约见 §2.4）。
 type AuditTx interface {
@@ -208,6 +245,7 @@ type AtomicTxStore interface {
 - 实现与验收：实施 Agent（按 §6 分阶段 TDD）；独立审查：Codex / CodeRabbit / qodo。
 - 文档回退（docs-only PR #36）：由 WEB-25 实施 Agent 在后续实现 PR 中负责修正；若设计文档本身需回退，由提交人 `fujiabao89` 决定。
 - 生产代码回滚：由 Owner 决定执行。
+- **D11 权威文档同步（不推迟到实施阶段）**：proposal §6.2.x/§9.1 与 ADR-017 §5/6 的 `CredentialAtomicTx`/`ConnectionAtomicTx` 原子提交及审计失败整体回滚语义同步，需 Owner 批准（已接受 ADR 只能由新 ADR 替代）。**本 docs-only PR #36 未完成同步；同步完成前，本设计不作为 WEB-25 实施依据**。若 Owner 拒绝同步，升级 Owner 并将本设计标记为不可实施。
 
 **停止与回滚触发阈值**：
 - 任一 P0/P1（数据完整性、审计绕过、越权）在实现 PR 审查中确认 → 停止自动修复，升级 Owner。
