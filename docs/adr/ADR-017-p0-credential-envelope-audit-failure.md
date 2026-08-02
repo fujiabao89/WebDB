@@ -93,8 +93,8 @@ WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期；W
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
 - **验证（合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>，head `94eb3ca`，全部 success）**：gofmt / vet / test / **race** / metadata 集成 / PostgreSQL·MySQL adapter 集成均为 **CI 覆盖**。
-- **本机验证（Windows，Go 1.26.5，`GOPROXY=off`）**：`go test ./...`、`go vet ./...`、Windows/Linux `go build ./...` 均 exit 0；`FuzzPayloadDecoder` 30s（~228k execs）与 `FuzzAAD` 30s（~51k execs）均 **PASS**（无 panic/crash）。
-- **本机 race 限制**：Windows `CGO_ENABLED=0`，`go test -race ./...` 报 `-race requires cgo`（exit 2），**本机不声明 race PASS**；由 main CI Race test success 覆盖。
+- **本机验证（Windows，Go 1.26.5，`GOPROXY=off`，命令从仓库根目录执行）**：`go -C apps/api test ./...`、`go -C apps/api vet ./...`、Windows/Linux `go -C apps/api build ./...` 均 exit 0；`go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s`（~228k execs）与 `-fuzz='^FuzzAAD$'`（~51k execs）均 **PASS**（无 panic/crash）。
+- **本机 race 限制**：Windows `CGO_ENABLED=0`，`go -C apps/api test -race ./...` 报 `-race requires cgo`（exit 2），**本机不声明 race PASS**；由 main CI Race test success 覆盖。
 - 完整 30s fuzz 已在本机完成并通过（上述实际结果），不再有"待后续"项。
 
 ## 验证与回滚

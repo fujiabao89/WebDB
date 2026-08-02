@@ -909,12 +909,12 @@ KEK 不得出现在：
 
 | ID | 验证项 | 预期 |
 |---|---|---|
-| QA-01 | `go test ./...` | PASS（本机 exit 0；CI Test success） |
-| QA-02 | `go vet ./...` | PASS（本机 exit 0；CI Vet success） |
-| QA-03 | `go test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
-| QA-04 | 在 `apps/api` 目录分别执行 `go test -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go test -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：本机两个 target 各完整 30s（`FuzzPayloadDecoder` ~228k execs、`FuzzAAD` ~51k execs），均无 panic/crash，exit 0 |
-| QA-05 | `GOOS=windows go build ./...` | PASS（本机，exit 0） |
-| QA-06 | `GOOS=linux go build ./...` | PASS（本机，exit 0） |
+| QA-01 | `go -C apps/api test ./...`（从仓库根目录执行） | PASS（本机 exit 0；CI Test success） |
+| QA-02 | `go -C apps/api vet ./...` | PASS（本机 exit 0；CI Vet success） |
+| QA-03 | `go -C apps/api test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
+| QA-04 | 从仓库根目录执行 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：本机两个 target 各完整 30s（`FuzzPayloadDecoder` ~228k execs、`FuzzAAD` ~51k execs），均无 panic/crash，exit 0 |
+| QA-05 | `GOOS=windows GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
+| QA-06 | `GOOS=linux GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
 | QA-07 | 许可证检查 | 无新增非兼容许可证（全部 Go stdlib） |
 | QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏（canary 测试，见 baseline 验收矩阵） |
 
@@ -965,4 +965,5 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
-| 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 merge commit；D1-D15 已批准决策未修改 |
+| 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 commit（单父提交，普通 `git revert` 即可）；D1-D15 已批准决策未修改 |
+| 2026-08-02 | Codex/qodo/CodeRabbit 收尾审查处理：QA 命令统一锚定 `apps/api` 且 QA-04 补齐 `./internal/credentials` 包路径；回滚说明改为单父提交并补充收尾 PR 的 commit 与凭证回滚禁令；WEB-22 合并日期统一为 2026-08-01。**Codex P1 契约张力已如实记录（不改 D1-D15）**：D11 声明"元数据库变更与 audit 原子提交"，而凭证创建/轮换/退役及连接 mutation 实际为 post-commit 再写审计（§6.2.1/6.2.3 描述）；凭证 per-field 长度限制（§3.2 user≤255/password≤1024）未在 `validatePayloadFields` 实现。两处均需 Owner 决策（见 baseline 残余风险），本方案不擅自改动已批准决策 |
