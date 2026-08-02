@@ -22,7 +22,11 @@ type fakeAuditStore struct {
 	fail   error
 }
 
-func (f *fakeAuditStore) AppendAudit(_ context.Context, e *metadata.AuditEvent) error {
+func (f *fakeAuditStore) AppendAudit(ctx context.Context, e *metadata.AuditEvent) error {
+	// 调用方取消时返回 ctx.Err()，使取消回归测试能验证审计写入使用 detached context（VujkP）。
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if f.fail != nil {
 		return f.fail
 	}
@@ -36,11 +40,13 @@ func (f *fakeAuditStore) QueryAudit(context.Context, metadata.AuditQuery) ([]met
 }
 
 type fakeAlarmRecorder struct {
-	events []metadata.SecurityAlertEvent
+	events  []metadata.SecurityAlertEvent
+	ctxErrs []error // Alarm 被调用时的 ctx.Err()，验证告警收到有效 context
 }
 
-func (f *fakeAlarmRecorder) Alarm(_ context.Context, e metadata.SecurityAlertEvent) {
+func (f *fakeAlarmRecorder) Alarm(ctx context.Context, e metadata.SecurityAlertEvent) {
 	f.events = append(f.events, e)
+	f.ctxErrs = append(f.ctxErrs, ctx.Err())
 }
 
 // fakeCredentialStore 实现 CredentialTXStore + ConnectionTXStore。
@@ -415,6 +421,32 @@ func TestAuditedCredential_ResolveCancelledContextStillWritesAudit(t *testing.T)
 	}
 	if len(audit.events) != 1 {
 		t.Fatalf("audit events = %d, want 1 (audit must survive caller cancellation)", len(audit.events))
+	}
+}
+
+// TestAuditedCredential_ResolveAuditFailureAlarmUsesValidContext 验证调用方 ctx 取消且
+// 审计失败时，alarm 收到的是新派生的有效（未取消）context，而非已过期的 auditCtx（outside finding 3）。
+func TestAuditedCredential_ResolveAuditFailureAlarmUsesValidContext(t *testing.T) {
+	store := &fakeCredentialStore{envErr: metadata.ErrEnvelopeNotFound}
+	audit := &fakeAuditStore{fail: errors.New("injected audit failure")}
+	alarm := &fakeAlarmRecorder{}
+	m, _, _ := auditedManager(store, nil, goodKEK(), audit, alarm)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := m.Resolve(ctx, uuid.New(), uuid.New(), 1)
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if len(alarm.events) != 1 {
+		t.Fatalf("alarm events = %d, want 1", len(alarm.events))
+	}
+	if len(alarm.ctxErrs) != 1 || alarm.ctxErrs[0] != nil {
+		var firstErr error
+		if len(alarm.ctxErrs) == 1 {
+			firstErr = alarm.ctxErrs[0]
+		}
+		t.Fatalf("alarm must receive a valid (non-canceled) context, got %d, first err=%v", len(alarm.ctxErrs), firstErr)
 	}
 }
 

@@ -5,7 +5,7 @@
 > **子任务**：
 > - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（✅ 已完成，Owner Gate 通过）
 > - [WEB-22](https://linear.app/webdb/issue/WEB-22)：P0-05B 凭证信封加密、版本轮换与 Adapter 接入（✅ 已完成，PR #31 已合并）
-> - [WEB-23](https://linear.app/webdb/issue/WEB-23)：P0-05C 追加式审计、脱敏、故障策略与最终验收（进行中，PR #32 独立审查）
+> - [WEB-23](https://linear.app/webdb/issue/WEB-23)：P0-05C 追加式审计、脱敏、故障策略与最终验收（已实现，PR #32 独立审查中）
 >
 > **方案文档**：[P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md)
 > **威胁模型**：[P0-05-threat-model.md](P0-05-threat-model.md)
@@ -40,7 +40,7 @@
 | D1-D15 Owner 决策包 | ✅ 已批准（2026-08-01, fujiabao89） |
 | ADR-017 | 已接受 |
 | 威胁模型 | 已批准 |
-| 测试矩阵 | 已编制（待 WEB-22/WEB-23 执行） |
+| 测试矩阵 | 已编制并执行（WEB-22/WEB-23 测试覆盖本 PR） |
 | WEB-22 阻塞 | 已解除 |
 | WEB-23 阻塞 | 已解除（WEB-22 已合并，2026-08-01） |
 

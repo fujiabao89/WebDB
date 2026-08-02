@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-22（凭证信封加密）可基于本方案启动生产实现。WEB-23（审计接入）须等待 WEB-22 完成。
+> WEB-22（凭证信封加密）已基于本方案完成生产实现。WEB-23（审计接入）已完成实现并在 PR #32 独立审查中（WEB-21/WEB-22 阻塞均已解除）。
 
 ---
 
@@ -632,7 +632,7 @@ KEK 不得出现在：
 
 ### 8.2 Metadata 允许列表（16 字段 + credential.rotate 专用 expected_version/actual_version，共 18 个字段）
 
-下表列出 P0-05 方案涉及的完整 metadata 字段。16 字段允许列表包含 6 个 P0-05 新增凭证字段与 10 个 P0-04 现有字段；其中 P0-04 的 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件（表中未重复列出）。另加 credential.rotate 专用的 `expected_version`/`actual_version`（E5 专用，不属于原 16 字段拆解），共 18 个字段（VuXZq）：
+下表列出 P0-05 方案涉及的完整 metadata 字段。16 字段允许列表包含 6 个 P0-05 新增凭证字段与 10 个 P0-04 现有字段；其中 P0-04 的 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件（表中未重复列出）。另加 credential.rotate 专用的 `expected_version`/`actual_version`（E5 专用，不属于原 16 字段拆解），共 18 个字段：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
@@ -960,3 +960,4 @@ KEK 不得出现在：
 |---|---|
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
+| 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |

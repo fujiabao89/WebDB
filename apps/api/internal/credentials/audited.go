@@ -241,7 +241,10 @@ func (m *AuditedLifecycleManager) writeAudit(ctx context.Context, event *metadat
 	auditCtx, cancel := m.auditContext(ctx)
 	defer cancel()
 	if err := m.audit.AppendAudit(auditCtx, event); err != nil {
-		metadata.EmitAlarm(m.alarm, auditCtx, metadata.SecurityAlertEvent{
+		// 使用新的有界 context 触发告警，避免复用可能已过期的 auditCtx（outside finding 3）。
+		alarmCtx, alarmCancel := m.auditContext(ctx)
+		defer alarmCancel()
+		metadata.EmitAlarm(m.alarm, alarmCtx, metadata.SecurityAlertEvent{
 			TraceID:     event.TraceID,
 			WorkspaceID: event.WorkspaceID,
 			Code:        string(ErrAuditFailed),

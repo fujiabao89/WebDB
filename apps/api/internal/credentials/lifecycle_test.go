@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -163,7 +164,8 @@ func TestLifecycleCreateDoesNotReturnReservationAfterPersistenceFailure(t *testi
 	storeErr := errors.New("synthetic persistence failure")
 	store := &createOnlyCredentialStore{createErr: storeErr}
 	kek := &reservationKEKProvider{}
-	manager := NewLifecycleManager(nil, store, nil, kek)
+	manager := NewLifecycleManager(nil, store, nil, kek,
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	_, err := manager.Create(
 		context.Background(),

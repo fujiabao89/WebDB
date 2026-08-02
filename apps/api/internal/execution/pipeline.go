@@ -373,7 +373,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
-	defer handle.Release()
+	released := false
+	defer func() {
+		// 兜底：任何路径（含 panic）都归还连接，且避免重复释放（outside finding 4）。
+		if !released {
+			handle.Release()
+		}
+	}()
 
 	result.AdapterCalled = true
 
@@ -395,6 +401,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		MaxRows:  effectiveMaxRows,
 	})
 	if err != nil {
+		handle.Release()
+		released = true
 		result.ErrorCode = mapAdapterError(err)
 		if exec != nil {
 			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
@@ -403,6 +411,11 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+
+	// 单页查询完成、结果已完整填充且无活动游标：立即释放 handle，
+	// 再进入 recordPostExecution，避免审计持久化期间占用连接池（outside finding 4）。
+	handle.Release()
+	released = true
 
 	result.Result = queryResult
 	if exec != nil {
