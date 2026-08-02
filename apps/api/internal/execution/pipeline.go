@@ -314,15 +314,15 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 
 	// 阶段 D-0: execution running 更新并在执行前提交元数据库事务。
+	// pending→running 更新或提交失败意味着元数据库故障，按审计失败处理
+	// （返回 audit_failed + $SECURITY_ALERT），而非降级为 internal_error（vpvC7 outside）。
 	if mtx != nil {
 		exec.Status = metadata.ExecStatusRunning
 		if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
-			result.ErrorCode = ErrInternalError
-			return result, fmt.Errorf("%w", result.ErrorCode)
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 		}
 		if err := mtx.Commit(); err != nil {
-			result.ErrorCode = ErrInternalError
-			return result, fmt.Errorf("%w", result.ErrorCode)
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 		}
 		mtx = nil
 	}

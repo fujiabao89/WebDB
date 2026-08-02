@@ -793,6 +793,74 @@ func TestAuditedExecute_UpdateFailurePreExecution(t *testing.T) {
 	}
 }
 
+// ---- 阶段 D-0 pending→running 失败（vpvC7 outside）---------------------------
+
+func TestAuditedExecute_D0RunningUpdateFailure(t *testing.T) {
+	// D-0 将 execution 更新为 running 失败 → audit_failed + $SECURITY_ALERT，Adapter 0 次。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	client.handle.result = &adapter.QueryResult{TotalReturned: 1}
+	txStore.failUpdate = errors.New("injected update failure")
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed (D-0 update failure must fail-closed)", result.ErrorCode)
+	}
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", client.calls)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+func TestAuditedExecute_D0CommitFailure(t *testing.T) {
+	// D-0 running 更新后提交失败 → audit_failed + $SECURITY_ALERT，Adapter 0 次。
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	client.handle.result = &adapter.QueryResult{TotalReturned: 1}
+	txStore.failCommit = errors.New("injected commit failure")
+
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		&fakePolicyReader{policy: policy},
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, fixedClock(),
+	)
+
+	result, err := pipeline.Execute(context.Background(), ExecuteRequest{
+		Principal:    principal,
+		ConnectionID: conn.ID,
+		SQL:          "SELECT 1",
+		Engine:       EnginePostgreSQL,
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if result.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed (D-0 commit failure must fail-closed)", result.ErrorCode)
+	}
+	if client.calls != 0 {
+		t.Fatalf("adapter calls = %d, want 0", client.calls)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
 // ---- 安全告警通道自身失败（T28 / CodeRabbit #31）-----------------------------
 
 type panicAlarm struct{}
