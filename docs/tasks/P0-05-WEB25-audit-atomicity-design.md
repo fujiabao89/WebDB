@@ -34,8 +34,8 @@
    - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（唯一 mutation ID、规范化 ResourceID、workspace、resource、action、connection、actor/actorType、outcome、traceID），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 的 `resource_id`、身份字段（actor/workspace/connection）、outcome 与 trace identity 必须与 context **完全匹配**；拒绝缺失、错误资源或错误身份并回滚事务。补覆盖违规输入及租户/connection 隔离的负向测试。
    - **connection 规则**：connection-scoped mutation（connection.create/update）必须提供并精确匹配 `ConnectionID`；credential-only mutation（credential.create/rotate/retire，E3-E6）允许 connection 为 null。`AppendAudit` 校验与匹配逻辑区分两类操作。
    - 强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。
-   - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**（workspace、resource、action、connection、mutation ID 全部匹配）；拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
-   - 补负向验收测试覆盖违规输入、跨租户、connection 缺失/为 null、匹配冲突。
+   - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**：精确匹配字段集合为 `AuditMatchFields`（workspace、resource、resource_id、action、connection、mutation ID、actor_id、actor_type、outcome、trace_id，见 §3）；`AppendAudit`、`Commit` 闸门与负向测试**复用该集合**。拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
+   - 补负向验收测试覆盖违规输入、跨租户、connection 缺失/为 null、匹配冲突；验证 `AuditMatchFields` 任一字段不匹配即拒绝（不存在审计绕过）。
 5. **并发与回滚**：并发轮换（LIFE-07）、事务中间失败回滚（LIFE-08）由集成测试覆盖；`CountConnectionsByVersion` 必须对匹配行加 `FOR SHARE` 锁（保留既有 retire TOCTOU 防护），并发 `UpdateConnectionVersion` 必须被阻塞直至退役事务结束。**共享序列化点**：对 `credential_envelopes`/`connections` 资源定义显式隔离级别或数据库 advisory-lock 协议作为共享序列化点；**当无匹配连接行（零匹配）时仍须获取该序列化点**（例如锁定目标 envelope 行 + advisory lock），防止并发 `UpdateConnectionVersion` 在零匹配场景绕过退役检查。集成测试须覆盖**初始零匹配**与**单匹配**两种场景。
 6. **外部副作用例外不变**：目标库查询后的审计写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警。
 
@@ -97,11 +97,27 @@ func (c *OperationContext) WorkspaceID() uuid.UUID    { return c.workspaceID }
 func (c *OperationContext) Resource() string          { return c.resource }
 func (c *OperationContext) ResourceID() string        { return c.resourceID }
 func (c *OperationContext) Action() string            { return c.action }
-func (c *OperationContext) ConnectionID() *uuid.UUID  { return c.connectionID }
+// ConnectionID 返回防御性副本（value-and-presence），不暴露内部指针：
+// 通过访问器无法修改内部 connectionID，Begin 后修改调用方持有的值不影响 Commit/AppendAudit 校验。
+func (c *OperationContext) ConnectionID() (uuid.UUID, bool) {
+    if c.connectionID == nil {
+        return uuid.Nil, false
+    }
+    return *c.connectionID, true // 返回副本值
+}
 func (c *OperationContext) ActorID() uuid.UUID        { return c.actorID }
 func (c *OperationContext) ActorType() string         { return c.actorType }
 func (c *OperationContext) Outcome() string           { return c.outcome }
 func (c *OperationContext) TraceID() string           { return c.traceID }
+
+// AuditMatchFields mutation 与 AuditEvent 的唯一精确匹配字段集合。
+// AppendAudit、Commit 闸门与负向测试**复用**该集合；任一字段不匹配（资源/租户/连接/身份）
+// 即拒绝并回滚，验证不存在审计绕过（§2.4）。
+var AuditMatchFields = []string{
+    "workspace_id", "resource", "resource_id", "action",
+    "connection_id", "mutation_id", "actor_id", "actor_type",
+    "outcome", "trace_id",
+}
 
 // AuditTx 事务内审计追加（仅追加；租户/脱敏/operation context 契约见 §2.4）。
 type AuditTx interface {
