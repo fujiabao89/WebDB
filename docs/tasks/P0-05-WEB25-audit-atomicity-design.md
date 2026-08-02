@@ -36,13 +36,14 @@
 
 ## 3. 接口隔离设计（窄接口 + 协调器独占事务控制）
 
-**不向通用 `ExecutionTx` 增加 mutation 方法**；execution 与 credential/connection 使用不同事务类型，由 `pgMetadataTx` 统一实现。
+**不向通用 `MetadataTx`（execution 专用，现状不变）增加 mutation 方法**；execution 与 credential/connection 使用不同事务类型，由 `pgMetadataTx` 统一实现。
 
 ```go
 // metadata 包 — 窄事务接口
 
-// ExecutionTx execution 专用窄事务（现状不变，供 execution.Pipeline；E9-E13 保持）。
-type ExecutionTx interface {
+// MetadataTx execution 专用窄事务（现状不变，供 execution.Pipeline；E9-E13 保持）。
+// 与现有 metadata.MetadataTx 契约一致，不增加 mutation 方法。
+type MetadataTx interface {
     CreateExecution(ctx context.Context, e *Execution) error
     UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execution) error
     AppendAudit(ctx context.Context, e *AuditEvent) error
@@ -72,12 +73,19 @@ type ConnectionMutationTx interface {
     CountConnectionsByVersion(ctx context.Context, wsID, secretRef uuid.UUID, version int) (int, error) // 必须 FOR SHARE
 }
 
+// ConnectionRefReadTx Retire 引用检查所需的锁读能力（仅 CountConnectionsByVersion，FOR SHARE）。
+// 凭证协调器（LifecycleManager）只需此读能力，不暴露 CreateConnection/UpdateConnection/UpdateConnectionVersion。
+type ConnectionRefReadTx interface {
+    CountConnectionsByVersion(ctx context.Context, wsID, secretRef uuid.UUID, version int) (int, error) // 必须 FOR SHARE
+}
+
 // CredentialAtomicTx credential 原子化组合。内部接口，仅由 credentials.LifecycleManager
 // （审计协调器）使用；协调器独占 Begin/Commit/Rollback 与 mutation，强制成对执行 mutation+AppendAudit。
+// 只嵌入 ConnectionRefReadTx（Retire 的锁读），不暴露连接写 mutation。
 type CredentialAtomicTx interface {
     AuditTx
     CredentialMutationTx
-    ConnectionMutationTx
+    ConnectionRefReadTx
     Commit() error
     Rollback() error
 }
@@ -90,12 +98,12 @@ type ConnectionAtomicTx interface {
     Rollback() error
 }
 
-// TxStore 开启元数据库事务。execution 与 credential/connection 使用不同事务类型，
-// 避免扩宽既有 ExecutionTx。
+// TxStore 保留现有 Begin(ctx) (MetadataTx, error) 兼容契约（execution.Pipeline 的 p.txs.Begin
+// 调用无需改动即可编译）；新增 credential/connection 原子化事务入口，避免扩宽既有 MetadataTx。
 type TxStore interface {
-    BeginExecution(ctx context.Context) (ExecutionTx, error)
-    BeginCredential(ctx context.Context) (CredentialAtomicTx, error)
-    BeginConnection(ctx context.Context) (ConnectionAtomicTx, error)
+    Begin(ctx context.Context) (MetadataTx, error)                   // 既有 execution 路径（保持不变）
+    BeginCredential(ctx context.Context) (CredentialAtomicTx, error) // credential 原子化
+    BeginConnection(ctx context.Context) (ConnectionAtomicTx, error) // connection 原子化
 }
 ```
 
@@ -105,7 +113,7 @@ type TxStore interface {
 |---|---|---|---|
 | `credentials.LifecycleManager`（审计协调器） | `CredentialAtomicTx` | 协调器独占 Begin/Commit/Rollback，成对 mutation+audit | Create/Rotate/Retire 原子化 |
 | `connections.Service`（审计协调器） | `ConnectionAtomicTx` | 协调器独占，成对 mutation+audit | Create/Update 原子化 |
-| `execution.Pipeline` | `ExecutionTx`（现状不变） | 既有 execution 路径 | E9-E13 保持 |
+| `execution.Pipeline` | `MetadataTx`（现状不变，`TxStore.Begin`） | 既有 execution 路径 | E9-E13 保持 |
 
 **绕过防护落实**：`CredentialAtomicTx`/`ConnectionAtomicTx` 是 `metadata` 包内部/半内部接口，仅由 `credentials`/`connections` 的审计协调器获得并关闭（使用后不再向外传递）。协调器是唯一能在事务内执行 mutation 的入口；API 层（`AuditedLifecycleManager`/`Service`）强制在 `Commit` 前调用 `AppendAudit`。任何绕过（直接 mutation 不审计）通过入口审计测试与代码审查禁止；若实施中无法禁止则按 §7 升级 Owner。
 
@@ -132,7 +140,7 @@ type TxStore interface {
 | 并发轮换（LIFE-07） | **部分覆盖** | `TestLifecycleRotateConcurrentPostgres`（WEB-24；验证并发轮换 + SecretVersion，但未直接调用 `AppendAudit`） |
 | 事务中间失败回滚（LIFE-08） | **部分覆盖** | `TestLifecycleRotateTxFailureRollbackPostgres`（WEB-24；真实 UPDATE 与 INSERT 回滚，但未覆盖 `AppendAudit` 失败注入） |
 | E9-E13 外部副作用例外 | 保持 | 既有 execution audit 测试 |
-| 本机 + CI 全绿 | 待实施 | gofmt/vet/test/race/metadata+credentials integration |
+| 本机 + CI 全绿（含 connections 集成测试，覆盖 Connection Create/Update mutation 回滚） | 待实施（WEB-25 测试尚未存在） | `go test -p=1 -tags=integration ./internal/metadata/... ./internal/credentials/... ./internal/connections/...` + `gofmt`/`vet`/`test`/`race` |
 
 > WEB-24 轮换测试仅部分覆盖 D11：它们验证并发轮换/回滚语义，但未调用 `AppendAudit`，且其 fake connection store 不验证审计写入。WEB-25 需补充审计原子性（`AppendAudit` 失败注入）测试。
 
@@ -149,7 +157,7 @@ type TxStore interface {
 
 ## 6. 实施顺序（新会话，从最新 main 开始，TDD）
 
-1. **metadata 窄事务接口与 `pgMetadataTx`**：定义 `ExecutionTx`/`AuditTx`/`CredentialMutationTx`/`ConnectionMutationTx`/`CredentialAtomicTx`/`ConnectionAtomicTx` 并实现（含失败注入辅助）。先写接口编译失败的测试（RED）。
+1. **metadata 窄事务接口与 `pgMetadataTx`**：保留现有 `MetadataTx` 与 `Begin(ctx)`；新增 `AuditTx`/`CredentialMutationTx`/`ConnectionMutationTx`/`ConnectionRefReadTx`/`CredentialAtomicTx`/`ConnectionAtomicTx` 与 `BeginCredential`/`BeginConnection` 并实现（含失败注入辅助）。先写接口编译失败的测试（RED）。
 2. **credentials create/rotate/retire 原子化**：`LifecycleManager` 改用 `CredentialAtomicTx`；`AuditedLifecycleManager` 在事务内成对执行 mutation + E3-E6；失败注入测试（`AppendAudit` 失败 → 无残留）。
 3. **connections create/update 原子化**：`Service.Create/Update` 改用 `ConnectionAtomicTx`；失败注入测试。
 4. **失败注入、并发、回滚、取消/panic/清理与绕过防护测试**：补全 §4 验收矩阵；覆盖 `AppendAudit` 失败、事件校验失败、mutation 中间失败、`Begin`/`Commit`/`Rollback` 失败、取消、panic、并发、资源清理、脱敏错误。
@@ -164,9 +172,36 @@ type TxStore interface {
 - 需改变已批准的错误码/审计契约（超出 D11 作用域澄清）；
 - 无法同步 proposal/ADR-017 的 D11 权威文档。
 
-## 8. 来源
+## 8. 部分实施与失败的责任、回滚与 forward-fix
+
+**责任角色**：
+- 实现与验收：实施 Agent（按 §6 分阶段 TDD）；独立审查：Codex / CodeRabbit / qodo。
+- 文档回退（docs-only PR #36）：由 WEB-25 实施 Agent 在后续实现 PR 中负责修正；若设计文档本身需回退，由提交人 `fujiabao89` 决定。
+- 生产代码回滚：由 Owner 决定执行。
+
+**停止与回滚触发阈值**：
+- 任一 P0/P1（数据完整性、审计绕过、越权）在实现 PR 审查中确认 → 停止自动修复，升级 Owner。
+- credentials 与 connections 两个原子化中任一个完成而另一个未完成 → **不得**设为 Ready / 合并 / 关闭 WEB-11（PR 纪律 §6）。
+- 连续两次同类验证失败、或发现设计 §3 接口无法落实无绕过路径 → 停止并升级 Owner（§7）。
+
+**回滚动作**：
+- 功能回滚：`git revert` 实现 PR 合并后的 main commit；若涉及接口迁移，按 §3 保留 `MetadataTx`/`Begin` 兼容契约，回滚不破坏既有 execution 路径。
+- 设计文档回退：`git revert` 本 docs-only PR #36 的 main commit（仅文档，无生产影响）。
+
+**forward-fix 目标与负责人**：目标为使 credential/connection mutation 与 AuditEvent 原子提交（D11）落地且无绕过路径；负责人为 WEB-25 实施 Agent，Owner `fujiabao89` 批准。
+
+**重新 Ready 的证据门禁**：
+- 通过 §4 验收矩阵全部"待实施"项（含 connections 集成测试、`AppendAudit` 失败注入、取消/panic/清理/脱敏错误）；
+- `go test -p=1 -tags=integration ./internal/metadata/... ./internal/credentials/... ./internal/connections/...` 全绿；
+- CI（gofmt/vet/test/race）全绿；
+- 无绕过路径（入口审计测试 + 代码审查结论）；
+- proposal/ADR-017 的 D11 权威文档已同步（§6 步骤 5）。
+
+**docs-only PR #36 交接**：本 PR 仅记录设计，无生产代码。后续实现 PR 必须引用本设计文档；若实施中发现设计缺陷，先更新本设计再实现，不得静默偏离。
+
+## 9. 来源
 
 - Codex P1（3698495131）：D11 声明原子提交 vs 实际 post-commit 冲突。
 - Owner 2026-08-02 决策 2 与选择 C 指令。
-- qodo/CodeRabbit 对设计文档的审查意见（接口隔离、无绕过路径、行锁、AuditTx 契约、验收矩阵、D11 文档同步）。
+- qodo/CodeRabbit 对设计文档的审查意见（接口隔离、无绕过路径、行锁、AuditTx 契约、验收矩阵、D11 文档同步、Begin 兼容、CredentialAtomicTx 边界、部分实施责任）。
 - 参考 `docs/tasks/P0-05-proposal-credentials-and-audit.md` D11（§12）、§6.2.1/6.2.3/6.3、§9.1；`docs/adr/ADR-017-p0-credential-envelope-audit-failure.md` §5/§6；`apps/api/internal/metadata/audit_tx.go`；`apps/api/internal/credentials/lifecycle_integration_test.go`。
