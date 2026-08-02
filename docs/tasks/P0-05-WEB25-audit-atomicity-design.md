@@ -30,8 +30,13 @@
 1. **原子性**：`Create`/`Rotate`/`Retire` 与 `connections.Create`/`Update` 的元数据库 mutation + 对应 AuditEvent 在同一 `CredentialAtomicTx`/`ConnectionAtomicTx` 内 COMMIT。
 2. **失败回滚**：审计 append 失败（或事务内任一 mutation 失败）→ 事务整体 ROLLBACK，无任何 mutation 残留。
 3. **无绕过路径**：所有 credential/connection 元数据库 mutation 必须经过带审计协调器（`credentials.LifecycleManager` / `connections.Service`）。**协调器独占 `Begin`/`Commit`/`Rollback` 与原始 mutation 方法，强制成对执行 mutation + `AppendAudit`**；外部调用方只能通过强制审计的入口（`AuditedLifecycleManager` / `Service`），无法直接拿到裸事务做"mutation 后提交不写审计"。`pgMetadataTx` 的裸 mutation 方法仅用于既有非原子路径与测试，不作为生产 mutation 入口。**`Commit` 是审计完成的闸门**：`pgMetadataTx` 的 `Commit` 在 credential/connection 原子化路径校验当前事务内已追加匹配当前 mutation 的 AuditEvent，未追加则拒绝提交并回滚（见 §3 接口注释）。
-4. **AuditTx 契约（仅追加 / 租户 / 脱敏 / 精确匹配）**：`AppendAudit` 仅支持追加；校验 `AuditEvent` 绑定当前 mutation 的 workspace（跨租户事件拒绝）；强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。**每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**（workspace、resource、action、connection、mutation 标识全部匹配）；拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。补充负向验收测试覆盖违规输入、跨租户事件及匹配冲突。
-5. **并发与回滚**：并发轮换（LIFE-07）、事务中间失败回滚（LIFE-08）由集成测试覆盖；`CountConnectionsByVersion` 必须对匹配行加 `FOR SHARE` 锁（保留既有 retire TOCTOU 防护），并发 `UpdateConnectionVersion` 必须被阻塞直至退役事务结束。
+4. **AuditTx 契约（仅追加 / 租户 / 脱敏 / 精确匹配 / operation context）**：`AppendAudit` 仅支持追加。
+   - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（含唯一 mutation ID、workspace、resource、action、connection 与 mutation 标识），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 必须精确匹配该 context。
+   - **connection 规则**：connection-scoped mutation（connection.create/update）必须提供并精确匹配 `ConnectionID`；credential-only mutation（credential.create/rotate/retire，E3-E6）允许 connection 为 null。`AppendAudit` 校验与匹配逻辑区分两类操作。
+   - 强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。
+   - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**（workspace、resource、action、connection、mutation ID 全部匹配）；拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
+   - 补负向验收测试覆盖违规输入、跨租户、connection 缺失/为 null、匹配冲突。
+5. **并发与回滚**：并发轮换（LIFE-07）、事务中间失败回滚（LIFE-08）由集成测试覆盖；`CountConnectionsByVersion` 必须对匹配行加 `FOR SHARE` 锁（保留既有 retire TOCTOU 防护），并发 `UpdateConnectionVersion` 必须被阻塞直至退役事务结束。**共享序列化点**：对 `credential_envelopes`/`connections` 资源定义显式隔离级别或数据库 advisory-lock 协议作为共享序列化点；**当无匹配连接行（零匹配）时仍须获取该序列化点**（例如锁定目标 envelope 行 + advisory lock），防止并发 `UpdateConnectionVersion` 在零匹配场景绕过退役检查。集成测试须覆盖**初始零匹配**与**单匹配**两种场景。
 6. **外部副作用例外不变**：目标库查询后的审计写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警。
 
 ## 3. 接口隔离设计（窄接口 + 协调器独占事务控制）
@@ -51,9 +56,19 @@ type MetadataTx interface {
     Rollback() error
 }
 
-// AuditTx 事务内审计追加（仅追加；租户/脱敏契约见 §2.4）。
+// OperationContext 不可变操作上下文：标识一次原子化 mutation（唯一 mutation ID + 资源标识）。
+// 由协调器在 BeginCredential/BeginConnection/AppendAudit 间传递并校验（§2.4）。
+type OperationContext struct {
+    MutationID    string       // 唯一 mutation ID
+    WorkspaceID   uuid.UUID
+    Resource      string       // "credential" | "connection"
+    Action        string       // create / rotate / retire / update
+    ConnectionID  *uuid.UUID   // connection-scoped 时非 nil；credential-only 为 nil
+}
+
+// AuditTx 事务内审计追加（仅追加；租户/脱敏/operation context 契约见 §2.4）。
 type AuditTx interface {
-    AppendAudit(ctx context.Context, e *AuditEvent) error
+    AppendAudit(ctx context.Context, op OperationContext, e *AuditEvent) error
 }
 
 // CredentialMutationTx 凭证生命周期 mutation（不暴露 Commit/Rollback）。
@@ -110,9 +125,11 @@ type TxStore interface {
 }
 
 // AtomicTxStore 供 credential/connection 审计协调器开启原子化事务。
+// Begin* 返回的事务绑定协调器传入的 OperationContext（含唯一 mutation ID）；后续
+// mutation/AppendAudit 必须携带同一 context，Commit 按其校验精确匹配（§2.4）。
 type AtomicTxStore interface {
-    BeginCredential(ctx context.Context) (CredentialAtomicTx, error) // credential 原子化
-    BeginConnection(ctx context.Context) (ConnectionAtomicTx, error) // connection 原子化
+    BeginCredential(ctx context.Context, op OperationContext) (CredentialAtomicTx, error) // credential 原子化
+    BeginConnection(ctx context.Context, op OperationContext) (ConnectionAtomicTx, error) // connection 原子化
 }
 ```
 
@@ -127,7 +144,10 @@ type AtomicTxStore interface {
 **绕过防护落实**：`CredentialAtomicTx`/`ConnectionAtomicTx` 是 `metadata` 包内部/半内部接口，仅由 `credentials`/`connections` 的审计协调器获得并关闭（使用后不再向外传递）。协调器是唯一能在事务内执行 mutation 的入口；API 层（`AuditedLifecycleManager`/`Service`）强制在 `Commit` 前调用 `AppendAudit`。任何绕过（直接 mutation 不审计）通过入口审计测试与代码审查禁止；若实施中无法禁止则按 §7 升级 Owner。
 
 **实现（distinct wrapper types）**：`pgCredentialAtomicTx` 与 `pgConnectionAtomicTx` 为**不同的 wrapper 类型**，各自只实现自己的 mutation/audit/read 接口；**`pgMetadataTx` 不跨域实现两个 atomic 接口，也不嵌入跨域 mutation 接口**。**任何接口参数不得出现 `*sql.Tx`**。
-**负向类型断言测试**：`CredentialAtomicTx` 不得断言为 `ConnectionMutationTx`，`ConnectionAtomicTx` 不得断言为 `CredentialMutationTx`（编译期类型隔离验证，防止跨域暴露）。
+**类型断言测试**：
+- **运行时负向断言**：通过 interface type assertion 验证跨域断言失败——`var _ interface{ ConnectionMutationTx } = (CredentialAtomicTx)(nil)` 必须编译失败；测试用 `_, ok := any(credAtomicTx).(ConnectionMutationTx)` 断言 `ok == false`，反之亦然。
+- **编译期正向断言**：`var _ CredentialAtomicTx = (*pgCredentialAtomicTx)(nil)`、`var _ ConnectionAtomicTx = (*pgConnectionAtomicTx)(nil)`。
+- **不跨域约束**：`pgMetadataTx` 不实现 `CredentialAtomicTx`/`ConnectionAtomicTx`（只实现 `MetadataTx`）；`pgCredentialAtomicTx`/`pgConnectionAtomicTx` 不得暴露跨域 mutation 接口。
 
 ## 4. 验收矩阵
 
