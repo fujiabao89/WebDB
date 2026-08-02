@@ -52,14 +52,14 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 - **E1-E16 持久化审计**：connection.create/update、credential.create/rotate（expected_version 不匹配时返回 version_conflict, outcome=failed）/retire、connection.test、sql.execute（denied/succeeded/failed/timeout/cancelled）、credential.lookup/decrypt 失败、unknown KEK version
 - **E17**：审计写入失败作为独立安全告警通道，不写回失败的审计系统
-- **Metadata 允许列表**：合并 16 字段（6 P0-05 新增 + 10 P0-04 现有），使用事件级精确格式校验，禁止自由文本
+- **Metadata 允许列表**：合并 13 字段（6 P0-05 新增 + 7 P0-04 现有）+ credential.rotate 专用 expected_version/actual_version，使用事件级精确格式校验，禁止自由文本
 - **禁止字段**：SQL 正文、密码、KEK/DEK、nonce、连接串、目标库结果、原始数据库错误
 
 ### 6. 审计失败策略
 
 - **分阶段 fail-closed**：与 P0-04 §8.6 一致
 - 执行前审计失败：不调用 Adapter，返回 `audit_failed`
-- 执行后审计失败：不返回结果，返回 `audit_failed`，execution 已记录为 `completed`
+- 执行后审计失败：不返回结果，返回 `audit_failed`，execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）
 - 禁止自动重试；禁止静默降级
 - 凭证解密失败、未知 KEK 版本和审计写入失败 → `$SECURITY_ALERT`
 
@@ -87,7 +87,7 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 
 WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策略：
 
-- **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 proposal §8.2 批准的字段（13 字段 + E5 专用 expected_version/actual_version），事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
+- **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 proposal §8.2 批准的字段（13 字段，即 6 个 P0-05 新增 + 7 个 P0-04 现有，另加 credential.rotate 专用 expected_version/actual_version），事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
 - **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。

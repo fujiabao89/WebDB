@@ -630,7 +630,7 @@ KEK 不得出现在：
 
 > **E17（审计写入失败）**：不持久化为 audit_events 行（失败的审计系统不可写入）。作为独立安全告警通过应用日志/监控通道发出，携带 `trace_id`、`error_code` 和发生时间。此告警通道独立于 `audit_events` 表，不受审计表触发器或写入失败的影响。
 
-### 8.2 Metadata 允许列表（合并字段表，16 字段）
+### 8.2 Metadata 允许列表（13 字段 + credential.rotate 专用 expected_version/actual_version）
 
 下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段。P0-04 的 `summary`、`rows_affected`、`cached` 三个自由文本字段无生产者且与事件矩阵不符，已随 WEB-23 强类型 metadata 迁移移除，不再作为审计允许字段（CodeRabbit #22）。完整允许列表为 13 字段 + credential.rotate 专用 `expected_version`/`actual_version`：
 
