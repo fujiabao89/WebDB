@@ -72,6 +72,7 @@ func (t *pgMetadataTx) CreateExecution(ctx context.Context, e *Execution) error 
 }
 
 // UpdateExecution 在事务中更新 execution 状态。
+// 成功后回写 e.ResultExpiresAt，使内存对象与数据库行一致（VuXZi）。
 func (t *pgMetadataTx) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *Execution) error {
 	expiry := e.ResultExpiresAt
 	if e.ResultRef != nil && *e.ResultRef != "" && expiry == nil {
@@ -93,6 +94,7 @@ func (t *pgMetadataTx) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *E
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("execution %s not found in workspace", e.ID)
 	}
+	e.ResultExpiresAt = expiry
 	return nil
 }
 

@@ -54,9 +54,9 @@ var sensitiveLogPatterns = []struct {
 	{regexp.MustCompile(`(?i)("?(?:secret|token|api[_-]?key)"?)\s*[=:]\s*("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;]+)`), "$1=[redacted]"},
 	// DSN scheme 大小写不敏感（(?i)），覆盖 POSTGRES:// 等大写形式（vti-LIx）。
 	{regexp.MustCompile(`(?i)(postgres|postgresql|mysql|redis)://[^@\s]+@`), "$1://[redacted]@"},
-	// dot-all（(?s)）：多行 PEM 私钥完整替换，而非仅首行（vti-EhP）。
-	// [A-Z ]+ 同时匹配 "PRIVATE KEY"/"RSA PRIVATE KEY"/"EC PRIVATE KEY" 等算法名。
-	{regexp.MustCompile(`(?s)-----BEGIN [A-Z ]+-----.*?(-----END [A-Z ]+-----|$)`), "[redacted: private key]"},
+	// dot-all（(?s)）：多行 PEM 私钥块完整替换，而非仅首行（vti-EhP）。
+	// 仅匹配 PRIVATE KEY 块（可选 RSA/EC/OPENSSH 等算法前缀），排除 CERTIFICATE/PUBLIC KEY（VuXZm）。
+	{regexp.MustCompile(`(?s)-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----.*?(-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----|$)`), "[redacted: private key]"},
 }
 
 // RedactSensitive 对日志/错误文本做统一脱敏，禁止原始敏感内容进入结构化日志

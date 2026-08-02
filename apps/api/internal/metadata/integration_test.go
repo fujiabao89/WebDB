@@ -870,6 +870,33 @@ func TestAudit_NonObjectMetadata_Rejected(t *testing.T) {
 	}
 }
 
+// TestAudit_DBConstraintsRejectInvalidActionAndMetadata 绕过应用层校验，
+// 直接执行 INSERT 验证 audit_events 的数据库 CHECK 约束（空 action、非对象 metadata），
+// 防止约束回退在应用层短路下失去集成覆盖（VuXZk）。
+func TestAudit_DBConstraintsRejectInvalidActionAndMetadata(t *testing.T) {
+	db, _, _, ws, _, _, _, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 空 action → CHECK (btrim(action) <> '')
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO audit_events
+			(workspace_id, actor_type, action, resource_type, resource_id, outcome, metadata, trace_id, occurred_at)
+		VALUES ($1, 'system', '', 'conn', 'r1', 'succeeded', '{}', 'trace-db-001', now())`, ws.ID)
+	if err == nil {
+		t.Fatal("期望空 action 被数据库 CHECK 约束拒绝")
+	}
+
+	// 非对象 metadata → CHECK (jsonb_typeof(metadata) = 'object')
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO audit_events
+			(workspace_id, actor_type, action, resource_type, resource_id, outcome, metadata, trace_id, occurred_at)
+		VALUES ($1, 'system', 'connection.test', 'conn', 'r1', 'succeeded', '"not_object"', 'trace-db-002', now())`, ws.ID)
+	if err == nil {
+		t.Fatal("期望非对象 metadata 被数据库 CHECK 约束拒绝")
+	}
+}
+
 func TestAudit_UpdateRejected(t *testing.T) {
 	db, store, _, ws, _, _, conn, cleanup := setupFull(t)
 	defer cleanup()

@@ -163,16 +163,17 @@ func TestAuditMetadataValidate_NestedObject(t *testing.T) {
 	}
 }
 
-// TestAuditMetadataValidate_TooLong 验证超长值 fail-closed 拒绝。
-// summary 为 D10 已批准字段（P0-04 兼容，<=255 字节）；超过 255 字节必须被格式校验拒绝。
-func TestAuditMetadataValidate_TooLong(t *testing.T) {
-	long := make([]byte, 300)
-	for i := range long {
-		long[i] = 'x'
-	}
-	raw, _ := json.Marshal(map[string]any{"summary": string(long)})
-	if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, raw); err == nil {
-		t.Fatal("overlong summary should be rejected")
+// TestAuditMetadataValidate_DeadFieldRejected 验证 D10 批准的兼容字段
+// （summary/cached）不在任何 action 允许集内，对 ActionSQLExecute 必须按未知字段
+// fail-closed 拒绝（VuXZc；字段保留为 D10 契约一部分，但不被任何事件允许）。
+func TestAuditMetadataValidate_DeadFieldRejected(t *testing.T) {
+	for _, raw := range []string{
+		`{"summary":"x"}`,
+		`{"cached":true}`,
+	} {
+		if err := ValidateAuditEventMetadata(ActionSQLExecute, OutcomeFailed, json.RawMessage(raw)); err == nil {
+			t.Fatalf("dead field should be rejected for action %s: %s", ActionSQLExecute, raw)
+		}
 	}
 }
 
@@ -190,7 +191,7 @@ func TestAuditMetadataValidate_InvalidFormats(t *testing.T) {
 		{name: "envelope_suite unknown", action: ActionCredentialCreate, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","secret_version":1,"envelope_suite":"AES-256-XYZ","kek_version":1}`},
 		{name: "secret_version not positive", action: ActionCredentialCreate, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","secret_version":0,"envelope_suite":"AES256GCM-v1","kek_version":1}`},
 		{name: "row_count negative", action: ActionSQLExecute, raw: `{"statement_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","row_count":-1}`},
-		{name: "new_version not > old_version", action: ActionCredentialRotate, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","old_version":2,"new_version":2}`},
+		{name: "new_version not > old_version", action: ActionCredentialRotate, raw: `{"secret_ref":"123e4567-e89b-42d3-a456-426614174000","error_code":"version_conflict","old_version":2,"new_version":2}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

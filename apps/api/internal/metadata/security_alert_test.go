@@ -69,19 +69,24 @@ func TestRedactSensitive_JSONValue(t *testing.T) {
 	}
 }
 
-// TestRedactSensitive_UppercaseDSN 验证大写 DSN scheme 被脱敏（vti-LIx）。
+// TestRedactSensitive_UppercaseDSN 验证大写 DSN scheme 被脱敏（vti-LIx），
+// 并独立断言密码子串不出现，防止仅用户名被替换而密码泄漏（VuXZl）。
 func TestRedactSensitive_UppercaseDSN(t *testing.T) {
 	cases := []struct {
-		input string
-		value string
+		input    string
+		userPass string
+		password string
 	}{
-		{`POSTGRES://dbuser:secretpw@db.invalid:5432/webdb`, `dbuser:secretpw`},
-		{`MYSQL://dbuser:hunter2@db.invalid:3306/db`, `dbuser:hunter2`},
+		{`POSTGRES://dbuser:secretpw@db.invalid:5432/webdb`, `dbuser:secretpw`, `secretpw`},
+		{`MYSQL://dbuser:hunter2@db.invalid:3306/db`, `dbuser:hunter2`, `hunter2`},
 	}
 	for _, c := range cases {
 		out := RedactSensitive(c.input)
-		if strings.Contains(out, c.value) {
+		if strings.Contains(out, c.userPass) {
 			t.Errorf("DSN user:pass leaked: input=%q out=%q", c.input, out)
+		}
+		if strings.Contains(out, c.password) {
+			t.Errorf("DSN password leaked: input=%q out=%q", c.input, out)
 		}
 		if !strings.Contains(out, "[redacted]") {
 			t.Errorf("DSN not redacted: input=%q out=%q", c.input, out)

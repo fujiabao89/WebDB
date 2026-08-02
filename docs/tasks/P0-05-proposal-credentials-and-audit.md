@@ -630,9 +630,9 @@ KEK 不得出现在：
 
 > **E17（审计写入失败）**：不持久化为 audit_events 行（失败的审计系统不可写入）。作为独立安全告警通过应用日志/监控通道发出，携带 `trace_id`、`error_code` 和发生时间。此告警通道独立于 `audit_events` 表，不受审计表触发器或写入失败的影响。
 
-### 8.2 Metadata 允许列表（合并字段表，16 字段）
+### 8.2 Metadata 允许列表（16 字段 + credential.rotate 专用 expected_version/actual_version，共 18 个字段）
 
-下表列出 P0-05 方案涉及的完整 metadata 字段。其中 6 个为 P0-05 新增凭证字段，7 个为 P0-04 现有字段（已在此表中），另有 3 个 P0-04 现有字段（`summary`、`rows_affected`、`cached`）仅由 P0-04 维护且不适用于凭证事件，未重复列出。WEB-23 实现时将 sanitizer 扩展至完整 16 字段（6 新增 + 10 现有）并添加兼容性测试：
+下表列出 P0-05 方案涉及的完整 metadata 字段。16 字段允许列表包含 6 个 P0-05 新增凭证字段与 10 个 P0-04 现有字段；其中 P0-04 的 `summary`、`rows_affected`、`cached` 三个字段由 P0-04 维护且不适用于凭证事件（表中未重复列出）。另加 credential.rotate 专用的 `expected_version`/`actual_version`（E5 专用，不属于原 16 字段拆解），共 18 个字段（VuXZq）：
 
 | 键 | 类型 | 约束 | 适用事件 | 来源 |
 |---|---|---|---|---|
