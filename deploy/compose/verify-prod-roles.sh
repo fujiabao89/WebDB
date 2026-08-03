@@ -28,7 +28,7 @@ if [ -n "${PGHOSTADDR:-}" ]; then
   fail "PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址）；请改用 PGHOST 指定目标"
 fi
 if [ -n "${PGSERVICE:-}" ] || [ -n "${PGSERVICEFILE:-}" ] || [ -n "${PGSYSCONFDIR:-}" ]; then
-  fail "PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）；当前 PGSERVICE=[${PGSERVICE:-}] PGSERVICEFILE=[${PGSERVICEFILE:-}] PGSYSCONFDIR=[${PGSYSCONFDIR:-}]"
+  fail "PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）"
 fi
 
 # 密码非空且非占位符（与 01-create-prod-roles.sh 一致）

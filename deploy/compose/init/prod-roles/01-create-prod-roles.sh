@@ -46,6 +46,11 @@ if [ -n "${PGHOSTADDR:-}" ]; then
   echo "错误: PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址）；请改用 PGHOST 指定目标" >&2
   exit 1
 fi
+# PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 可通过服务文件含 hostaddr 绕过 PGHOST，拒绝非空值（PR37 八/九轮审查项）
+if [ -n "${PGSERVICE:-}" ] || [ -n "${PGSERVICEFILE:-}" ] || [ -n "${PGSYSCONFDIR:-}" ]; then
+  echo "错误: PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）" >&2
+  exit 1
+fi
 
 # --- 前置要求：setsid 必须可用（PR37 三轮审查项）---
 # 实测 psql \password 在存在控制终端时读取 /dev/tty 而非 stdin；必须用 setsid 分离控制终端，

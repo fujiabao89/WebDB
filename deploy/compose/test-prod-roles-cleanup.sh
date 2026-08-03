@@ -55,9 +55,9 @@ validate_target() {
   if [ -n "${PGHOSTADDR:-}" ]; then
     fail "PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址），当前: [$PGHOSTADDR]"
   fi
-  # PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 可通过服务文件指定 hostaddr 绕过 PGHOST，必须为空（PR37 八轮审查项）
+  # PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 可通过服务文件指定 hostaddr 绕过 PGHOST，必须为空（PR37 八/九轮审查项）
   if [ -n "${PGSERVICE:-}" ] || [ -n "${PGSERVICEFILE:-}" ] || [ -n "${PGSYSCONFDIR:-}" ]; then
-    fail "PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）；当前 PGSERVICE=[${PGSERVICE:-}] PGSERVICEFILE=[${PGSERVICEFILE:-}] PGSYSCONFDIR=[${PGSYSCONFDIR:-}]"
+    fail "PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）"
   fi
 }
 validate_target
@@ -81,7 +81,7 @@ check_residuals() {
     || fail "残留未清理: workspaces=$ws users=$users probe_roles=$roles"
 }
 
-echo "=== 回归 1/6：成功路径（exit 0 + 零残留） ==="
+echo "=== 回归 1/7：成功路径（exit 0 + 零残留） ==="
 set +e
 bash "$VERIFY_SCRIPT" >"$WS/success.log" 2>&1
 rc=$?
@@ -90,7 +90,7 @@ if [ "$rc" -ne 0 ]; then tail -8 "$WS/success.log"; fail "成功路径 exit=$rc 
 check_residuals
 echo "OK: 成功路径 exit 0 且零残留"
 
-echo "=== 回归 2/6：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
+echo "=== 回归 2/7：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/fail.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nexit 3  # 注入失败点/' "$WS/fail.sh"
 set +e
@@ -101,7 +101,7 @@ if [ "$rc" -ne 3 ]; then tail -8 "$WS/fail.log"; fail "失败路径 exit=$rc 期
 check_residuals
 echo "OK: 失败路径保留退出码 3 且零残留"
 
-echo "=== 回归 3/6：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
+echo "=== 回归 3/7：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/int.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nkill -TERM "$$"  # 注入中断（真实信号路径）/' "$WS/int.sh"
 set +e
@@ -112,7 +112,7 @@ if [ "$rc" -ne 130 ]; then tail -8 "$WS/int.log"; fail "中断路径 exit=$rc �
 check_residuals
 echo "OK: 中断路径（TERM 信号驱动）exit 130 且零残留"
 
-echo "=== 回归 4/6：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
+echo "=== 回归 4/7：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
 # 用只含临时空目录的私有 PATH 模拟无 setsid 环境：
 #   - 避免原 PATH 过滤管道（tr|grep|paste）在 set -euo pipefail 下无匹配返回非零导致脚本退出，
 #   - 避免过滤后 PATH 仍含其他位置的 setsid；
@@ -138,7 +138,7 @@ if [ "$rc" -eq 0 ]; then fail "缺失 setsid 时 create 应失败（got exit 0�
 grep -q "需要 setsid" "$WS/setsid.log" || fail "缺失 setsid 错误信息缺失: $(tail -3 "$WS/setsid.log")"
 echo "OK: 缺失 setsid 时 create 拒绝（exit=$rc）且给出明确错误"
 
-echo "=== 回归 5/6：目标约束负向回归（远程 PGHOST / 非法端口连接前拒绝） ==="
+echo "=== 回归 5/7：目标约束负向回归（远程 PGHOST / 非法端口连接前拒绝） ==="
 if ( PGHOST="203.0.113.10" PGPORT="5432" validate_target ) >/dev/null 2>&1; then
   fail "负向断言失败：远程 PGHOST=[203.0.113.10] 应被拒绝"
 fi
@@ -150,7 +150,7 @@ if ( PGHOSTADDR="203.0.113.20" validate_target ) >/dev/null 2>&1; then
 fi
 echo "OK: 远程 PGHOST / 非法端口 / 非空 PGHOSTADDR 在连接前被拒绝"
 
-echo "=== 回归 6/6：服务文件绕过负向回归（PGSERVICEFILE 含 hostaddr 连接前拒绝） ==="
+echo "=== 回归 6/7：服务文件绕过负向回归（PGSERVICEFILE 含 hostaddr 连接前拒绝） ==="
 # 临时 pg_service.conf：条目含 hostaddr，验证 PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 被连接前拒绝
 cat >"$WS/pg_service.conf" <<EOF
 [malicious]
@@ -168,5 +168,41 @@ if ( PGSYSCONFDIR="$WS" validate_target ) >/dev/null 2>&1; then
 fi
 echo "OK: PGSERVICEFILE/PGSERVICE/PGSYSCONFDIR 在连接前被拒绝"
 
+echo "=== 回归 7/7：真实入口 PGSERVICE 连接前拒绝（psql 未被调用） ==="
+# psql stub：若真实入口在拒绝前调用 psql，则写入标记文件（检测连接尝试）
+mkdir -p "$WS/stubbin"
+cat >"$WS/stubbin/psql" <<'STUB'
+#!/bin/sh
+echo "psql invoked" >>"$STUB_MARKER"
+exit 127
+STUB
+chmod +x "$WS/stubbin/psql"
+STUB_MARKER="$WS/psql_invoked.txt"
+
+# 运行真实入口（create/verify）并断言：非零退出且 psql 未被调用
+run_entry_rejected() {
+  local label="$1" log="$2"; shift 2
+  rm -f "$STUB_MARKER"
+  local rc=0
+  env STUB_MARKER="$STUB_MARKER" PATH="$WS/stubbin:$PATH" "$@" >"$WS/$log" 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "$label 在 PGSERVICE 配置下应失败（got exit 0）"
+  [ ! -f "$STUB_MARKER" ] || fail "$label 在拒绝前调用了 psql（stub 被调用）"
+  echo "OK: $label 在首次数据库连接前拒绝（exit=$rc，psql 未调用）"
+}
+
+i=0
+for svcvar in "PGSERVICEFILE=$WS/pg_service.conf" "PGSERVICE=malicious" "PGSYSCONFDIR=$WS"; do
+  i=$((i + 1))
+  run_entry_rejected "create($svcvar)" "create_svc_$i.log" "$svcvar" WEBDB_PRODUCTION_DEPLOY=1 \
+    POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME" \
+    WEBDB_APP_PASSWORD="$APP_PASSWORD" WEBDB_AUDIT_PASSWORD="$AUDIT_PASSWORD" \
+    bash "$CREATE_SCRIPT"
+  run_entry_rejected "verify($svcvar)" "verify_svc_$i.log" "$svcvar" \
+    POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME" \
+    WEBDB_APP_USER="${WEBDB_APP_USER:-webdb_app_runtime}" WEBDB_APP_PASSWORD="$APP_PASSWORD" \
+    WEBDB_AUDIT_USER="${WEBDB_AUDIT_USER:-webdb_audit_writer}" WEBDB_AUDIT_PASSWORD="$AUDIT_PASSWORD" \
+    bash "$VERIFY_SCRIPT"
+done
+
 echo ""
-echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归 / 服务文件绕过）。"
+echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归 / 服务文件绕过 / 真实入口连接前拒绝）。"
