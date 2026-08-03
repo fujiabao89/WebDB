@@ -115,14 +115,28 @@ func (c *OperationContext) Validate() error {
     if c.resourceID == "" {
         return errors.New("operation context: empty resource id")
     }
-    if c.resource == "connection" && c.connectionID == nil {
-        return errors.New("operation context: connection-scoped but missing connection id")
+    if c.action == "" {
+        return errors.New("operation context: empty action")
+    }
+    if c.actorType == "" {
+        return errors.New("operation context: empty actor type")
+    }
+    if c.outcome == "" {
+        return errors.New("operation context: empty outcome")
+    }
+    // connection-scoped：connectionID 为 nil 或指向 uuid.Nil 均拒绝（fail-closed）。
+    if c.resource == "connection" && (c.connectionID == nil || *c.connectionID == uuid.Nil) {
+        return errors.New("operation context: connection-scoped but missing or zero connection id")
     }
     if c.actorID == uuid.Nil || c.traceID == "" {
         return errors.New("operation context: missing actor or trace")
     }
     return nil
 }
+
+// 负向测试覆盖：nil 上下文、空 mutationID、零 workspace、非法 resource、空 resourceID、
+// 空 action/actorType/outcome、connection-scoped 的 connectionID nil 或 uuid.Nil、
+// 缺 actor/trace——断言 mutation 不执行、事务回滚，且保留 fail-closed workspace/connection 拒绝行为。
 
 func (c *OperationContext) MutationID() string        { return c.mutationID }
 func (c *OperationContext) WorkspaceID() uuid.UUID    { return c.workspaceID }
