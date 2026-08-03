@@ -67,9 +67,13 @@ func runServe() error {
 
 // ---- migrate --------------------------------------------------------------
 
+// metaDSN 返回元数据库迁移连接串。
+// 生产环境：META_DB_USER 为运行时非超级用户（webdb_app_runtime，API 运行时连接），
+// 迁移需 DDL 权限，使用独立的 META_MIGRATE_USER/PASSWORD（管理员）；未设时回退到
+// META_DB_USER/PASSWORD（本地开发默认，见 PR37 检定）。
 func metaDSN() string {
-	user := envOr("META_DB_USER", "webdb")
-	password := envOr("META_DB_PASSWORD", "change_me")
+	user := envOr("META_MIGRATE_USER", envOr("META_DB_USER", "webdb"))
+	password := envOr("META_MIGRATE_PASSWORD", envOr("META_DB_PASSWORD", "change_me"))
 	host := envOr("META_DB_HOST", "webdb-meta")
 	port := envOr("META_DB_PORT", "5432")
 	dbname := envOr("META_DB_NAME", "webdb_meta")

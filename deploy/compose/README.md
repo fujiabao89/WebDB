@@ -169,7 +169,8 @@ export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 
 - **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。脚本**强制 `password_encryption=scram-sha-256`**（非 scram 立即退出）并**强制要求 `setsid` 可用**（`\password` 有控制终端时读 `/dev/tty` 而非 stdin，交互式重跑会挂起；缺失 setsid 即拒绝执行，不回退），故校验器为 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。
 - **负向测试**：`verify-prod-roles.sh` 第 10 步在 `log_statement=all` 下用哨兵密码验证明文不进入日志（含正对照证明日志记录/读取有效），并对 LOG_PROBE 做登录断言确认密码实际生效。需超级用户，且需指定日志来源：生产环境设置 `VERIFY_PROD_LOG_SOURCE`（输出日志行的命令字符串）；compose 本地验证会自动探测 `webdb-meta` 容器并走 `docker logs`（命令数组直接调用）。无法确定日志来源时该步骤明确失败，不静默通过。
-- **连接断言**：verify 步骤 0 对 `WEBDB_APP_USER`/`WEBDB_AUDIT_USER` 做 `SELECT current_user` 断言（必须是目标非超级用户、`is_superuser=off`），fail-closed 防止误用超级用户连接。生产 API 应将 `META_DB_USER` 配置为 `webdb_app_runtime`（独立审计连接用 `webdb_audit_writer`）；应用连接切换本身属本 PR 非目标、需单独任务（P0 下 API 迁移以 META_DB_USER 运行）。
+- **连接断言**：verify 步骤 0 对 `WEBDB_APP_USER`/`WEBDB_AUDIT_USER` 做 `SELECT current_user` 断言（必须是目标非超级用户、`is_superuser=off`），fail-closed 防止误用超级用户连接。
+- **API 连接**：生产 API 的 `META_DB_USER` 已配置为 `webdb_app_runtime`（运行时非超级用户，独立审计连接用 `webdb_audit_writer`）；迁移需 DDL 权限，使用独立的 `META_MIGRATE_USER`/`META_MIGRATE_PASSWORD`（管理员），见 `docker-compose.yml` 与 `metaDSN()`（未设时回退 `META_DB_*` 保持本地开发向后兼容）。
 - **清理回归测试**：`test-prod-roles-cleanup.sh` 覆盖 verify 的成功 / 失败 / 中断三条清理路径（中断为 TERM 真实信号，退出码与零残留断言），并覆盖 create 缺失 setsid 的失败路径。需与 verify 相同的环境变量，且生产角色已创建。
 - **所有权 fail-closed**：`01-create-prod-roles.sh` 在收敛前检测 `webdb_app_runtime`/`webdb_audit_writer` 是否持有数据库/模式/对象所有权，若持有则拒绝继续（错误提示先由受控管理员转移所有权）。成员关系收敛会撤销**所有**涉及任一生产角色的未批准父角色成员关系，不只两者之间。
 - 约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
