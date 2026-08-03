@@ -165,8 +165,9 @@ export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 
 **安全说明（PR37 审查后）：**
 
-- **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。psql 在客户端按 SCRAM 计算口令校验器，SQL 文本与服务器日志中只有 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。
-- **负向测试**：`verify-prod-roles.sh` 第 10 步在 `log_statement=all` 下用哨兵密码验证明文不进入日志（含正对照证明日志记录/读取有效）。需超级用户，且需指定日志来源：生产环境设置 `VERIFY_PROD_LOG_SOURCE`（输出日志行的命令）；compose 本地验证会自动探测 `webdb-meta` 容器并走 `docker logs`。无法确定日志来源时该步骤明确失败，不静默通过。
+- **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。脚本**强制 `password_encryption=scram-sha-256`**（非 scram 立即退出），故校验器为 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。`\password` 在存在控制终端时会读 `/dev/tty` 而非 stdin（交互式重跑会挂起），脚本用 `setsid` 将 psql 放入新会话以分离控制终端（无 setsid 时回退原管道）。
+- **负向测试**：`verify-prod-roles.sh` 第 10 步在 `log_statement=all` 下用哨兵密码验证明文不进入日志（含正对照证明日志记录/读取有效），并对 LOG_PROBE 做登录断言确认密码实际生效。需超级用户，且需指定日志来源：生产环境设置 `VERIFY_PROD_LOG_SOURCE`（输出日志行的命令字符串）；compose 本地验证会自动探测 `webdb-meta` 容器并走 `docker logs`（命令数组直接调用）。无法确定日志来源时该步骤明确失败，不静默通过。
+- **清理回归测试**：`test-prod-roles-cleanup.sh` 覆盖 verify 的成功 / 失败 / 中断三条清理路径（退出码与零残留断言）。需与 verify 相同的环境变量，且生产角色已创建。
 - **所有权 fail-closed**：`01-create-prod-roles.sh` 在收敛前检测 `webdb_app_runtime`/`webdb_audit_writer` 是否持有数据库/模式/对象所有权，若持有则拒绝继续（错误提示先由受控管理员转移所有权）。成员关系收敛会撤销**所有**涉及任一生产角色的未批准父角色成员关系，不只两者之间。
 - 约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
 - 角色拆分完成后，API 应改用 `webdb_app_runtime` 连接，不再使用 SUPERUSER。

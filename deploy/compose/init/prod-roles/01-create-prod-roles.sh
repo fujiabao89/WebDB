@@ -41,11 +41,20 @@ if [ "${POSTGRES_DB:-}" != "webdb_meta" ]; then
   echo "错误: POSTGRES_DB 必须为 webdb_meta（生产元数据库），当前: ${POSTGRES_DB:-<空>}" >&2
   exit 1
 fi
-# 密码一律经 psql \password 设置：psql 在客户端按 SCRAM 计算口令校验器，
-# 发送给服务器的 SQL 文本与日志中只有校验器（SCRAM-SHA-256$...），明文密码不进 SQL 文本、不落日志。
-# 实测 PostgreSQL 在 log_statement=all 下**不会**对 CREATE/ALTER ROLE 的 PASSWORD 子句脱敏，
-# 因此不能再用 format('%L')/getenv 拼接含明文的 DDL；\password 的明文只经 stdin 管道进入 psql。
+# 密码一律经 psql \password 设置：psql 按服务器 password_encryption 计算口令校验器。
+# 本脚本强制 password_encryption=scram-sha-256（见下方校验），故校验器为 SCRAM-SHA-256$...，
+# 明文密码不进 SQL 文本、不落日志。实测 PostgreSQL 在 log_statement=all 下**不会**对
+# CREATE/ALTER ROLE 的 PASSWORD 子句脱敏，因此不能再用 format('%L')/getenv 拼接含明文的 DDL；
+# \password 的明文只经 stdin 管道进入 psql。
 export PGPASSWORD="$POSTGRES_PASSWORD"
+
+# --- 强制 SCRAM-SHA-256：\password 依赖服务器的 password_encryption，md5 不满足安全前提 ---
+pw_encryption=$(PGPASSWORD="$POSTGRES_PASSWORD" psql -v ON_ERROR_STOP=1 -tA \
+  -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SHOW password_encryption;")
+if [ "$pw_encryption" != "scram-sha-256" ]; then
+  echo "错误: password_encryption 必须为 scram-sha-256（当前: ${pw_encryption:-<空>}），拒绝创建/设置角色密码" >&2
+  exit 1
+fi
 
 # --- 创建角色（幂等：已存在则跳过；不带密码，密码随后经 \password 设置）---
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
@@ -58,11 +67,20 @@ WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'webdb_audit_w
 EOSQL
 
 # --- 应用当前密码（幂等重跑也刷新；明文只经 stdin 管道交给 \password，不进入 SQL 文本/命令行/日志）---
+# 实测 psql \password 在存在控制终端时读取 /dev/tty 而非 stdin（交互式重跑会挂起）。
+# 用 setsid 将 psql 放入新会话以分离控制终端，确保它从 stdin 管道读取密码；无 setsid 时回退原管道。
 set_password() {
   local role="$1" pw="$2"
-  if ! printf '%s\n%s\n' "$pw" "$pw" | psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-      -c '\password '"$role" >/dev/null 2>&1; then
-    echo "错误: 设置 $role 密码失败（psql \\password 返回非零）" >&2
+  if command -v setsid >/dev/null 2>&1; then
+    printf '%s\n%s\n' "$pw" "$pw" | setsid psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+        -c '\password '"$role" >/dev/null 2>&1
+  else
+    printf '%s\n%s\n' "$pw" "$pw" | psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+        -c '\password '"$role" >/dev/null 2>&1
+  fi
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "错误: 设置 $role 密码失败（psql \\password 返回 $rc）" >&2
     exit 1
   fi
 }
@@ -110,7 +128,8 @@ REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM webdb_app_runtime, 
 REVOKE ALL PRIVILEGES ON SCHEMA public FROM webdb_app_runtime, webdb_audit_writer;
 -- 撤销**所有**未批准的父角色成员关系（不只两者之间）：任一生产角色作为 member 或被授予者
 -- 出现即移除，收敛到无父角色/无被授权者（PR37 审查项）。
-SELECT format('REVOKE %I FROM %I', m.roleid::regrole, m.member::regrole)
+-- 用 %s 而非 %I：regrole 输出已自带标识符引号，%I 会对需引号的角色双重引号。
+SELECT format('REVOKE %s FROM %s', m.roleid::regrole, m.member::regrole)
 FROM pg_catalog.pg_auth_members m
 WHERE m.member IN ('webdb_app_runtime'::regrole, 'webdb_audit_writer'::regrole)
    OR m.roleid IN ('webdb_app_runtime'::regrole, 'webdb_audit_writer'::regrole)

@@ -141,6 +141,7 @@ cleanup_data() {
 
 # 统一清理：失败/中断（EXIT/INT/TERM）也清理；失败路径保留原始退出状态，
 # 正常路径清理失败则脚本整体失败（不再用 || true 掩盖，见 PR37 审查）。
+# 用显式 exit 设置进程退出码，不依赖 EXIT trap 的 return 值修改进程状态（PR37 二轮审查项）。
 cleanup_all() {
   local orig_rc=$?
   cleanup_probe || true
@@ -148,9 +149,9 @@ cleanup_all() {
   local data_rc=0
   cleanup_data || data_rc=1
   if [ "$orig_rc" -ne 0 ]; then
-    return "$orig_rc"   # 失败路径：不覆盖原始退出码
+    exit "$orig_rc"   # 失败路径：显式保留原始退出码
   fi
-  return "$data_rc"     # 正常路径：清理失败则整体非零退出
+  exit "$data_rc"     # 正常路径：显式以清理结果退出（清理失败则整体非零）
 }
 # INT/TERM：清理后以 130 中断退出，不继续成功执行
 cleanup_and_exit() {
@@ -245,29 +246,45 @@ fi
 echo "=== 10. 密码不得出现在完整语句日志中（负向测试，log_statement=all） ==="
 # 验证生产角色密码经 \password 设置后，明文口令在 log_statement=all 下不会进入服务器日志
 # （实测 PostgreSQL 不对 CREATE/ALTER ROLE 的 PASSWORD 子句脱敏，故必须证明 \password 只发送
-#   SCRAM 校验器）。需要可读取的服务器日志来源：
-#     VERIFY_PROD_LOG_SOURCE：输出日志行的命令（生产推荐）；否则自动用 docker logs 定位 webdb-meta。
+#   口令校验器；本脚本强制 password_encryption=scram-sha-256，即 SCRAM 校验器）。需要可读取的
+#   服务器日志来源：
+#     VERIFY_PROD_LOG_SOURCE：输出日志行的命令字符串（eval 执行；生产推荐）；
+#     否则自动用 docker logs 定位 webdb-meta（命令数组直接调用，不经 eval）。
 # 日志来源无法确定时本步骤明确失败，不静默通过。
-log_cmd=""
+log_eval_cmd=""      # VERIFY_PROD_LOG_SOURCE 命令字符串（保留 eval 契约）
+log_cmd=()           # docker logs 命令数组（直接调用，避免拼接后 eval）
 if [ -n "${VERIFY_PROD_LOG_SOURCE:-}" ]; then
-  log_cmd="$VERIFY_PROD_LOG_SOURCE"
+  log_eval_cmd="$VERIFY_PROD_LOG_SOURCE"
 else
   meta_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 'webdb-meta')
   if [ -n "$meta_container" ]; then
-    log_cmd="docker logs --since 10m $meta_container 2>&1"
+    log_cmd=(docker logs --since 10m "$meta_container")
   fi
 fi
-[ -n "$log_cmd" ] || fail "无法确定服务器日志来源：请设置 VERIFY_PROD_LOG_SOURCE（输出日志行的命令）"
+if [ -z "$log_eval_cmd" ] && [ "${#log_cmd[@]}" -eq 0 ]; then
+  fail "无法确定服务器日志来源：请设置 VERIFY_PROD_LOG_SOURCE（输出日志行的命令）"
+fi
+
+# 读取服务器日志（按来源选择调用方式）
+read_server_log() {
+  if [ -n "$log_eval_cmd" ]; then
+    eval "$log_eval_cmd" 2>/dev/null || true
+  else
+    "${log_cmd[@]}" 2>&1 || true
+  fi
+}
 
 LOG_PROBE="webdb_pw_probe_$$"
 CTRL_SENTINEL="VERIFY_LOG_CTRL_$$_plain"     # 正对照：明文 CREATE ROLE PASSWORD 应出现在日志
 PASS_SENTINEL="VERIFY_LOG_PASS_$$_secret"    # 被测机制：\password 设置，不得出现在日志
 
-# 创建临时角色（不设密码；\password 设置密码供登录）
+# 创建临时角色（不设密码；\password 设置密码供登录；GRANT CONNECT 供登录断言，
+# 因为 create 脚本已 REVOKE PUBLIC 的 CONNECT）
 PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
   -v ON_ERROR_STOP=1 >/dev/null 2>&1 \
   -c "DROP ROLE IF EXISTS \"$LOG_PROBE\";" \
-  -c "CREATE ROLE \"$LOG_PROBE\" LOGIN;"
+  -c "CREATE ROLE \"$LOG_PROBE\" LOGIN;" \
+  -c "GRANT CONNECT ON DATABASE \"$DB_NAME\" TO \"$LOG_PROBE\";"
 
 # 正对照：同一会话开启 log_statement=all，明文 CREATE ROLE ... PASSWORD 应被记录
 if ! PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
@@ -280,13 +297,34 @@ if ! PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_U
 fi
 
 # 被测机制：与 01-create-prod-roles.sh 相同的 \password（会话内开启 log_statement=all）
-printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
-  -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1
+# 前提校验：password_encryption 必须为 scram-sha-256（与 create 脚本一致），
+# 使"\password 仅发送 SCRAM 校验器"成立。
+pw_encryption=$(PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -tA \
+  -c "SHOW password_encryption;")
+[ "$pw_encryption" = "scram-sha-256" ] || fail "password_encryption 必须为 scram-sha-256（当前: ${pw_encryption:-<空>}），负向测试前提不成立"
+# setsid 分离控制终端，确保 \password 从 stdin 管道读取 PASS_SENTINEL（实测有控制终端时读 /dev/tty 会挂起）
+if command -v setsid >/dev/null 2>&1; then
+  printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | setsid psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1
+else
+  printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1
+fi
+PASS_SET_RC=$?
+if [ "$PASS_SET_RC" -ne 0 ]; then
+  fail "设置 LOG_PROBE 密码失败（psql \\password 返回 $PASS_SET_RC）"
+fi
+# 登录断言：用 PASS_SENTINEL 登录确认密码确实已设置（\password 返回 0 ≠ 设置成功）
+if ! PGPASSWORD="$PASS_SENTINEL" psql -w -h "$PGHOST" -p "$PGPORT" -U "$LOG_PROBE" -d "$DB_NAME" \
+    -v ON_ERROR_STOP=1 -c "SELECT 1;" >/dev/null 2>&1; then
+  fail "LOG_PROBE 用 PASS_SENTINEL 登录失败——密码未实际设置"
+fi
+echo "OK: LOG_PROBE 密码已设置（PASS_SENTINEL 登录成功）"
 
 # 读取日志（最多等 5s 让日志落盘），断言正对照出现、被测哨兵不出现
 LOGS=""
 for _ in 1 2 3 4 5; do
-  LOGS=$(eval "$log_cmd" 2>/dev/null || true)
+  LOGS=$(read_server_log)
   echo "$LOGS" | grep -qF "$CTRL_SENTINEL" && break
   sleep 1
 done
