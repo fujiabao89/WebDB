@@ -33,6 +33,20 @@ validate_pw WEBDB_APP_PASSWORD "$APP_PASSWORD"
 validate_pw WEBDB_AUDIT_PASSWORD "$AUDIT_PASSWORD"
 validate_pw POSTGRES_PASSWORD "$ADMIN_PASSWORD"
 
+# 连接角色断言（fail-closed）：current_user 必须为目标非超级用户角色，防止误用超级用户连接。
+# 与生产 API 连接配置一致（应用连接=webdb_app_runtime；审计连接=webdb_audit_writer，见 PR37 审查项）。
+assert_non_superuser_connection() {
+  local expected="$1" pw="$2" res
+  res=$(PGPASSWORD="$pw" psql -w -h "$PGHOST" -p "$PGPORT" -U "$expected" -d "$DB_NAME" -tA \
+    -c "SELECT current_user || '|' || current_setting('is_superuser');" 2>/dev/null || true)
+  res=$(echo "$res" | tr -d ' \n')
+  [ "$res" = "$expected|off" ] || fail "连接角色断言失败: got [$res], want [$expected|off]（必须为非超级用户目标角色）"
+  echo "OK: $expected 以非超级用户连接（current_user=$expected, is_superuser=off）"
+}
+echo "=== 0. 连接角色断言（API 连接配置 current_user 必须为目标非超级用户） ==="
+assert_non_superuser_connection "$APP_USER" "$APP_PASSWORD"
+assert_non_superuser_connection "$AUDIT_USER" "$AUDIT_PASSWORD"
+
 echo "=== 1. audit_events UPDATE 应被拒绝（应用角色，ACL） ==="
 if PGPASSWORD="$APP_PASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$APP_USER" -d "$DB_NAME" \
     -c "UPDATE audit_events SET action='x' WHERE false;" >/dev/null 2>&1; then
@@ -256,7 +270,10 @@ log_cmd=()           # docker logs 命令数组（直接调用，避免拼接后
 if [ -n "${VERIFY_PROD_LOG_SOURCE:-}" ]; then
   log_eval_cmd="$VERIFY_PROD_LOG_SOURCE"
 else
-  meta_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 'webdb-meta')
+  # || true：set -e 下 docker ps 无匹配返回非零会先于下方 log_cmd 检查退出，
+  # 使"无法确定日志来源"的明确错误不触发（PR37 三轮审查项）。
+  meta_container=""
+  meta_container=$(docker ps --format '{{.Names}}' 2>/dev/null | grep -m1 'webdb-meta') || true
   if [ -n "$meta_container" ]; then
     log_cmd=(docker logs --since 10m "$meta_container")
   fi
@@ -302,15 +319,15 @@ fi
 pw_encryption=$(PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -tA \
   -c "SHOW password_encryption;")
 [ "$pw_encryption" = "scram-sha-256" ] || fail "password_encryption 必须为 scram-sha-256（当前: ${pw_encryption:-<空>}），负向测试前提不成立"
-# setsid 分离控制终端，确保 \password 从 stdin 管道读取 PASS_SENTINEL（实测有控制终端时读 /dev/tty 会挂起）
-if command -v setsid >/dev/null 2>&1; then
-  printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | setsid psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
-    -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1
-else
-  printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
-    -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1
+# 与 create 一致：setsid 必须可用（\password 有控制终端时读 /dev/tty），缺失即 fail
+if ! command -v setsid >/dev/null 2>&1; then
+  fail "需要 setsid 命令（分离控制终端，防止 \password 读 /dev/tty）；当前环境未找到，负向测试中止"
 fi
-PASS_SET_RC=$?
+# 用 setsid 分离控制终端，确保 \password 从 stdin 管道读取 PASS_SENTINEL。
+# 用 `|| PASS_SET_RC=$?` 捕获管道退出码：set -e 下直接检查 $? 会先于失败处理退出（PR37 三轮审查项）。
+PASS_SET_RC=0
+printf '%s\n%s\n' "$PASS_SENTINEL" "$PASS_SENTINEL" | setsid psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+  -v ON_ERROR_STOP=1 -c "SET log_statement='all';" -c '\password '"$LOG_PROBE" >/dev/null 2>&1 || PASS_SET_RC=$?
 if [ "$PASS_SET_RC" -ne 0 ]; then
   fail "设置 LOG_PROBE 密码失败（psql \\password 返回 $PASS_SET_RC）"
 fi

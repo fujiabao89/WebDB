@@ -41,6 +41,15 @@ if [ "${POSTGRES_DB:-}" != "webdb_meta" ]; then
   echo "错误: POSTGRES_DB 必须为 webdb_meta（生产元数据库），当前: ${POSTGRES_DB:-<空>}" >&2
   exit 1
 fi
+
+# --- 前置要求：setsid 必须可用（PR37 三轮审查项）---
+# 实测 psql \password 在存在控制终端时读取 /dev/tty 而非 stdin；必须用 setsid 分离控制终端，
+# 缺失时拒绝继续（fail-closed），不能回退到可能挂起的 stdin 管道。
+if ! command -v setsid >/dev/null 2>&1; then
+  echo "错误: 需要 setsid 命令（分离控制终端，防止 psql \\password 读取 /dev/tty）；当前环境未找到，拒绝设置密码" >&2
+  exit 1
+fi
+
 # 密码一律经 psql \password 设置：psql 按服务器 password_encryption 计算口令校验器。
 # 本脚本强制 password_encryption=scram-sha-256（见下方校验），故校验器为 SCRAM-SHA-256$...，
 # 明文密码不进 SQL 文本、不落日志。实测 PostgreSQL 在 log_statement=all 下**不会**对
@@ -67,18 +76,12 @@ WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'webdb_audit_w
 EOSQL
 
 # --- 应用当前密码（幂等重跑也刷新；明文只经 stdin 管道交给 \password，不进入 SQL 文本/命令行/日志）---
-# 实测 psql \password 在存在控制终端时读取 /dev/tty 而非 stdin（交互式重跑会挂起）。
-# 用 setsid 将 psql 放入新会话以分离控制终端，确保它从 stdin 管道读取密码；无 setsid 时回退原管道。
+# setsid 已在上方强制要求；用 setsid 分离控制终端，确保 \password 从 stdin 管道读取密码。
+# 用 `|| rc=$?` 捕获管道退出码：set -e 下直接检查 $? 会先于失败处理退出（PR37 三轮审查项）。
 set_password() {
-  local role="$1" pw="$2"
-  if command -v setsid >/dev/null 2>&1; then
-    printf '%s\n%s\n' "$pw" "$pw" | setsid psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-        -c '\password '"$role" >/dev/null 2>&1
-  else
-    printf '%s\n%s\n' "$pw" "$pw" | psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
-        -c '\password '"$role" >/dev/null 2>&1
-  fi
-  local rc=$?
+  local role="$1" pw="$2" rc=0
+  printf '%s\n%s\n' "$pw" "$pw" | setsid psql -v ON_ERROR_STOP=1 -w -U "$POSTGRES_USER" -d "$POSTGRES_DB" \
+      -c '\password '"$role" >/dev/null 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "错误: 设置 $role 密码失败（psql \\password 返回 $rc）" >&2
     exit 1

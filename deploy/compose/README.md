@@ -128,6 +128,8 @@ deploy/compose/
 ## 生产角色拆分（R6 / WEB-27）
 
 > ⚠️ **部署边界**：`init/prod-roles/01-create-prod-roles.sh` 与 `verify-prod-roles.sh` 是**生产部署脚本**，不属于本地 Compose 配置。执行前必须显式设置 `WEBDB_PRODUCTION_DEPLOY=1`，避免被误认为本地开发初始化。本地开发请使用 `demo-*` init 脚本。
+>
+> **例外声明**：本章节属于 **ADR-018（有期限例外，截止 2026-09-30 或独立生产部署路径建立时取先）**——P0 阶段尚无独立生产部署路径，生产角色脚本暂驻 `deploy/compose/`，到期必须迁移。详见 [ADR-018](../../docs/adr/ADR-018-prod-roles-under-compose-exception.md)。
 
 `audit_events` 的 UPDATE/DELETE/TRUNCATE 拒绝触发器（`deny_audit_mutation`）可被 SUPERUSER 绕过。
 生产角色拆分创建最小权限运行时角色，使审计不可篡改不依赖单一超级用户：
@@ -165,9 +167,10 @@ export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 
 **安全说明（PR37 审查后）：**
 
-- **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。脚本**强制 `password_encryption=scram-sha-256`**（非 scram 立即退出），故校验器为 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。`\password` 在存在控制终端时会读 `/dev/tty` 而非 stdin（交互式重跑会挂起），脚本用 `setsid` 将 psql 放入新会话以分离控制终端（无 setsid 时回退原管道）。
+- **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。脚本**强制 `password_encryption=scram-sha-256`**（非 scram 立即退出）并**强制要求 `setsid` 可用**（`\password` 有控制终端时读 `/dev/tty` 而非 stdin，交互式重跑会挂起；缺失 setsid 即拒绝执行，不回退），故校验器为 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。
 - **负向测试**：`verify-prod-roles.sh` 第 10 步在 `log_statement=all` 下用哨兵密码验证明文不进入日志（含正对照证明日志记录/读取有效），并对 LOG_PROBE 做登录断言确认密码实际生效。需超级用户，且需指定日志来源：生产环境设置 `VERIFY_PROD_LOG_SOURCE`（输出日志行的命令字符串）；compose 本地验证会自动探测 `webdb-meta` 容器并走 `docker logs`（命令数组直接调用）。无法确定日志来源时该步骤明确失败，不静默通过。
-- **清理回归测试**：`test-prod-roles-cleanup.sh` 覆盖 verify 的成功 / 失败 / 中断三条清理路径（退出码与零残留断言）。需与 verify 相同的环境变量，且生产角色已创建。
+- **连接断言**：verify 步骤 0 对 `WEBDB_APP_USER`/`WEBDB_AUDIT_USER` 做 `SELECT current_user` 断言（必须是目标非超级用户、`is_superuser=off`），fail-closed 防止误用超级用户连接。生产 API 应将 `META_DB_USER` 配置为 `webdb_app_runtime`（独立审计连接用 `webdb_audit_writer`）；应用连接切换本身属本 PR 非目标、需单独任务（P0 下 API 迁移以 META_DB_USER 运行）。
+- **清理回归测试**：`test-prod-roles-cleanup.sh` 覆盖 verify 的成功 / 失败 / 中断三条清理路径（中断为 TERM 真实信号，退出码与零残留断言），并覆盖 create 缺失 setsid 的失败路径。需与 verify 相同的环境变量，且生产角色已创建。
 - **所有权 fail-closed**：`01-create-prod-roles.sh` 在收敛前检测 `webdb_app_runtime`/`webdb_audit_writer` 是否持有数据库/模式/对象所有权，若持有则拒绝继续（错误提示先由受控管理员转移所有权）。成员关系收敛会撤销**所有**涉及任一生产角色的未批准父角色成员关系，不只两者之间。
 - 约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
 - 角色拆分完成后，API 应改用 `webdb_app_runtime` 连接，不再使用 SUPERUSER。

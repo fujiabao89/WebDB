@@ -1,18 +1,23 @@
 #!/bin/bash
-# 回归测试：verify-prod-roles.sh 的清理路径（成功 / 失败 / 中断）——PR37 二轮审查项
+# 回归测试：verify-prod-roles.sh 的清理路径（成功 / 失败 / 中断）+ create 缺失 setsid 失败路径
 # ============================================================
-# 覆盖三个清理结果：
+# 覆盖：
 #   1) 成功：verify 完整执行 → exit 0 且零残留
 #   2) 失败：数据创建后注入 exit 3 → 保留原始退出码 3 且零残留
-#   3) 中断：调用 INT/TERM trap 处理器 cleanup_and_exit → exit 130 且零残留
-# 说明：自动/后台环境下 bash 继承 SIG_IGN，无法复现真实终端 Ctrl-C 向进程组投递的
-#       SIGINT；故第 3 项确定性注入处理器调用，覆盖 trap 所调用的清理逻辑。
-# 前置：生产角色已创建（webdb_app_runtime / webdb_audit_writer），psql 可连接。
+#   3) 中断：注入 kill -TERM "$$" 真实信号 → TERM trap（cleanup_and_exit）→ exit 130 且零残留
+#   4) 缺失 setsid：create 应立即拒绝（fail-closed）且给出明确错误
+# 说明：自动/后台环境下 bash 继承 SIG_IGN，无法用 SIGINT 复现真实 Ctrl-C；SIGTERM 不受影响，
+#       故中断项用 TERM 自信号验证完整信号驱动路径（trap 接线 → 清理 → exit 130）。
+# 前置：生产角色已创建（webdb_app_runtime / webdb_audit_writer），psql 与 setsid 可连接/可用。
 # 用法：与 verify-prod-roles.sh 相同的环境变量（POSTGRES_USER/PASSWORD、DB、PGHOST/PGPORT、
 #       WEBDB_APP_*、WEBDB_AUDIT_*、VERIFY_PROD_LOG_SOURCE）。不修改生产角色。
 set -euo pipefail
 
 fail() { echo "回归失败: $*" >&2; exit 1; }
+
+# 私有工作区（mktemp -d），存放生成的脚本与日志；退出时清理
+WS=$(mktemp -d "${TMPDIR:-/tmp}/prod_roles_cleanup.XXXXXX") || fail "无法创建临时工作区"
+trap 'rm -rf "$WS"' EXIT
 
 ADMIN_USER="${POSTGRES_USER:-postgres}"
 ADMIN_PASSWORD="${POSTGRES_PASSWORD:-}"
@@ -22,7 +27,9 @@ PGPORT="${PGPORT:-5432}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify-prod-roles.sh"
+CREATE_SCRIPT="$SCRIPT_DIR/init/prod-roles/01-create-prod-roles.sh"
 [ -f "$VERIFY_SCRIPT" ] || fail "找不到 verify 脚本: $VERIFY_SCRIPT"
+[ -f "$CREATE_SCRIPT" ] || fail "找不到 create 脚本: $CREATE_SCRIPT"
 
 # 残留检查：合成 FK 数据与临时验证角色应全部清理
 check_residuals() {
@@ -37,36 +44,53 @@ check_residuals() {
     || fail "残留未清理: workspaces=$ws users=$users probe_roles=$roles"
 }
 
-echo "=== 回归 1/3：成功路径（exit 0 + 零残留） ==="
+echo "=== 回归 1/4：成功路径（exit 0 + 零残留） ==="
 set +e
-bash "$VERIFY_SCRIPT" >/tmp/prod_roles_success.log 2>&1
+bash "$VERIFY_SCRIPT" >"$WS/success.log" 2>&1
 rc=$?
 set -e
-if [ "$rc" -ne 0 ]; then tail -8 /tmp/prod_roles_success.log; fail "成功路径 exit=$rc 期望 0"; fi
+if [ "$rc" -ne 0 ]; then tail -8 "$WS/success.log"; fail "成功路径 exit=$rc 期望 0"; fi
 check_residuals
 echo "OK: 成功路径 exit 0 且零残留"
 
-echo "=== 回归 2/3：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
-cp "$VERIFY_SCRIPT" /tmp/prod_roles_fail.sh
-sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nexit 3  # 注入失败点/' /tmp/prod_roles_fail.sh
+echo "=== 回归 2/4：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
+cp "$VERIFY_SCRIPT" "$WS/fail.sh"
+sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nexit 3  # 注入失败点/' "$WS/fail.sh"
 set +e
-bash /tmp/prod_roles_fail.sh >/tmp/prod_roles_fail.log 2>&1
+bash "$WS/fail.sh" >"$WS/fail.log" 2>&1
 rc=$?
 set -e
-if [ "$rc" -ne 3 ]; then tail -8 /tmp/prod_roles_fail.log; fail "失败路径 exit=$rc 期望 3"; fi
+if [ "$rc" -ne 3 ]; then tail -8 "$WS/fail.log"; fail "失败路径 exit=$rc 期望 3"; fi
 check_residuals
 echo "OK: 失败路径保留退出码 3 且零残留"
 
-echo "=== 回归 3/3：中断路径（调用 INT/TERM 处理器，exit 130 + 零残留） ==="
-cp "$VERIFY_SCRIPT" /tmp/prod_roles_int.sh
-sed -i 's/^WM_CREATED=1$/WM_CREATED=1\ncleanup_and_exit  # 模拟中断路径/' /tmp/prod_roles_int.sh
+echo "=== 回归 3/4：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
+cp "$VERIFY_SCRIPT" "$WS/int.sh"
+sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nkill -TERM "$$"  # 注入中断（真实信号路径）/' "$WS/int.sh"
 set +e
-bash /tmp/prod_roles_int.sh >/tmp/prod_roles_int.log 2>&1
+bash "$WS/int.sh" >"$WS/int.log" 2>&1
 rc=$?
 set -e
-if [ "$rc" -ne 130 ]; then tail -8 /tmp/prod_roles_int.log; fail "中断路径 exit=$rc 期望 130"; fi
+if [ "$rc" -ne 130 ]; then tail -8 "$WS/int.log"; fail "中断路径 exit=$rc 期望 130"; fi
 check_residuals
-echo "OK: 中断路径 exit 130 且零残留"
+echo "OK: 中断路径（TERM 信号驱动）exit 130 且零残留"
+
+echo "=== 回归 4/4：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
+# 将包含 setsid 的目录从 PATH 剔除，模拟无 setsid 环境。
+# setsid 检查位于 create 的 scram/psql 之前、仅依赖 bash 内建，故剥离 PATH 后仍能正确命中。
+setsid_dir=$(dirname "$(command -v setsid)")
+stripped_path=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$setsid_dir" | paste -sd: -)
+[ -n "$stripped_path" ] || stripped_path="/usr/bin:/bin"
+set +e
+env PATH="$stripped_path" WEBDB_PRODUCTION_DEPLOY=1 \
+  POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME" \
+  WEBDB_APP_PASSWORD='X@1' WEBDB_AUDIT_PASSWORD='Y@2' \
+  bash "$CREATE_SCRIPT" >"$WS/setsid.log" 2>&1
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then fail "缺失 setsid 时 create 应失败（got exit 0）"; fi
+grep -q "需要 setsid" "$WS/setsid.log" || fail "缺失 setsid 错误信息缺失: $(tail -3 "$WS/setsid.log")"
+echo "OK: 缺失 setsid 时 create 拒绝（exit=$rc）且给出明确错误"
 
 echo ""
-echo "清理路径回归全部通过（成功 / 失败 / 中断）。"
+echo "清理路径回归全部通过（成功 / 失败 / 中断）+ 缺失 setsid 拒绝。"
