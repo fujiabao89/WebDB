@@ -51,6 +51,10 @@ validate_target() {
     5432) ;;
     *) fail "PGPORT 必须为 5432（Compose 默认映射），当前: [$PGPORT]" ;;
   esac
+  # PGHOSTADDR 会绕过 PGHOST 直接指定连接地址（libpq），必须为空（PR37 七轮审查项）
+  if [ -n "${PGHOSTADDR:-}" ]; then
+    fail "PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址），当前: [$PGHOSTADDR]"
+  fi
 }
 validate_target
 
@@ -137,7 +141,10 @@ fi
 if ( PGHOST="localhost" PGPORT="9999" validate_target ) >/dev/null 2>&1; then
   fail "负向断言失败：非法端口 9999 应被拒绝"
 fi
-echo "OK: 远程 PGHOST / 非法端口在连接前被拒绝"
+if ( PGHOSTADDR="203.0.113.20" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：非空 PGHOSTADDR 应被拒绝"
+fi
+echo "OK: 远程 PGHOST / 非法端口 / 非空 PGHOSTADDR 在连接前被拒绝"
 
 echo ""
 echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归）。"

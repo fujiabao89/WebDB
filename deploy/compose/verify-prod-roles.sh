@@ -22,6 +22,11 @@ PGPORT="${PGPORT:-5432}"
 
 fail() { echo "失败: $*" >&2; exit 1; }
 
+# PGHOSTADDR 会绕过 PGHOST 直接指定连接地址（libpq），拒绝非空值，要求用 PGHOST 指定目标（PR37 七轮审查项）
+if [ -n "${PGHOSTADDR:-}" ]; then
+  fail "PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址）；请改用 PGHOST 指定目标"
+fi
+
 # 密码非空且非占位符（与 01-create-prod-roles.sh 一致）
 validate_pw() {
   local name="$1" val="${2:-}"

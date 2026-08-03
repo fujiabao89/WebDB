@@ -41,6 +41,11 @@ if [ "${POSTGRES_DB:-}" != "webdb_meta" ]; then
   echo "错误: POSTGRES_DB 必须为 webdb_meta（生产元数据库），当前: ${POSTGRES_DB:-<空>}" >&2
   exit 1
 fi
+# PGHOSTADDR 会绕过 PGHOST 直接指定连接地址（libpq），拒绝非空值，要求用 PGHOST 指定目标（PR37 七轮审查项）
+if [ -n "${PGHOSTADDR:-}" ]; then
+  echo "错误: PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址）；请改用 PGHOST 指定目标" >&2
+  exit 1
+fi
 
 # --- 前置要求：setsid 必须可用（PR37 三轮审查项）---
 # 实测 psql \password 在存在控制终端时读取 /dev/tty 而非 stdin；必须用 setsid 分离控制终端，
