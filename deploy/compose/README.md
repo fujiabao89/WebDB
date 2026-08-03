@@ -127,23 +127,34 @@ deploy/compose/
 
 ## 生产角色拆分（R6 / WEB-27）
 
+> ⚠️ **部署边界**：`init/prod-roles/01-create-prod-roles.sh` 与 `verify-prod-roles.sh` 是**生产部署脚本**，不属于本地 Compose 配置。执行前必须显式设置 `WEBDB_PRODUCTION_DEPLOY=1`，避免被误认为本地开发初始化。本地开发请使用 `demo-*` init 脚本。
+
 `audit_events` 的 UPDATE/DELETE/TRUNCATE 拒绝触发器（`deny_audit_mutation`）可被 SUPERUSER 绕过。
-生产角色拆分（`init/prod-roles/01-create-prod-roles.sh`）创建最小权限运行时角色，使审计不可篡改不依赖单一超级用户：
+生产角色拆分创建最小权限运行时角色，使审计不可篡改不依赖单一超级用户：
 
 | 角色 | 用途 | audit_events 权限 |
 |------|------|-------------------|
 | `webdb_app_runtime` | 应用运行时连接（业务表 + 审计写入） | `SELECT` + `INSERT`（无 UPDATE/DELETE/TRUNCATE） |
 | `webdb_audit_writer` | 独立审计写入连接（可选） | `SELECT` + `INSERT`（无 UPDATE/DELETE/TRUNCATE） |
 
-执行步骤（首次 production-like 部署前必须完成）：
+执行步骤（首次 production-like 部署前必须完成；在**目标 PostgreSQL 可连接的主机**执行，需 `psql`）：
 
 ```bash
-# 1. 创建角色（POSTGRES_USER=webdb_admin 等管理员执行；密码经环境变量安全注入）
-WEBDB_APP_PASSWORD=... WEBDB_AUDIT_PASSWORD=... \
-  ./init/prod-roles/01-create-prod-roles.sh
+# 前置：管理员凭证、目标库、端点（生产勿用占位符密码）
+export WEBDB_PRODUCTION_DEPLOY=1
+export POSTGRES_USER=webdb_admin          # 管理员角色（不得用保留角色名）
+export POSTGRES_PASSWORD='<管理员密码>'     # 非空且非 change_me
+export POSTGRES_DB=webdb_meta
+export PGHOST=<目标主机>  PGPORT=5432
+export WEBDB_APP_PASSWORD='<应用角色密码>'   # 非空且非 change_me
+export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
+
+# 1. 创建/收敛角色（幂等）
+./init/prod-roles/01-create-prod-roles.sh
 
 # 2. 验证：非 SUPERUSER 角色对 audit_events 的 UPDATE/DELETE/TRUNCATE 被拒绝
-WEBDB_APP_PASSWORD=... WEBDB_AUDIT_PASSWORD=... ./verify-prod-roles.sh
+#    （含独立触发器验证角色，确认由 deny_audit_mutation 拒绝而非仅 ACL）
+./verify-prod-roles.sh
 ```
 
 约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
