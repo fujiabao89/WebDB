@@ -158,8 +158,15 @@ export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 
 # 2. 验证：非 SUPERUSER 角色对 audit_events 的 UPDATE/DELETE/TRUNCATE 被拒绝
 #    （含独立触发器验证角色，确认由 deny_audit_mutation 拒绝而非仅 ACL）
+#    第 10 步为"密码不落日志"负向测试，需可读取服务器日志：
+#    export VERIFY_PROD_LOG_SOURCE='<输出服务器日志到 stdout 的命令>'
 ./verify-prod-roles.sh
 ```
 
-约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
-角色拆分完成后，API 应改用 `webdb_app_runtime` 连接，不再使用 SUPERUSER。
+**安全说明（PR37 审查后）：**
+
+- **密码机制**：密码一律经 psql `\password` 设置（明文只经 stdin 管道进入 psql）。psql 在客户端按 SCRAM 计算口令校验器，SQL 文本与服务器日志中只有 `SCRAM-SHA-256$...`，明文密码不进 SQL 文本、不落日志。已实测 PostgreSQL 在 `log_statement=all` 下**不会**对 `CREATE/ALTER ROLE ... PASSWORD` 子句脱敏，因此禁用 `format('%L')`/`\getenv` 拼接含明文的 DDL。
+- **负向测试**：`verify-prod-roles.sh` 第 10 步在 `log_statement=all` 下用哨兵密码验证明文不进入日志（含正对照证明日志记录/读取有效）。需超级用户，且需指定日志来源：生产环境设置 `VERIFY_PROD_LOG_SOURCE`（输出日志行的命令）；compose 本地验证会自动探测 `webdb-meta` 容器并走 `docker logs`。无法确定日志来源时该步骤明确失败，不静默通过。
+- **所有权 fail-closed**：`01-create-prod-roles.sh` 在收敛前检测 `webdb_app_runtime`/`webdb_audit_writer` 是否持有数据库/模式/对象所有权，若持有则拒绝继续（错误提示先由受控管理员转移所有权）。成员关系收敛会撤销**所有**涉及任一生产角色的未批准父角色成员关系，不只两者之间。
+- 约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
+- 角色拆分完成后，API 应改用 `webdb_app_runtime` 连接，不再使用 SUPERUSER。
