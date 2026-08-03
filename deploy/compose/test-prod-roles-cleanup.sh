@@ -21,9 +21,23 @@ trap 'rm -rf "$WS"' EXIT
 
 ADMIN_USER="${POSTGRES_USER:-postgres}"
 ADMIN_PASSWORD="${POSTGRES_PASSWORD:-}"
+APP_PASSWORD="${WEBDB_APP_PASSWORD:-}"
+AUDIT_PASSWORD="${WEBDB_AUDIT_PASSWORD:-}"
 DB_NAME="webdb_meta"
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
+
+# 密码非空且非占位符（与 verify-prod-roles.sh 一致；密码只经环境变量传入，
+# 绝不作命令行参数、不写入日志）。PR37 五轮审查项。
+validate_pw() {
+  local name="$1" val="${2:-}"
+  if [ -z "$val" ] || [ "$val" = "change_me" ] || [ "$val" = "changeme" ]; then
+    fail "$name 必须为非空且非占位符"
+  fi
+}
+validate_pw POSTGRES_PASSWORD "$ADMIN_PASSWORD"
+validate_pw WEBDB_APP_PASSWORD "$APP_PASSWORD"
+validate_pw WEBDB_AUDIT_PASSWORD "$AUDIT_PASSWORD"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify-prod-roles.sh"
@@ -90,7 +104,8 @@ set +e
 (
   export WEBDB_PRODUCTION_DEPLOY=1
   export POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME"
-  export WEBDB_APP_PASSWORD='X@1' WEBDB_AUDIT_PASSWORD='Y@2'
+  export WEBDB_APP_PASSWORD="$APP_PASSWORD"
+  export WEBDB_AUDIT_PASSWORD="$AUDIT_PASSWORD"
   export PATH="$WS/emptybin"
   "$BASH_ABS" "$CREATE_SCRIPT"
 ) >"$WS/setsid.log" 2>&1
