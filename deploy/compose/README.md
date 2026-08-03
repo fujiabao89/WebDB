@@ -148,7 +148,8 @@ export WEBDB_PRODUCTION_DEPLOY=1
 export POSTGRES_USER=webdb_admin          # 管理员角色（不得用保留角色名）
 export POSTGRES_PASSWORD='<管理员密码>'     # 非空且非 change_me
 export POSTGRES_DB=webdb_meta
-export PGHOST=<目标主机>  PGPORT=5432
+export PGHOST='<目标主机>'   # 替换为实际目标主机（引号防止未加引号尖括号触发 Bash 重定向解析）
+export PGPORT=5432
 export WEBDB_APP_PASSWORD='<应用角色密码>'   # 非空且非 change_me
 export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 

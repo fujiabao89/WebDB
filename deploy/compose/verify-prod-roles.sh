@@ -83,11 +83,20 @@ PROBE_PW=""
 # 失败/中断（EXIT/INT/TERM）也清理临时验证角色；幂等
 cleanup_probe() {
   if [ -n "$PROBE" ]; then
-    if ! PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+    # 角色可能在正常路径已清理：DROP ROLE IF EXISTS 幂等成功则结束
+    if PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
       -v ON_ERROR_STOP=1 >/dev/null 2>&1 -c "DROP ROLE IF EXISTS \"$PROBE\";"; then
-      echo "警告: 临时验证角色 $PROBE 清理失败（DROP ROLE 返回非零）" >&2
-      return 1
+      return 0
     fi
+    # 角色存在但持有权限 → DROP OWNED 撤销权限后重试
+    if PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+      -v ON_ERROR_STOP=1 >/dev/null 2>&1 \
+      -c "DROP OWNED BY \"$PROBE\";" \
+      -c "DROP ROLE IF EXISTS \"$PROBE\";"; then
+      return 0
+    fi
+    echo "警告: 临时验证角色 $PROBE 清理失败（DROP OWNED/DROP ROLE 返回非零）" >&2
+    return 1
   fi
   return 0
 }
@@ -127,9 +136,41 @@ probe_try "UPDATE audit_events SET action='x' WHERE false;"
 probe_try "DELETE FROM audit_events WHERE false;"
 probe_try "TRUNCATE audit_events;"
 
-# 清理临时验证角色
+# 清理临时验证角色（DROP OWNED 撤销权限后再 DROP ROLE）
 PGPASSWORD="$ADMIN_PASSWORD" psql -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 >/dev/null 2>&1 \
+  -c "DROP OWNED BY \"$PROBE\";" \
   -c "DROP ROLE IF EXISTS \"$PROBE\";"
 
+echo "=== 8. 实际 SELECT/INSERT 验证（应用角色，事务内回滚） ==="
+# 管理员预置最小合法 FK 合成数据，验证 INSERT 权限真实可用（audit_events 有复合外键）
+# -q 抑制 INSERT 状态行；head -1 取 RETURNING 的 id；tr 去除空白
+WS_ID=$(PGPASSWORD="$ADMIN_PASSWORD" psql -w -q -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -tA \
+  -c "INSERT INTO workspaces(name) VALUES ('verify-insert-ws-$$') RETURNING id;" | head -1 | tr -d '[:space:]')
+USER_ID=$(PGPASSWORD="$ADMIN_PASSWORD" psql -w -q -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -tA \
+  -c "INSERT INTO users(email,password_hash) VALUES ('verify-insert-$$@example.local','hash') RETURNING id;" | head -1 | tr -d '[:space:]')
+[ -n "$WS_ID" ] && [ -n "$USER_ID" ] || fail "预置合成 FK 数据失败"
+PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 >/dev/null \
+  -c "INSERT INTO workspace_members(workspace_id,user_id,role) VALUES ('$WS_ID','$USER_ID','owner');"
+
+# 实际 SELECT LIMIT 0（应用角色）
+if ! PGPASSWORD="$APP_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$APP_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+  -c "SELECT * FROM audit_events LIMIT 0;" >/dev/null 2>&1; then
+  fail "应用角色实际 SELECT audit_events LIMIT 0 失败"
+fi
+echo "OK: 应用角色实际 SELECT LIMIT 0 允许"
+
+# 实际 INSERT（应用角色，事务内回滚；FK 引用合成 workspace/member）
+if ! PGPASSWORD="$APP_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$APP_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+  -c "BEGIN; INSERT INTO audit_events(workspace_id,actor_type,actor_id,action,resource_type,resource_id,outcome,metadata,trace_id,occurred_at) VALUES ('$WS_ID','user','$USER_ID','connection.create','connection','verify','succeeded','{}','verify-trace',now()); ROLLBACK;" >/dev/null 2>&1; then
+  fail "应用角色实际 INSERT audit_events（事务回滚）失败"
+fi
+echo "OK: 应用角色实际 INSERT audit_events 允许（事务回滚，无残留）"
+
+# 清理合成数据（逆序）
+PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 >/dev/null 2>&1 \
+  -c "DELETE FROM workspace_members WHERE workspace_id='$WS_ID' AND user_id='$USER_ID';" \
+  -c "DELETE FROM users WHERE id='$USER_ID';" \
+  -c "DELETE FROM workspaces WHERE id='$WS_ID';" || true
+
 echo ""
-echo "生产角色拆分验证全部通过（ACL + deny_audit_mutation 触发器双重确认）。"
+echo "生产角色拆分验证全部通过（ACL + deny_audit_mutation 触发器 + 实际 SELECT/INSERT 双重确认）。"

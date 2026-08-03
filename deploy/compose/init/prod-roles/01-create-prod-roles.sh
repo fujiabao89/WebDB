@@ -41,8 +41,8 @@ if [ "${POSTGRES_DB:-}" != "webdb_meta" ]; then
   echo "错误: POSTGRES_DB 必须为 webdb_meta（生产元数据库），当前: ${POSTGRES_DB:-<空>}" >&2
   exit 1
 fi
-# 密码不进 SQL 日志：所有 psql 连接禁用 statement 日志（防明文密码出现在 PostgreSQL 日志）
-export PGOPTIONS="-c log_statement=none"
+# 明文密码不通过格式生成 SQL 进日志：PostgreSQL 对 CREATE/ALTER ROLE 的 PASSWORD 子句
+# 在语句日志中自动脱敏（显示为 ********）。不依赖 PGOPTIONS log_statement（受限管理员可连接）。
 export APP_PASSWORD="$WEBDB_APP_PASSWORD"
 export AUDIT_PASSWORD="$WEBDB_AUDIT_PASSWORD"
 export PGPASSWORD="$POSTGRES_PASSWORD"
@@ -73,12 +73,22 @@ psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 ALTER ROLE webdb_app_runtime NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 ALTER ROLE webdb_audit_writer NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 
-GRANT CONNECT ON DATABASE webdb_meta TO webdb_app_runtime, webdb_audit_writer;
-GRANT USAGE ON SCHEMA public TO webdb_app_runtime, webdb_audit_writer;
--- 撤销 PUBLIC 默认 TEMPORARY，防止受限角色建临时表越权
+-- 收敛（幂等）：撤销已存在的角色成员关系与直接对象/所有权权限，收敛到最小权限
+REVOKE ALL PRIVILEGES ON DATABASE webdb_meta FROM webdb_app_runtime, webdb_audit_writer;
+REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM webdb_app_runtime, webdb_audit_writer;
+REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM webdb_app_runtime, webdb_audit_writer;
+REVOKE ALL PRIVILEGES ON SCHEMA public FROM webdb_app_runtime, webdb_audit_writer;
+REVOKE webdb_app_runtime FROM webdb_audit_writer;
+REVOKE webdb_audit_writer FROM webdb_app_runtime;
+-- 撤销 PUBLIC 的 CONNECT/USAGE/TEMPORARY（最小权限，审计边界）
+REVOKE CONNECT ON DATABASE webdb_meta FROM PUBLIC;
+REVOKE USAGE ON SCHEMA public FROM PUBLIC;
 REVOKE TEMPORARY ON DATABASE webdb_meta FROM PUBLIC;
 -- 撤销 PUBLIC 对 audit_events 的一切权限（审计不可变边界）
 REVOKE ALL PRIVILEGES ON audit_events FROM PUBLIC;
+
+GRANT CONNECT ON DATABASE webdb_meta TO webdb_app_runtime, webdb_audit_writer;
+GRANT USAGE ON SCHEMA public TO webdb_app_runtime, webdb_audit_writer;
 
 -- audit_events：仅 SELECT/INSERT；不授予 UPDATE/DELETE/TRUNCATE
 -- （与 deny_audit_mutation 拒绝触发器构成双重防护，见 ADR-013）
