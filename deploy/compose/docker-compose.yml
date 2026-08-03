@@ -106,9 +106,13 @@ services:
       API_PORT: "8080"
       META_DB_HOST: webdb-meta
       META_DB_PORT: "5432"
-      META_DB_USER: webdb
-      META_DB_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      # 运行时连接使用非超级用户 webdb_app_runtime（PR37 检定：生产 API 不得用超管 webdb）；
+      # 迁移需 DDL 权限，用独立的 META_MIGRATE_USER（管理员 webdb）。
+      META_DB_USER: webdb_app_runtime
+      META_DB_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
       META_DB_NAME: webdb_meta
+      META_MIGRATE_USER: webdb
+      META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
       DEMO_PG_HOST: demo-pg
       DEMO_PG_PORT: "5432"
       DEMO_PG_USER: demo_reader
