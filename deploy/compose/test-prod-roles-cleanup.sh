@@ -55,6 +55,10 @@ validate_target() {
   if [ -n "${PGHOSTADDR:-}" ]; then
     fail "PGHOSTADDR 必须为空（会绕过 PGHOST 直接指定连接地址），当前: [$PGHOSTADDR]"
   fi
+  # PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 可通过服务文件指定 hostaddr 绕过 PGHOST，必须为空（PR37 八轮审查项）
+  if [ -n "${PGSERVICE:-}" ] || [ -n "${PGSERVICEFILE:-}" ] || [ -n "${PGSYSCONFDIR:-}" ]; then
+    fail "PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 必须为空（服务文件可含 hostaddr 绕过 PGHOST）；当前 PGSERVICE=[${PGSERVICE:-}] PGSERVICEFILE=[${PGSERVICEFILE:-}] PGSYSCONFDIR=[${PGSYSCONFDIR:-}]"
+  fi
 }
 validate_target
 
@@ -77,7 +81,7 @@ check_residuals() {
     || fail "残留未清理: workspaces=$ws users=$users probe_roles=$roles"
 }
 
-echo "=== 回归 1/5：成功路径（exit 0 + 零残留） ==="
+echo "=== 回归 1/6：成功路径（exit 0 + 零残留） ==="
 set +e
 bash "$VERIFY_SCRIPT" >"$WS/success.log" 2>&1
 rc=$?
@@ -86,7 +90,7 @@ if [ "$rc" -ne 0 ]; then tail -8 "$WS/success.log"; fail "成功路径 exit=$rc 
 check_residuals
 echo "OK: 成功路径 exit 0 且零残留"
 
-echo "=== 回归 2/5：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
+echo "=== 回归 2/6：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/fail.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nexit 3  # 注入失败点/' "$WS/fail.sh"
 set +e
@@ -97,7 +101,7 @@ if [ "$rc" -ne 3 ]; then tail -8 "$WS/fail.log"; fail "失败路径 exit=$rc 期
 check_residuals
 echo "OK: 失败路径保留退出码 3 且零残留"
 
-echo "=== 回归 3/5：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
+echo "=== 回归 3/6：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/int.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nkill -TERM "$$"  # 注入中断（真实信号路径）/' "$WS/int.sh"
 set +e
@@ -108,7 +112,7 @@ if [ "$rc" -ne 130 ]; then tail -8 "$WS/int.log"; fail "中断路径 exit=$rc �
 check_residuals
 echo "OK: 中断路径（TERM 信号驱动）exit 130 且零残留"
 
-echo "=== 回归 4/5：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
+echo "=== 回归 4/6：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
 # 用只含临时空目录的私有 PATH 模拟无 setsid 环境：
 #   - 避免原 PATH 过滤管道（tr|grep|paste）在 set -euo pipefail 下无匹配返回非零导致脚本退出，
 #   - 避免过滤后 PATH 仍含其他位置的 setsid；
@@ -134,7 +138,7 @@ if [ "$rc" -eq 0 ]; then fail "缺失 setsid 时 create 应失败（got exit 0�
 grep -q "需要 setsid" "$WS/setsid.log" || fail "缺失 setsid 错误信息缺失: $(tail -3 "$WS/setsid.log")"
 echo "OK: 缺失 setsid 时 create 拒绝（exit=$rc）且给出明确错误"
 
-echo "=== 回归 5/5：目标约束负向回归（远程 PGHOST / 非法端口连接前拒绝） ==="
+echo "=== 回归 5/6：目标约束负向回归（远程 PGHOST / 非法端口连接前拒绝） ==="
 if ( PGHOST="203.0.113.10" PGPORT="5432" validate_target ) >/dev/null 2>&1; then
   fail "负向断言失败：远程 PGHOST=[203.0.113.10] 应被拒绝"
 fi
@@ -146,5 +150,23 @@ if ( PGHOSTADDR="203.0.113.20" validate_target ) >/dev/null 2>&1; then
 fi
 echo "OK: 远程 PGHOST / 非法端口 / 非空 PGHOSTADDR 在连接前被拒绝"
 
+echo "=== 回归 6/6：服务文件绕过负向回归（PGSERVICEFILE 含 hostaddr 连接前拒绝） ==="
+# 临时 pg_service.conf：条目含 hostaddr，验证 PGSERVICE/PGSERVICEFILE/PGSYSCONFDIR 被连接前拒绝
+cat >"$WS/pg_service.conf" <<EOF
+[malicious]
+hostaddr=203.0.113.30
+port=5432
+EOF
+if ( PGSERVICEFILE="$WS/pg_service.conf" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：PGSERVICEFILE 非空应被拒绝"
+fi
+if ( PGSERVICE="malicious" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：PGSERVICE 非空应被拒绝"
+fi
+if ( PGSYSCONFDIR="$WS" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：PGSYSCONFDIR 非空应被拒绝"
+fi
+echo "OK: PGSERVICEFILE/PGSERVICE/PGSYSCONFDIR 在连接前被拒绝"
+
 echo ""
-echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归）。"
+echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归 / 服务文件绕过）。"

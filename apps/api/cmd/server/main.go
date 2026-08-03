@@ -69,11 +69,22 @@ func runServe() error {
 
 // metaDSN 返回元数据库迁移连接串。
 // 生产环境：META_DB_USER 为运行时非超级用户（webdb_app_runtime，API 运行时连接），
-// 迁移需 DDL 权限，使用独立的 META_MIGRATE_USER/PASSWORD（管理员）；未设时回退到
-// META_DB_USER/PASSWORD（本地开发默认，见 PR37 检定）。
-func metaDSN() string {
-	user := envOr("META_MIGRATE_USER", envOr("META_DB_USER", "webdb"))
-	password := envOr("META_MIGRATE_PASSWORD", envOr("META_DB_PASSWORD", "change_me"))
+// 迁移需 DDL 权限，使用独立的 META_MIGRATE_USER/PASSWORD（管理员）。
+// 迁移凭据必须成对设置：只设其一即返回错误，禁止静默混用；
+// 仅当两者都未设置时才回退到 META_DB_USER/PASSWORD（本地开发，见 PR37 检定/八轮审查）。
+func metaDSN() (string, error) {
+	migrateUser := os.Getenv("META_MIGRATE_USER")
+	migratePassword := os.Getenv("META_MIGRATE_PASSWORD")
+	var user, password string
+	switch {
+	case migrateUser != "" && migratePassword != "":
+		user, password = migrateUser, migratePassword
+	case migrateUser == "" && migratePassword == "":
+		user = envOr("META_DB_USER", "webdb")
+		password = envOr("META_DB_PASSWORD", "change_me")
+	default:
+		return "", fmt.Errorf("META_MIGRATE_USER 与 META_MIGRATE_PASSWORD 必须成对设置（当前仅设置了其一）")
+	}
 	host := envOr("META_DB_HOST", "webdb-meta")
 	port := envOr("META_DB_PORT", "5432")
 	dbname := envOr("META_DB_NAME", "webdb_meta")
@@ -86,7 +97,7 @@ func metaDSN() string {
 		Path:     dbname,
 		RawQuery: fmt.Sprintf("sslmode=%s", sslmode),
 	}
-	return u.String()
+	return u.String(), nil
 }
 
 func envOr(key, def string) string {
@@ -97,7 +108,10 @@ func envOr(key, def string) string {
 }
 
 func runMigrate(dir string) error {
-	dsn := metaDSN()
+	dsn, err := metaDSN()
+	if err != nil {
+		return err
+	}
 	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return fmt.Errorf("连接元数据库失败: %w", err)

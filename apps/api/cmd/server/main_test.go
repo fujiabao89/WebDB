@@ -59,7 +59,10 @@ func TestMetaDSN_usesMigrateAdmin(t *testing.T) {
 	t.Setenv("META_DB_HOST", "meta-host")
 	t.Setenv("META_DB_PORT", "5432")
 
-	dsn := metaDSN()
+	dsn, err := metaDSN()
+	if err != nil {
+		t.Fatalf("metaDSN 不应报错: %v", err)
+	}
 	if !strings.Contains(dsn, "webdb_admin:admin_pw@meta-host:5432") {
 		t.Fatalf("metaDSN 应使用 META_MIGRATE_USER 管理账号，got %s", dsn)
 	}
@@ -76,8 +79,28 @@ func TestMetaDSN_fallsBackToRuntimeUser(t *testing.T) {
 	t.Setenv("META_DB_PASSWORD", "app_pw")
 	t.Setenv("META_DB_HOST", "meta-host")
 
-	dsn := metaDSN()
+	dsn, err := metaDSN()
+	if err != nil {
+		t.Fatalf("metaDSN 不应报错: %v", err)
+	}
 	if !strings.Contains(dsn, "webdb_app_runtime:app_pw@meta-host") {
 		t.Fatalf("未设 META_MIGRATE_* 时应回退到 META_DB_USER，got %s", dsn)
+	}
+}
+
+// 迁移凭据必须成对：只设其一应报错（PR37 八轮审查项）。
+func TestMetaDSN_partialMigrateCreds(t *testing.T) {
+	t.Setenv("META_MIGRATE_USER", "webdb_admin")
+	t.Setenv("META_MIGRATE_PASSWORD", "")
+	_, err := metaDSN()
+	if err == nil {
+		t.Fatal("只设 META_MIGRATE_USER 时应返回错误")
+	}
+
+	t.Setenv("META_MIGRATE_USER", "")
+	t.Setenv("META_MIGRATE_PASSWORD", "admin_pw")
+	_, err = metaDSN()
+	if err == nil {
+		t.Fatal("只设 META_MIGRATE_PASSWORD 时应返回错误")
 	}
 }
