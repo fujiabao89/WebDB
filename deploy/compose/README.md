@@ -114,11 +114,37 @@ API 服务使用上述只读账号连接演示数据库，不持有管理员凭�
 
 ```
 deploy/compose/
-├── docker-compose.yml   # 服务定义
-├── env.example           # 环境变量模板（不含真实密钥）
-├── README.md             # 本文件
-├── verify-readonly.sh    # 只读权限验证脚本
+├── docker-compose.yml       # 服务定义
+├── env.example               # 环境变量模板（不含真实密钥）
+├── README.md                 # 本文件
+├── verify-readonly.sh        # 只读权限验证脚本
+├── verify-prod-roles.sh      # 生产角色拆分验证脚本（R6 / WEB-27）
 └── init/
-    ├── demo-pg/01-init.sh    # PostgreSQL 初始化
-    └── demo-mysql/01-init.sh # MySQL 初始化
+    ├── demo-pg/01-init.sh        # PostgreSQL 初始化
+    ├── demo-mysql/01-init.sh     # MySQL 初始化
+    └── prod-roles/01-create-prod-roles.sh # 生产角色拆分（R6 / WEB-27）
 ```
+
+## 生产角色拆分（R6 / WEB-27）
+
+`audit_events` 的 UPDATE/DELETE/TRUNCATE 拒绝触发器（`deny_audit_mutation`）可被 SUPERUSER 绕过。
+生产角色拆分（`init/prod-roles/01-create-prod-roles.sh`）创建最小权限运行时角色，使审计不可篡改不依赖单一超级用户：
+
+| 角色 | 用途 | audit_events 权限 |
+|------|------|-------------------|
+| `webdb_app_runtime` | 应用运行时连接（业务表 + 审计写入） | `SELECT` + `INSERT`（无 UPDATE/DELETE/TRUNCATE） |
+| `webdb_audit_writer` | 独立审计写入连接（可选） | `SELECT` + `INSERT`（无 UPDATE/DELETE/TRUNCATE） |
+
+执行步骤（首次 production-like 部署前必须完成）：
+
+```bash
+# 1. 创建角色（POSTGRES_USER=webdb_admin 等管理员执行；密码经环境变量安全注入）
+WEBDB_APP_PASSWORD=... WEBDB_AUDIT_PASSWORD=... \
+  ./init/prod-roles/01-create-prod-roles.sh
+
+# 2. 验证：非 SUPERUSER 角色对 audit_events 的 UPDATE/DELETE/TRUNCATE 被拒绝
+WEBDB_APP_PASSWORD=... WEBDB_AUDIT_PASSWORD=... ./verify-prod-roles.sh
+```
+
+约束：`POSTGRES_USER` 不得使用保留角色名（`webdb_app_runtime` / `webdb_audit_writer`）。
+角色拆分完成后，API 应改用 `webdb_app_runtime` 连接，不再使用 SUPERUSER。

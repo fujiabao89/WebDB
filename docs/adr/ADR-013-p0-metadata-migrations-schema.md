@@ -55,7 +55,7 @@ P0 枚举与默认值固定如下；所有列均为 `text NOT NULL`，后续新�
 ### 追加式审计
 
 - 普通应用仓储仅提供 `Append` 与查询能力，不提供 update/delete 方法。
-- 数据库对 `audit_events` 的 `UPDATE`、`DELETE`、`TRUNCATE` 安装拒绝触发器；未来拆分数据库角色后，运行时角色只授予 `SELECT` / `INSERT`。
+- 数据库对 `audit_events` 的 `UPDATE`、`DELETE`、`TRUNCATE` 安装拒绝触发器（`deny_audit_mutation`）；生产角色拆分（R6 / WEB-27）后，运行时角色（`webdb_app_runtime` / `webdb_audit_writer`）只授予 `SELECT` / `INSERT`，形成"拒绝触发器 + 最小权限"双重防护。
 - `audit_events.workspace_id` 必须直接外键引用真实 workspace；`action`、`resource_type`、`resource_id`、`trace_id` 均使用 `TEXT NOT NULL`，并分别以 `CHECK (btrim(action) <> '')`、`CHECK (btrim(resource_type) <> '')`、`CHECK (btrim(resource_id) <> '')`、`CHECK (btrim(trace_id) <> '')` 拒绝空白；`occurred_at` 使用无默认值的 `TIMESTAMPTZ NOT NULL`。即使拒绝发生在资源解析前，调用方也必须写入稳定的目标资源标识和显式事件时间。审计写入还必须携带 outcome，并在适用时携带 actor、受租户外键约束且彼此一致的 connection 和 execution 关联。
 - `metadata` 使用 `JSONB NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object')`；应用层使用允许列表生成脱敏摘要，禁止 SQL 正文、凭证、KEK、目标库结果和原始错误进入审计正文。
 - 审计事件不随查询结果过期而删除；保留期或归档策略仍是后续独立决策。
