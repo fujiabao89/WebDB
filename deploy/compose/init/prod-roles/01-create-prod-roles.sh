@@ -40,11 +40,14 @@ export APP_PASSWORD="$WEBDB_APP_PASSWORD"
 export AUDIT_PASSWORD="$WEBDB_AUDIT_PASSWORD"
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
-# --- 创建角色（幂等；密码经 \getenv + format %L 安全引用）---
+# --- 创建/更新角色（幂等：已存在则跳过创建，但总是应用当前密码）---
+# 密码经 \getenv + format %L 安全引用。
 psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 \getenv app_password APP_PASSWORD
 SELECT format('CREATE ROLE webdb_app_runtime WITH LOGIN PASSWORD %L', :'app_password')
 WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'webdb_app_runtime')
+\gexec
+SELECT format('ALTER ROLE webdb_app_runtime WITH LOGIN PASSWORD %L', :'app_password')
 \gexec
 EOSQL
 
@@ -52,6 +55,8 @@ psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 \getenv audit_password AUDIT_PASSWORD
 SELECT format('CREATE ROLE webdb_audit_writer WITH LOGIN PASSWORD %L', :'audit_password')
 WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'webdb_audit_writer')
+\gexec
+SELECT format('ALTER ROLE webdb_audit_writer WITH LOGIN PASSWORD %L', :'audit_password')
 \gexec
 EOSQL
 

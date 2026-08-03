@@ -140,6 +140,9 @@ deploy/compose/
 执行步骤（首次 production-like 部署前必须完成；在**目标 PostgreSQL 可连接的主机**执行，需 `psql`）：
 
 ```bash
+# 前置：工作目录切换至 deploy/compose（脚本与 README 在此目录）
+cd deploy/compose
+
 # 前置：管理员凭证、目标库、端点（生产勿用占位符密码）
 export WEBDB_PRODUCTION_DEPLOY=1
 export POSTGRES_USER=webdb_admin          # 管理员角色（不得用保留角色名）
@@ -149,7 +152,7 @@ export PGHOST=<目标主机>  PGPORT=5432
 export WEBDB_APP_PASSWORD='<应用角色密码>'   # 非空且非 change_me
 export WEBDB_AUDIT_PASSWORD='<审计角色密码>' # 非空且非 change_me
 
-# 1. 创建/收敛角色（幂等）
+# 1. 创建/收敛角色（幂等；重跑会应用当前密码）
 ./init/prod-roles/01-create-prod-roles.sh
 
 # 2. 验证：非 SUPERUSER 角色对 audit_events 的 UPDATE/DELETE/TRUNCATE 被拒绝

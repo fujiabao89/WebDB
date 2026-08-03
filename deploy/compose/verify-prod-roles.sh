@@ -15,7 +15,8 @@ AUDIT_USER="${WEBDB_AUDIT_USER:-webdb_audit_writer}"
 AUDIT_PASSWORD="${WEBDB_AUDIT_PASSWORD:-}"
 ADMIN_USER="${POSTGRES_USER:-postgres}"
 ADMIN_PASSWORD="${POSTGRES_PASSWORD:-}"
-DB_NAME="${WEBDB_META_DB:-webdb_meta}"
+# 安全固定：prod 元数据库名固定为 webdb_meta，不随环境变量拼接进 SQL 标识符（防注入）。
+DB_NAME="webdb_meta"
 PGHOST="${PGHOST:-localhost}"
 PGPORT="${PGPORT:-5432}"
 
@@ -77,6 +78,16 @@ fi
 echo "OK: DELETE/TRUNCATE 被拒绝"
 
 echo "=== 7. 独立验证角色（非 SUPERUSER 但持有 audit_events 写权限）→ deny_audit_mutation 触发器拒绝 ==="
+PROBE=""
+PROBE_PW=""
+# 失败/中断（EXIT/INT/TERM）也清理临时验证角色；幂等、不覆盖原始退出状态
+cleanup_probe() {
+  if [ -n "$PROBE" ]; then
+    PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+      -v ON_ERROR_STOP=1 >/dev/null 2>&1 -c "DROP ROLE IF EXISTS \"$PROBE\";" || true
+  fi
+}
+trap cleanup_probe EXIT INT TERM
 PROBE="webdb_audit_probe_$$"
 PROBE_PW="probe_tmp_$$"
 # 创建临时验证角色（仅验证期），授予 audit_events 全部写权限（验证触发器而非 ACL）
