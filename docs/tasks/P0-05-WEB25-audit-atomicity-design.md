@@ -204,10 +204,11 @@ type ConnectionRefReadTx interface {
 // CredentialAtomicTx credential 原子化组合。内部接口，仅由 credentials.LifecycleManager
 // （审计协调器）使用；协调器独占 Begin/Commit/Rollback 与 mutation，强制成对执行 mutation+AppendAudit。
 // 只嵌入 ConnectionRefReadTx（Retire 的锁读），不暴露连接写 mutation。
-// Commit 语义（防绕过，operation context）：Commit 使用事务级 operation context 校验——
-// 当前事务内已通过 AppendAudit 追加**有且仅有一个字段完全匹配**当前 mutation 的 AuditEvent
-// （workspace、resource、action、connection、mutation 标识全部匹配）；缺失、多余或错误
-// action/resource/跨租户事件 → 返回错误并回滚。使调用方无法"mutation 后不审计直接提交"。
+// Commit 语义（防绕过，operation context）：**pgCredentialAtomicTx.Commit**（而非 pgMetadataTx.Commit）
+// 使用事务级 operation context 校验——当前事务内已通过 AppendAudit 追加**有且仅有一个字段完全匹配**
+// 当前 mutation 的 AuditEvent（workspace、resource、action、connection、mutation 标识全部匹配）；
+// 缺失、多余或错误 action/resource/跨租户事件 → 返回错误并回滚。使调用方无法"mutation 后不审计直接提交"。
+// 审计闸门仅属于原子 wrapper 的 Commit，**不影响 MetadataTx.Commit / TxStore.Begin（execution.Pipeline 兼容）**。
 type CredentialAtomicTx interface {
     AuditTx
     CredentialMutationTx
@@ -217,7 +218,8 @@ type CredentialAtomicTx interface {
 }
 
 // ConnectionAtomicTx connection 原子化组合。内部接口，仅由 connections.Service 使用。
-// Commit 语义同 CredentialAtomicTx（operation context + 精确匹配校验）。
+// Commit 语义同 CredentialAtomicTx：**pgConnectionAtomicTx.Commit** 实现审计闸门（operation context
+// + 精确匹配校验），不影响 MetadataTx.Commit / TxStore.Begin。
 type ConnectionAtomicTx interface {
     AuditTx
     ConnectionMutationTx
@@ -331,6 +333,8 @@ func eventAllowed(resource, action, outcome string) bool {
 | 跨域资源拒绝：`BeginCredential` 收 `resource=connection`、`BeginConnection` 收 `resource=credential` → 拒绝且不执行 mutation | 待实施 | 负向测试（P1） |
 | 错误 action/outcome 拒绝：不在 E1-E6 矩阵内的组合（如 connection/connection.test/succeeded）→ 拒绝且回滚 | 待实施 | 负向测试（P1） |
 | nil context 拒绝：`Begin*`/`AppendAudit` 传 nil `*OperationContext` → 拒绝且不执行 mutation | 待实施 | 负向测试（P2） |
+| 审计闸门仅限原子 wrapper：`pgMetadataTx.Commit`（execution 路径）无闸门，execution.Pipeline 保持兼容 | 待实施 | execution 提交回归测试（旧版 `AppendAudit(ctx, event)` 路径不受影响） |
+| 原子事务缺失匹配 AuditEvent 时 `pgCredentialAtomicTx.Commit`/`pgConnectionAtomicTx.Commit` 拒绝并回滚 | 待实施 | 原子事务缺审计事件回滚测试 |
 | 并发轮换（LIFE-07） | **部分覆盖** | `TestLifecycleRotateConcurrentPostgres`（WEB-24；验证并发轮换 + SecretVersion，但未直接调用 `AppendAudit`） |
 | 事务中间失败回滚（LIFE-08） | **部分覆盖** | `TestLifecycleRotateTxFailureRollbackPostgres`（WEB-24；真实 UPDATE 与 INSERT 回滚，但未覆盖 `AppendAudit` 失败注入） |
 | E9-E13 外部副作用例外 | 保持 | 既有 execution audit 测试 |
