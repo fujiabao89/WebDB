@@ -39,6 +39,21 @@ validate_pw POSTGRES_PASSWORD "$ADMIN_PASSWORD"
 validate_pw WEBDB_APP_PASSWORD "$APP_PASSWORD"
 validate_pw WEBDB_AUDIT_PASSWORD "$AUDIT_PASSWORD"
 
+# 目标数据库约束：回归测试会创建/删除临时角色与合成数据，只允许部署文档规定的 loopback 或
+# 已批准的 Compose 服务目标（localhost/127.0.0.1/::1/webdb-meta）与端口 5432；
+# 未知目标必须在任何 psql/脚本调用前立即失败，防止误连远程/生产库（PR37 六轮审查项）。
+validate_target() {
+  case "$PGHOST" in
+    localhost|127.0.0.1|::1|webdb-meta) ;;
+    *) fail "PGHOST 必须为 loopback 或已批准的 Compose 服务目标（localhost/127.0.0.1/::1/webdb-meta），当前: [$PGHOST]；拒绝连接以防误操作远程/生产库" ;;
+  esac
+  case "$PGPORT" in
+    5432) ;;
+    *) fail "PGPORT 必须为 5432（Compose 默认映射），当前: [$PGPORT]" ;;
+  esac
+}
+validate_target
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERIFY_SCRIPT="$SCRIPT_DIR/verify-prod-roles.sh"
 CREATE_SCRIPT="$SCRIPT_DIR/init/prod-roles/01-create-prod-roles.sh"
@@ -58,7 +73,7 @@ check_residuals() {
     || fail "残留未清理: workspaces=$ws users=$users probe_roles=$roles"
 }
 
-echo "=== 回归 1/4：成功路径（exit 0 + 零残留） ==="
+echo "=== 回归 1/5：成功路径（exit 0 + 零残留） ==="
 set +e
 bash "$VERIFY_SCRIPT" >"$WS/success.log" 2>&1
 rc=$?
@@ -67,7 +82,7 @@ if [ "$rc" -ne 0 ]; then tail -8 "$WS/success.log"; fail "成功路径 exit=$rc 
 check_residuals
 echo "OK: 成功路径 exit 0 且零残留"
 
-echo "=== 回归 2/4：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
+echo "=== 回归 2/5：失败路径（数据创建后注入 exit 3，保留退出码 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/fail.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nexit 3  # 注入失败点/' "$WS/fail.sh"
 set +e
@@ -78,7 +93,7 @@ if [ "$rc" -ne 3 ]; then tail -8 "$WS/fail.log"; fail "失败路径 exit=$rc 期
 check_residuals
 echo "OK: 失败路径保留退出码 3 且零残留"
 
-echo "=== 回归 3/4：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
+echo "=== 回归 3/5：中断路径（注入 kill -TERM \"\$\$\" 真实信号，exit 130 + 零残留） ==="
 cp "$VERIFY_SCRIPT" "$WS/int.sh"
 sed -i 's/^WM_CREATED=1$/WM_CREATED=1\nkill -TERM "$$"  # 注入中断（真实信号路径）/' "$WS/int.sh"
 set +e
@@ -89,7 +104,7 @@ if [ "$rc" -ne 130 ]; then tail -8 "$WS/int.log"; fail "中断路径 exit=$rc �
 check_residuals
 echo "OK: 中断路径（TERM 信号驱动）exit 130 且零残留"
 
-echo "=== 回归 4/4：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
+echo "=== 回归 4/5：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
 # 用只含临时空目录的私有 PATH 模拟无 setsid 环境：
 #   - 避免原 PATH 过滤管道（tr|grep|paste）在 set -euo pipefail 下无匹配返回非零导致脚本退出，
 #   - 避免过滤后 PATH 仍含其他位置的 setsid；
@@ -115,5 +130,14 @@ if [ "$rc" -eq 0 ]; then fail "缺失 setsid 时 create 应失败（got exit 0�
 grep -q "需要 setsid" "$WS/setsid.log" || fail "缺失 setsid 错误信息缺失: $(tail -3 "$WS/setsid.log")"
 echo "OK: 缺失 setsid 时 create 拒绝（exit=$rc）且给出明确错误"
 
+echo "=== 回归 5/5：目标约束负向回归（远程 PGHOST / 非法端口连接前拒绝） ==="
+if ( PGHOST="203.0.113.10" PGPORT="5432" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：远程 PGHOST=[203.0.113.10] 应被拒绝"
+fi
+if ( PGHOST="localhost" PGPORT="9999" validate_target ) >/dev/null 2>&1; then
+  fail "负向断言失败：非法端口 9999 应被拒绝"
+fi
+echo "OK: 远程 PGHOST / 非法端口在连接前被拒绝"
+
 echo ""
-echo "清理路径回归全部通过（成功 / 失败 / 中断）+ 缺失 setsid 拒绝。"
+echo "清理路径回归全部通过（成功 / 失败 / 中断 / 缺失 setsid / 目标约束负向回归）。"
