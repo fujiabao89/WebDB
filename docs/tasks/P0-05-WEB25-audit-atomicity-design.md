@@ -73,7 +73,7 @@ type OperationContext struct {
     traceID      string
 }
 
-func NewOperationContext(mutationID string, wsID uuid.UUID, resource, resourceID, action string, connID *uuid.UUID, actorID uuid.UUID, actorType, outcome, traceID string) *OperationContext {
+func NewOperationContext(mutationID string, wsID uuid.UUID, resource, resourceID, action string, connID *uuid.UUID, actorID uuid.UUID, actorType, outcome, traceID string) (*OperationContext, error) {
     c := &OperationContext{
         mutationID:  mutationID,
         workspaceID: wsID,
@@ -89,7 +89,39 @@ func NewOperationContext(mutationID string, wsID uuid.UUID, resource, resourceID
         v := *connID // 复制值，不保存指针
         c.connectionID = &v
     }
-    return c
+    if err := c.Validate(); err != nil {
+        return nil, err
+    }
+    return c, nil
+}
+
+// Validate 对 OperationContext 做统一 fail-closed 校验：拒绝零值上下文、空 mutationID、
+// 非法 resource（非 credential/connection）、connection-scoped 缺 ConnectionID、
+// 零 workspace/actor 或空 traceID。NewOperationContext 与 BeginCredential/BeginConnection
+// 在执行 mutation 前复用同一校验；校验失败则不继续执行 mutation。
+func (c *OperationContext) Validate() error {
+    if c == nil {
+        return errors.New("operation context: nil")
+    }
+    if c.mutationID == "" {
+        return errors.New("operation context: empty mutation id")
+    }
+    if c.workspaceID == uuid.Nil {
+        return errors.New("operation context: zero workspace")
+    }
+    if c.resource != "credential" && c.resource != "connection" {
+        return fmt.Errorf("operation context: invalid resource %q", c.resource)
+    }
+    if c.resourceID == "" {
+        return errors.New("operation context: empty resource id")
+    }
+    if c.resource == "connection" && c.connectionID == nil {
+        return errors.New("operation context: connection-scoped but missing connection id")
+    }
+    if c.actorID == uuid.Nil || c.traceID == "" {
+        return errors.New("operation context: missing actor or trace")
+    }
+    return nil
 }
 
 func (c *OperationContext) MutationID() string        { return c.mutationID }
@@ -110,13 +142,19 @@ func (c *OperationContext) ActorType() string         { return c.actorType }
 func (c *OperationContext) Outcome() string           { return c.outcome }
 func (c *OperationContext) TraceID() string           { return c.traceID }
 
-// AuditMatchFields mutation 与 AuditEvent 的唯一精确匹配字段集合。
-// AppendAudit、Commit 闸门与负向测试**复用**该集合；任一字段不匹配（资源/租户/连接/身份）
-// 即拒绝并回滚，验证不存在审计绕过（§2.4）。
-var AuditMatchFields = []string{
+// auditMatchFields 包内**私有的不可变**精确匹配字段契约（数组，外部不可重赋值/修改）。
+// AppendAudit、Commit 闸门与负向测试通过私有数组或比较器复用；跨包仅通过 AuditMatchFields() 防御性副本访问。
+var auditMatchFields = [...]string{
     "workspace_id", "resource", "resource_id", "action",
     "connection_id", "mutation_id", "actor_id", "actor_type",
     "outcome", "trace_id",
+}
+
+// AuditMatchFields 返回精确匹配字段的**防御性副本**（外部修改不影响契约）。
+func AuditMatchFields() []string {
+    out := make([]string, len(auditMatchFields))
+    copy(out, auditMatchFields[:])
+    return out
 }
 
 // AuditTx 事务内审计追加（仅追加；租户/脱敏/operation context 契约见 §2.4）。
@@ -178,8 +216,10 @@ type TxStore interface {
 }
 
 // AtomicTxStore 供 credential/connection 审计协调器开启原子化事务。
-// Begin* 返回的事务绑定协调器传入的 OperationContext（含唯一 mutation ID）；后续
-// mutation/AppendAudit 必须携带同一 context，Commit 按其校验精确匹配（§2.4）。
+// Begin* 执行 mutation 前调用 op.Validate()（fail-closed：拒绝零值/空 mutationID/非法
+// resource/connection-scoped 缺 ConnectionID 等），校验失败则不继续执行 mutation。
+// 返回的事务绑定协调器传入的 OperationContext（含唯一 mutation ID）；后续 mutation/AppendAudit
+// 必须携带同一 context，Commit 按其校验精确匹配（§2.4）。
 type AtomicTxStore interface {
     BeginCredential(ctx context.Context, op OperationContext) (CredentialAtomicTx, error) // credential 原子化
     BeginConnection(ctx context.Context, op OperationContext) (ConnectionAtomicTx, error) // connection 原子化
