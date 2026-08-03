@@ -32,6 +32,7 @@
 3. **无绕过路径**：所有 credential/connection 元数据库 mutation 必须经过带审计协调器（`credentials.LifecycleManager` / `connections.Service`）。**协调器独占 `Begin`/`Commit`/`Rollback` 与原始 mutation 方法，强制成对执行 mutation + `AppendAudit`**；外部调用方只能通过强制审计的入口（`AuditedLifecycleManager` / `Service`），无法直接拿到裸事务做"mutation 后提交不写审计"。`pgMetadataTx` 的裸 mutation 方法仅用于既有非原子路径与测试，不作为生产 mutation 入口。**`Commit` 是审计完成的闸门**：`pgMetadataTx` 的 `Commit` 在 credential/connection 原子化路径校验当前事务内已追加匹配当前 mutation 的 AuditEvent，未追加则拒绝提交并回滚（见 §3 接口注释）。
 4. **AuditTx 契约（仅追加 / 租户 / 脱敏 / 精确匹配 / operation context）**：`AppendAudit` 仅支持追加。
    - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（唯一 mutation ID、规范化 ResourceID、workspace、resource、action、connection、actor/actorType、outcome、traceID），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 的 `resource_id`、身份字段（actor/workspace/connection）、outcome 与 trace identity 必须与 context **完全匹配**；拒绝缺失、错误资源或错误身份并回滚事务。补覆盖违规输入及租户/connection 隔离的负向测试。
+   - **域绑定与事件矩阵（P1）**：`BeginCredential` 强制 `resource=="credential"`，`BeginConnection` 强制 `resource=="connection"`（拒绝跨域）；`action`/`outcome` 必须落在 **E1-E6 事件矩阵**内（`eventAllowed`，包内私有，§3）：connection.create/update（E1/E2）、credential.create/rotate/retire（E3-E6）。拒绝跨域 resource 与错误 action/outcome 组合（例如 resource="connection" + action="connection.test"）。
    - **connection 规则**：connection-scoped mutation（connection.create/update）必须提供并精确匹配 `ConnectionID`；credential-only mutation（credential.create/rotate/retire，E3-E6）允许 connection 为 null。`AppendAudit` 校验与匹配逻辑区分两类操作。
    - 强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。
    - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**：精确匹配字段集合为 `AuditMatchFields`（workspace、resource、resource_id、action、connection、mutation ID、actor_id、actor_type、outcome、trace_id，见 §3）；`AppendAudit`、`Commit` 闸门与负向测试**复用该集合**。拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
@@ -172,8 +173,9 @@ func AuditMatchFields() []string {
 }
 
 // AuditTx 事务内审计追加（仅追加；租户/脱敏/operation context 契约见 §2.4）。
+// op 为指针参数以支持 nil fail-closed 契约：先检查 nil，再 Validate，拒绝 nil context。
 type AuditTx interface {
-    AppendAudit(ctx context.Context, op OperationContext, e *AuditEvent) error
+    AppendAudit(ctx context.Context, op *OperationContext, e *AuditEvent) error
 }
 
 // CredentialMutationTx 凭证生命周期 mutation（不暴露 Commit/Rollback）。
@@ -230,13 +232,65 @@ type TxStore interface {
 }
 
 // AtomicTxStore 供 credential/connection 审计协调器开启原子化事务。
-// Begin* 执行 mutation 前调用 op.Validate()（fail-closed：拒绝零值/空 mutationID/非法
-// resource/connection-scoped 缺 ConnectionID 等），校验失败则不继续执行 mutation。
-// 返回的事务绑定协调器传入的 OperationContext（含唯一 mutation ID）；后续 mutation/AppendAudit
+// Begin* 执行 mutation 前先检查 op 为 nil（fail-closed），再调用域校验
+// （validateOpForCredential / validateOpForConnection，见下）：强制 resource 匹配域，
+// action/outcome 在 E1-E6 事件矩阵内；校验失败则不继续执行 mutation。
+// 返回的事务绑定已验证的 op 指针（或其私有字段不可变副本）；后续 mutation/AppendAudit
 // 必须携带同一 context，Commit 按其校验精确匹配（§2.4）。
 type AtomicTxStore interface {
-    BeginCredential(ctx context.Context, op OperationContext) (CredentialAtomicTx, error) // credential 原子化
-    BeginConnection(ctx context.Context, op OperationContext) (ConnectionAtomicTx, error) // connection 原子化
+    BeginCredential(ctx context.Context, op *OperationContext) (CredentialAtomicTx, error) // credential 原子化
+    BeginConnection(ctx context.Context, op *OperationContext) (ConnectionAtomicTx, error) // connection 原子化
+}
+
+// validateOpForCredential 供 BeginCredential 使用：先 nil/Validate，再强制 resource=="credential"，
+// 且 action/outcome 在 E3-E6 允许组合内；拒绝跨域 resource 与非法 action/outcome（P1）。
+func validateOpForCredential(op *OperationContext) error {
+    if op == nil {
+        return errors.New("operation context: nil")
+    }
+    if err := op.Validate(); err != nil {
+        return err
+    }
+    if op.Resource() != "credential" {
+        return fmt.Errorf("operation context: BeginCredential requires resource=credential, got %q", op.Resource())
+    }
+    if !eventAllowed(op.Resource(), op.Action(), op.Outcome()) {
+        return fmt.Errorf("operation context: invalid credential event %q/%q", op.Action(), op.Outcome())
+    }
+    return nil
+}
+
+// validateOpForConnection 供 BeginConnection 使用：先 nil/Validate，再强制 resource=="connection"，
+// 且 action/outcome 在 E1-E2 允许组合内；拒绝跨域 resource 与非法 action/outcome（P1）。
+func validateOpForConnection(op *OperationContext) error {
+    if op == nil {
+        return errors.New("operation context: nil")
+    }
+    if err := op.Validate(); err != nil {
+        return err
+    }
+    if op.Resource() != "connection" {
+        return fmt.Errorf("operation context: BeginConnection requires resource=connection, got %q", op.Resource())
+    }
+    if !eventAllowed(op.Resource(), op.Action(), op.Outcome()) {
+        return fmt.Errorf("operation context: invalid connection event %q/%q", op.Action(), op.Outcome())
+    }
+    return nil
+}
+
+// eventAllowed 校验 (resource, action, outcome) 是否在 E1-E6 事件矩阵内（§2.4）。
+// 包内私有：AppendAudit/Commit/负向测试复用。
+func eventAllowed(resource, action, outcome string) bool {
+    switch resource + "/" + action + "/" + outcome {
+    case "connection/connection.create/succeeded", // E1
+         "connection/connection.update/succeeded", // E2
+         "credential/credential.create/succeeded", // E3
+         "credential/credential.rotate/succeeded", // E4
+         "credential/credential.rotate/failed",    // E5
+         "credential/credential.retire/succeeded": // E6
+        return true
+    }
+    return false
 }
 ```
 
@@ -274,6 +328,9 @@ type AtomicTxStore interface {
 | 资源清理（事务结束、连接归还） | 待实施 | 集成测试 |
 | 脱敏错误（错误不含敏感信息） | 待实施 | 错误内容扫描 |
 | 无绕过：无未审计 mutation 入口 | 待实施 | 入口审计测试 / 代码审查 |
+| 跨域资源拒绝：`BeginCredential` 收 `resource=connection`、`BeginConnection` 收 `resource=credential` → 拒绝且不执行 mutation | 待实施 | 负向测试（P1） |
+| 错误 action/outcome 拒绝：不在 E1-E6 矩阵内的组合（如 connection/connection.test/succeeded）→ 拒绝且回滚 | 待实施 | 负向测试（P1） |
+| nil context 拒绝：`Begin*`/`AppendAudit` 传 nil `*OperationContext` → 拒绝且不执行 mutation | 待实施 | 负向测试（P2） |
 | 并发轮换（LIFE-07） | **部分覆盖** | `TestLifecycleRotateConcurrentPostgres`（WEB-24；验证并发轮换 + SecretVersion，但未直接调用 `AppendAudit`） |
 | 事务中间失败回滚（LIFE-08） | **部分覆盖** | `TestLifecycleRotateTxFailureRollbackPostgres`（WEB-24；真实 UPDATE 与 INSERT 回滚，但未覆盖 `AppendAudit` 失败注入） |
 | E9-E13 外部副作用例外 | 保持 | 既有 execution audit 测试 |
