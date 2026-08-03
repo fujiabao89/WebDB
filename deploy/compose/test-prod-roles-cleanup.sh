@@ -76,16 +76,24 @@ check_residuals
 echo "OK: 中断路径（TERM 信号驱动）exit 130 且零残留"
 
 echo "=== 回归 4/4：缺失 setsid 失败路径（create 应拒绝且不修改角色） ==="
-# 将包含 setsid 的目录从 PATH 剔除，模拟无 setsid 环境。
-# setsid 检查位于 create 的 scram/psql 之前、仅依赖 bash 内建，故剥离 PATH 后仍能正确命中。
-setsid_dir=$(dirname "$(command -v setsid)")
-stripped_path=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vx "$setsid_dir" | paste -sd: -)
-[ -n "$stripped_path" ] || stripped_path="/usr/bin:/bin"
+# 用只含临时空目录的私有 PATH 模拟无 setsid 环境：
+#   - 避免原 PATH 过滤管道（tr|grep|paste）在 set -euo pipefail 下无匹配返回非零导致脚本退出，
+#   - 避免过滤后 PATH 仍含其他位置的 setsid；
+#   - 密码通过子 shell 的 export 传入（不作为 env 工具 argv，避免出现在进程列表）。
+mkdir -p "$WS/emptybin"
+BASH_ABS=$(command -v bash)
+# 前置断言：私有 PATH 下 command -v setsid 必须失败，再运行 CREATE_SCRIPT
+if PATH="$WS/emptybin" command -v setsid >/dev/null 2>&1; then
+  fail "前置断言失败：私有 PATH 下仍能定位 setsid"
+fi
 set +e
-env PATH="$stripped_path" WEBDB_PRODUCTION_DEPLOY=1 \
-  POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME" \
-  WEBDB_APP_PASSWORD='X@1' WEBDB_AUDIT_PASSWORD='Y@2' \
-  bash "$CREATE_SCRIPT" >"$WS/setsid.log" 2>&1
+(
+  export WEBDB_PRODUCTION_DEPLOY=1
+  export POSTGRES_USER="$ADMIN_USER" POSTGRES_PASSWORD="$ADMIN_PASSWORD" POSTGRES_DB="$DB_NAME"
+  export WEBDB_APP_PASSWORD='X@1' WEBDB_AUDIT_PASSWORD='Y@2'
+  export PATH="$WS/emptybin"
+  "$BASH_ABS" "$CREATE_SCRIPT"
+) >"$WS/setsid.log" 2>&1
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then fail "缺失 setsid 时 create 应失败（got exit 0）"; fi

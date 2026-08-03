@@ -37,9 +37,9 @@ P0 阶段仓库尚无独立的"生产部署路径"（无 `deploy/prod` 等目录
 ## 验证与回滚/替代条件
 
 - 验证：`docker compose config` 不执行 prod-roles 脚本；脚本在未设 `WEBDB_PRODUCTION_DEPLOY` 时拒绝执行；截止日前由 Owner 复核迁移进度。
-- 回滚/替代：建立独立生产部署路径（`deploy/prod` 或等价目录）并迁移脚本与文档后，本 ADR 标记为"已替代"；若截止日未迁移，需新 ADR 续期或由 Owner 决定。
+- 回滚/替代：建立独立生产部署路径（`deploy/prod` 或等价目录）并迁移脚本与文档后，本 ADR 标记为"已替代"。**截止日（2026-09-30 或独立生产部署路径建立之日，取先）到期后必须完成迁移**；任何延期都必须在截止日前通过**新的 ADR** 批准，Owner 不得单独决定延期。
 
 ## 相关资料
 
-- [README 部署边界说明](../deploy/compose/README.md)
+- [README 部署边界说明](../../deploy/compose/README.md)
 - [ADR-013：P0 元数据库迁移与 Schema 基线](ADR-013-p0-metadata-migrations-schema.md)
