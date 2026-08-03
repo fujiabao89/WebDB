@@ -36,6 +36,13 @@ validate_pw() {
 validate_pw WEBDB_APP_PASSWORD "${WEBDB_APP_PASSWORD:-}"
 validate_pw WEBDB_AUDIT_PASSWORD "${WEBDB_AUDIT_PASSWORD:-}"
 validate_pw POSTGRES_PASSWORD "${POSTGRES_PASSWORD:-}"
+# 目标库必须为 webdb_meta（与 verify-prod-roles.sh 一致；非 webdb_meta 立即失败且不写入权限）
+if [ "${POSTGRES_DB:-}" != "webdb_meta" ]; then
+  echo "错误: POSTGRES_DB 必须为 webdb_meta（生产元数据库），当前: ${POSTGRES_DB:-<空>}" >&2
+  exit 1
+fi
+# 密码不进 SQL 日志：所有 psql 连接禁用 statement 日志（防明文密码出现在 PostgreSQL 日志）
+export PGOPTIONS="-c log_statement=none"
 export APP_PASSWORD="$WEBDB_APP_PASSWORD"
 export AUDIT_PASSWORD="$WEBDB_AUDIT_PASSWORD"
 export PGPASSWORD="$POSTGRES_PASSWORD"

@@ -80,14 +80,25 @@ echo "OK: DELETE/TRUNCATE 被拒绝"
 echo "=== 7. 独立验证角色（非 SUPERUSER 但持有 audit_events 写权限）→ deny_audit_mutation 触发器拒绝 ==="
 PROBE=""
 PROBE_PW=""
-# 失败/中断（EXIT/INT/TERM）也清理临时验证角色；幂等、不覆盖原始退出状态
+# 失败/中断（EXIT/INT/TERM）也清理临时验证角色；幂等
 cleanup_probe() {
   if [ -n "$PROBE" ]; then
-    PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
-      -v ON_ERROR_STOP=1 >/dev/null 2>&1 -c "DROP ROLE IF EXISTS \"$PROBE\";" || true
+    if ! PGPASSWORD="$ADMIN_PASSWORD" psql -w -h "$PGHOST" -p "$PGPORT" -U "$ADMIN_USER" -d "$DB_NAME" \
+      -v ON_ERROR_STOP=1 >/dev/null 2>&1 -c "DROP ROLE IF EXISTS \"$PROBE\";"; then
+      echo "警告: 临时验证角色 $PROBE 清理失败（DROP ROLE 返回非零）" >&2
+      return 1
+    fi
   fi
+  return 0
 }
-trap cleanup_probe EXIT INT TERM
+# EXIT：执行清理但**不覆盖**原始退出状态（bash EXIT trap 不改变退出码）
+# INT/TERM：清理后以 130 中断退出，不继续成功执行
+cleanup_and_exit() {
+  cleanup_probe || true
+  exit 130
+}
+trap cleanup_probe EXIT
+trap cleanup_and_exit INT TERM
 PROBE="webdb_audit_probe_$$"
 PROBE_PW="probe_tmp_$$"
 # 创建临时验证角色（仅验证期），授予 audit_events 全部写权限（验证触发器而非 ACL）
