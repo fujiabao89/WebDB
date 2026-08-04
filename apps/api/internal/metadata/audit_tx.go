@@ -99,25 +99,9 @@ func (t *pgMetadataTx) UpdateExecution(ctx context.Context, wsID uuid.UUID, e *E
 }
 
 // AppendAudit 在事务中追加审计事件。fail-closed：metadata 必须符合事件 schema。
+// 与 atomic wrapper（pgCredentialAtomicTx/pgConnectionAtomicTx）共享 insertAuditEvent。
 func (t *pgMetadataTx) AppendAudit(ctx context.Context, e *AuditEvent) error {
-	if e.OccurredAt.IsZero() {
-		return fmt.Errorf("audit: occurred_at 不得为零值")
-	}
-	if err := ValidateAuditEventMetadata(e.Action, e.Outcome, e.Metadata); err != nil {
-		return err
-	}
-	const q = `
-		INSERT INTO audit_events
-			(workspace_id, actor_type, actor_id, connection_id,
-			 action, resource_type, resource_id, outcome,
-			 metadata, trace_id, execution_id, occurred_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
-		RETURNING id, created_at`
-	return t.tx.QueryRowContext(ctx, q,
-		e.WorkspaceID, string(e.ActorType), e.ActorID, e.ConnectionID,
-		e.Action, e.ResourceType, e.ResourceID, string(e.Outcome),
-		e.Metadata, e.TraceID, e.ExecutionID, e.OccurredAt,
-	).Scan(&e.ID, &e.CreatedAt)
+	return insertAuditEvent(ctx, t.tx, e)
 }
 
 // Commit 提交事务。
