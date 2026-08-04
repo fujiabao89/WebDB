@@ -280,14 +280,17 @@ type AtomicTxStore interface {
 
 // ---- 域绑定校验 ---------------------------------------------------------------
 
-// eventAllowed 校验 (resource, action, outcome) 是否在 E1-E6 事件矩阵内。
+// eventAllowed 校验 (resource, action, outcome) 是否在原子事务允许的事件矩阵内。
+// 仅允许成功 mutation 与其审计（E1-E4/E6）；E5（credential.rotate failed）不在此列：
+// Rotate 失败分支（无已提交 mutation）先回滚释放行锁，再经独立失败审计入口
+// （credentials.LifecycleManager.writeRotateFailedAudit）写入，不进入原子 mutation 事务
+// （LATEST3-CR-01）。
 func eventAllowed(resource, action, outcome string) bool {
 	switch resource + "/" + action + "/" + outcome {
 	case "connection/connection.create/succeeded", // E1
 		"connection/connection.update/succeeded", // E2
 		"credential/credential.create/succeeded", // E3
 		"credential/credential.rotate/succeeded", // E4
-		"credential/credential.rotate/failed",    // E5
 		"credential/credential.retire/succeeded": // E6
 		return true
 	}
@@ -295,7 +298,8 @@ func eventAllowed(resource, action, outcome string) bool {
 }
 
 // validateOpForCredential 供 BeginCredential 使用：先 nil/Validate，再强制
-// resource=="credential"，且 action/outcome 在 E3-E6 允许组合内。
+// resource=="credential"，且 action/outcome 在 E3/E4/E6 允许组合内
+// （E5 credential.rotate failed 不进入原子 mutation 事务，走独立失败审计入口）。
 func validateOpForCredential(op *OperationContext) error {
 	if op == nil {
 		return errors.New("operation context: nil")

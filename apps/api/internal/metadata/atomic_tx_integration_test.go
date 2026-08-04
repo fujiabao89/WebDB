@@ -5,6 +5,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -156,6 +157,56 @@ func TestAtomicTxAppendAuditWrongContextRejected(t *testing.T) {
 	}
 	if err := atx.AppendAudit(ctx, wrongOp, newCredEvent(t, ws.ID, uuid.New(), secretRef, 1, uuid.NewString())); err == nil {
 		t.Fatal("AppendAudit with wrong op must be rejected")
+	}
+}
+
+// TestAtomicTxAppendAuditInvalidMetadataRollsBack 验证 AppendAudit 拒绝非法 metadata 后
+// 事务回滚且不提交（LATEST3-CR-02：非法 metadata 场景的负向事务回归）。
+func TestAtomicTxAppendAuditInvalidMetadataRollsBack(t *testing.T) {
+	db, store, u, ws, _, _, _, cleanup := setupFull(t)
+	defer db.Close()
+	defer cleanup()
+
+	ctx := context.Background()
+	secretRef := uuid.New()
+	traceID := uuid.NewString()
+	op := newCredOp(t, ws.ID, u.ID, secretRef, traceID)
+
+	atx, err := store.BeginCredential(ctx, op)
+	if err != nil {
+		t.Fatalf("BeginCredential: %v", err)
+	}
+	defer atx.Rollback()
+	if err := atx.InsertEnvelope(ctx, syntheticEnvelope(ws.ID, secretRef, 1)); err != nil {
+		t.Fatalf("InsertEnvelope: %v", err)
+	}
+	// 非法 metadata：secret_version 应为整数，注入字符串 → ValidateAuditEventMetadata 拒绝。
+	badMD, _ := json.Marshal(map[string]any{
+		"secret_ref":     secretRef.String(),
+		"secret_version": "not-an-int",
+	})
+	badEvent := &AuditEvent{
+		WorkspaceID:  ws.ID,
+		ActorType:    ActorTypeUser,
+		ActorID:      &u.ID,
+		Action:       ActionCredentialCreate,
+		ResourceType: "credential",
+		ResourceID:   secretRef.String(),
+		Outcome:      OutcomeSucceeded,
+		Metadata:     badMD,
+		TraceID:      traceID,
+		OccurredAt:   time.Now().UTC(),
+	}
+	if err := atx.AppendAudit(ctx, op, badEvent); err == nil {
+		t.Fatal("AppendAudit with invalid metadata must be rejected")
+	}
+	// 未追加匹配审计事件 → Commit 审计闸门拒绝提交。
+	if err := atx.Commit(); err == nil {
+		t.Fatal("commit must be rejected when audit append failed (gate)")
+	}
+	// 回滚：envelope 不残留。
+	if _, err := store.EnvelopeByRef(ctx, ws.ID, secretRef, 1); err == nil {
+		t.Fatal("envelope should not exist after invalid-metadata rollback")
 	}
 }
 

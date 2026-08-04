@@ -104,7 +104,6 @@ func TestEventAllowed(t *testing.T) {
 		{"connection", "connection.update", "succeeded"},
 		{"credential", "credential.create", "succeeded"},
 		{"credential", "credential.rotate", "succeeded"},
-		{"credential", "credential.rotate", "failed"},
 		{"credential", "credential.retire", "succeeded"},
 	}
 	for _, c := range allowed {
@@ -115,6 +114,7 @@ func TestEventAllowed(t *testing.T) {
 	denied := [][3]string{
 		{"connection", "connection.test", "succeeded"}, // E7 外部副作用例外，不允许原子化
 		{"credential", "credential.create", "failed"},
+		{"credential", "credential.rotate", "failed"}, // E5 走独立失败路径，不进原子 mutation 事务
 		{"credential", "credential.retire", "failed"},
 		{"execution", "sql.execute", "succeeded"},
 	}
@@ -139,6 +139,11 @@ func TestValidateOpForCredentialCrossDomainRejected(t *testing.T) {
 func TestValidateOpForCredentialInvalidEvent(t *testing.T) {
 	if err := validateOpForCredential(testOp(t, "credential", "ref", "credential.retire", "failed", nil)); err == nil {
 		t.Fatal("invalid credential.retire/failed accepted, want error")
+	}
+	// E5（credential.rotate failed）不进入原子 mutation 事务：走独立失败审计入口，
+	// BeginCredential 必须拒绝（LATEST3-CR-01）。
+	if err := validateOpForCredential(testOp(t, "credential", "ref", "credential.rotate", "failed", nil)); err == nil {
+		t.Fatal("credential.rotate/failed (E5) accepted by BeginCredential, want error (independent failure path)")
 	}
 	conn := uuid.New()
 	if err := validateOpForConnection(testOp(t, "connection", "c1", "connection.test", "succeeded", &conn)); err == nil {
