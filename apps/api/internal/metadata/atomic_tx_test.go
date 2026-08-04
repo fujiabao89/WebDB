@@ -363,29 +363,37 @@ func TestBeginConnectionRejectsAtEntry(t *testing.T) {
 // TestAppendAuditRejectsNilContext 直接调用原子 wrapper 的 AppendAudit，验证 nil
 // OperationContext 在写入前被拒绝（matchOperationContext 拒绝，不触碰事务）。
 func TestAppendAuditRejectsNilContext(t *testing.T) {
-	ws := uuid.New()
-	actor := uuid.New()
 	op := testOp(t, "credential", "ref", "credential.create", "succeeded", nil)
+	actor := op.ActorID()
 	atx := &pgCredentialAtomicTx{op: op} // tx 为 nil：nil op 在校验阶段被拒，不触碰 tx
 	raw, _ := (AuditMetadata{
-		SecretRef:     strPtr("ref"),
+		SecretRef:     strPtr(op.ResourceID()),
 		SecretVersion: intPtr(1),
 		EnvelopeSuite: strPtr("AES256GCM-v1"),
 		KEKVersion:    intPtr(1),
 	}).Marshal()
+	// 从 op 复制事件的匹配字段，确保拒绝仅由 nil operation context 触发，
+	// 而非无关的事件字段不匹配（LATEST6-CR-01）。
 	event := &AuditEvent{
-		WorkspaceID:  ws,
+		WorkspaceID:  op.WorkspaceID(),
 		ActorType:    ActorTypeUser,
 		ActorID:      &actor,
-		Action:       ActionCredentialCreate,
-		ResourceType: "credential",
-		ResourceID:   "ref",
-		Outcome:      OutcomeSucceeded,
+		Action:       op.Action(),
+		ResourceType: op.Resource(),
+		ResourceID:   op.ResourceID(),
+		Outcome:      AuditOutcome(op.Outcome()),
 		Metadata:     raw,
-		TraceID:      "trace-x",
+		TraceID:      op.TraceID(),
 		OccurredAt:   time.Now().UTC(),
 	}
-	if err := atx.AppendAudit(context.Background(), nil, event); err == nil {
+	if err := matchAuditEventOp(op, event); err != nil {
+		t.Fatalf("test precondition: event must match operation: %v", err)
+	}
+	err := atx.AppendAudit(context.Background(), nil, event)
+	if err == nil {
 		t.Fatal("AppendAudit(nil op) must be rejected before write")
+	}
+	if !strings.Contains(err.Error(), "operation context mismatch") {
+		t.Fatalf("AppendAudit(nil op) error = %v, want operation context mismatch", err)
 	}
 }
