@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"strings"
 	"testing"
@@ -52,9 +51,46 @@ type fakeAtomicTx struct {
 }
 
 func (f *fakeAtomicTx) AppendAudit(ctx context.Context, op *metadata.OperationContext, e *metadata.AuditEvent) error {
+	// 复刻真实审计闸门契约（CodeRabbit-0）：op 与事件字段完全匹配才允许追加。
+	if err := matchFakeOpEvent(op, e); err != nil {
+		return err
+	}
 	f.appendCalls++
 	f.events = append(f.events, e)
 	return f.appendAuditErr
+}
+
+// matchFakeOpEvent 复刻 metadata.matchAuditEventOp 的字段一致性校验，防止 fake
+// 跳过审计闸门导致单元测试层对 OperationContext 与 AuditEvent 的一致性无保护。
+func matchFakeOpEvent(op *metadata.OperationContext, e *metadata.AuditEvent) error {
+	if op == nil {
+		return errors.New("audit gate: nil operation context")
+	}
+	if e == nil {
+		return errors.New("audit gate: nil audit event")
+	}
+	if op.WorkspaceID() != e.WorkspaceID {
+		return errors.New("audit gate: workspace mismatch")
+	}
+	if op.Action() != e.Action {
+		return errors.New("audit gate: action mismatch")
+	}
+	if op.Resource() != e.ResourceType {
+		return errors.New("audit gate: resource mismatch")
+	}
+	if op.ResourceID() != e.ResourceID {
+		return errors.New("audit gate: resource id mismatch")
+	}
+	if op.Outcome() != string(e.Outcome) {
+		return errors.New("audit gate: outcome mismatch")
+	}
+	if op.TraceID() != e.TraceID {
+		return errors.New("audit gate: trace mismatch")
+	}
+	if e.ActorID == nil || *e.ActorID != op.ActorID() {
+		return errors.New("audit gate: actor mismatch")
+	}
+	return nil
 }
 func (f *fakeAtomicTx) LockEnvelopeForUpdate(context.Context, uuid.UUID, uuid.UUID) (*metadata.CredentialEnvelope, error) {
 	return f.env, f.lockErr
@@ -289,7 +325,10 @@ func TestRetireInUseNoCommit(t *testing.T) {
 
 // ---- Resolve 失败审计（E14-E16） ---------------------------------------------
 
-func TestResolveNotFoundWritesE14(t *testing.T) {
+func TestResolveFailureDoesNotWriteE14(t *testing.T) {
+	// QODO-13：Resolve 本身不写 E14-E16（execution.Pipeline.recordCredentialFailure 为
+	// 权威写入者，携带 connection_id 符合 E14-E16 事件矩阵）。此处断言 Resolve 不产生
+	// 审计，防止与 pipeline 重复审计行。
 	ref := uuid.New()
 	read := &fakeReadStore{envErr: metadata.ErrEnvelopeNotFound}
 	audit := &fakeAuditSink{}
@@ -299,8 +338,135 @@ func TestResolveNotFoundWritesE14(t *testing.T) {
 	if !IsErrorCode(err, ErrCredentialNotFound) {
 		t.Fatalf("Resolve() error = %v, want credential_not_found", err)
 	}
-	if len(audit.events) != 1 || audit.events[0].Action != metadata.ActionCredentialLookup {
-		t.Fatalf("expected E14 lookup event, got %d events", len(audit.events))
+	if len(audit.events) != 0 {
+		t.Fatalf("Resolve must not write E14-E16 (pipeline is authoritative): got %d events", len(audit.events))
+	}
+}
+
+func TestResolveDecryptFailureDoesNotWriteE15(t *testing.T) {
+	// QODO-13：decrypt 类失败同样由 pipeline 权威写入，Resolve 不写 E15/E16。
+	ref := uuid.New()
+	read := &fakeReadStore{env: &metadata.CredentialEnvelope{
+		WorkspaceID:   uuid.New(),
+		SecretRef:     ref,
+		Version:       1,
+		EnvelopeSuite: "AES256GCM-v1",
+		KEKVersion:    1,
+		Ciphertext:    []byte("garbage-cipher"),
+		DataNonce:     []byte("data-nonce-12b"),
+		WrappedDEK:    []byte("garbage-dek"),
+		WrapNonce:     []byte("wrap-nonce-12b"),
+	}}
+	audit := &fakeAuditSink{}
+	m, _ := newTestManager(nil, read, audit, &fakeAlarmRecorder{})
+
+	if _, err := m.Resolve(context.Background(), uuid.New(), ref, 1); err == nil {
+		t.Fatal("expected decrypt failure")
+	}
+	if len(audit.events) != 0 {
+		t.Fatalf("Resolve must not write E15/E16 (pipeline is authoritative): got %d events", len(audit.events))
+	}
+}
+
+// TestRotateE5WriteFailureFailsClosed 验证 E5 失败审计写失败时 fail-closed 返回
+// audit_failed（QODO-14；恢复 WEB-23 AuditedLifecycleManager 语义）。
+func TestRotateE5WriteFailureFailsClosed(t *testing.T) {
+	ref := uuid.New()
+	tx := &fakeAtomicTx{env: &metadata.CredentialEnvelope{SecretRef: ref, Version: 2}}
+	audit := &fakeAuditSink{fail: errors.New("injected audit failure")}
+	alarm := &fakeAlarmRecorder{}
+	m, _ := newTestManager(tx, &fakeReadStore{}, audit, alarm)
+
+	_, err := m.Rotate(context.Background(), uuid.New(), uuid.New(), ref, 1, testPayload())
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("Rotate() error = %v, want audit_failed (fail-closed on E5 write failure)", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when rotate fails")
+	}
+	if len(alarm.events) == 0 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// TestRotateAuditFailureRollsBack 覆盖 Rotate 成功路径 AppendAudit 失败 → 回滚
+// （CR-10：Rotate 审计失败回归）。
+func TestRotateAuditFailureRollsBack(t *testing.T) {
+	ref := uuid.New()
+	tx := &fakeAtomicTx{
+		env:            &metadata.CredentialEnvelope{SecretRef: ref, Version: 1},
+		appendAuditErr: errors.New("injected audit failure"),
+	}
+	alarm := &fakeAlarmRecorder{}
+	m, _ := newTestManager(tx, &fakeReadStore{}, &fakeAuditSink{}, alarm)
+
+	_, err := m.Rotate(context.Background(), uuid.New(), uuid.New(), ref, 1, testPayload())
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("Rotate() error = %v, want audit_failed", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when audit append fails")
+	}
+	if tx.rollbackCalls == 0 {
+		t.Fatal("must roll back when audit append fails")
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// TestRetireAuditFailureRollsBack 覆盖 Retire AppendAudit 失败 → 回滚
+// （CR-10：Retire 审计失败回归）。
+func TestRetireAuditFailureRollsBack(t *testing.T) {
+	ref := uuid.New()
+	tx := &fakeAtomicTx{
+		env:            &metadata.CredentialEnvelope{SecretRef: ref, Version: 1},
+		appendAuditErr: errors.New("injected audit failure"),
+	}
+	alarm := &fakeAlarmRecorder{}
+	m, _ := newTestManager(tx, &fakeReadStore{}, &fakeAuditSink{}, alarm)
+
+	err := m.Retire(context.Background(), uuid.New(), uuid.New(), ref, 1)
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("Retire() error = %v, want audit_failed", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when audit append fails")
+	}
+	if tx.rollbackCalls == 0 {
+		t.Fatal("must roll back when audit append fails")
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+}
+
+// TestAuditEventBuildFailedLogsRedactedRootCause 验证 auditEventBuildFailed 记录脱敏根因
+// 日志（CR-4），且日志不含敏感值。
+func TestAuditEventBuildFailedLogsRedactedRootCause(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	alarm := &fakeAlarmRecorder{}
+	m, _ := newTestManager(&fakeAtomicTx{}, &fakeReadStore{}, &fakeAuditSink{}, alarm, logger)
+
+	err := m.auditEventBuildFailed(context.Background(), uuid.New(), errors.New("build error: password=classified123"))
+	if !IsErrorCode(err, ErrAuditFailed) {
+		t.Fatalf("auditEventBuildFailed() error = %v, want audit_failed", err)
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %+v", alarm.events)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "build error") {
+		t.Errorf("root cause context not logged: %q", out)
+	}
+	for _, leaked := range []string{"classified123", "password=classified"} {
+		if strings.Contains(out, leaked) {
+			t.Errorf("log leaked sensitive value %q: %q", leaked, out)
+		}
+	}
+	if !strings.Contains(out, "password=[redacted]") {
+		t.Errorf("sensitive value not redacted: %q", out)
 	}
 }
 
@@ -342,6 +508,3 @@ func TestLogStorageFailureRedactsSensitive(t *testing.T) {
 		t.Errorf("sensitive value not redacted: %q", out)
 	}
 }
-
-// 引用 io，避免未使用导入（logger 需要 io.Discard）。
-var _ = io.Discard

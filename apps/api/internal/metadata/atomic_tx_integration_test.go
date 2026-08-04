@@ -143,6 +143,8 @@ func TestAtomicTxAppendAuditWrongContextRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginCredential: %v", err)
 	}
+	// AppendAudit 失败后必须终止事务并归还连接（CodeRabbit-6）。
+	defer atx.Rollback()
 	wrongOp, err := NewOperationContext(
 		uuid.NewString(), ws.ID, "credential", secretRef.String(),
 		ActionCredentialCreate, nil, uuid.New(), "user", string(OutcomeSucceeded), uuid.NewString(),

@@ -163,8 +163,12 @@ func (f *fakeAtomicTx) AppendAudit(_ context.Context, _ *metadata.OperationConte
 	return nil
 }
 func (f *fakeAtomicTx) CreateConnection(_ context.Context, c *metadata.Connection) error {
+	// 复刻真实 createConnectionOnTx 契约（CodeRabbit-0）：连接 ID 必须由服务端
+	// 在 BeginConnection 前预分配（op 需持非零 ID）；不得由 fake 重置 ID。
+	if c.ID == uuid.Nil {
+		return errors.New("create connection: id must be pre-assigned")
+	}
 	f.createCalls++
-	c.ID = uuid.New()
 	c.CreatedAt = time.Now()
 	c.UpdatedAt = time.Now()
 	return nil
@@ -280,6 +284,9 @@ func TestConnection_CreateAuditFailureRollsBack(t *testing.T) {
 	if tx.committed {
 		t.Fatal("must NOT commit when audit append fails")
 	}
+	if !tx.rolledBack {
+		t.Fatal("must roll back when audit append fails")
+	}
 	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
 		t.Fatalf("expected audit_failed alarm, got %d", len(alarm.events))
 	}
@@ -331,6 +338,47 @@ func TestConnection_UpdateWritesE2(t *testing.T) {
 	}
 	if md["environment"] != "production" {
 		t.Errorf("environment = %v, want production", md["environment"])
+	}
+}
+
+func TestConnection_UpdateEmptyIDReturnsConnectionNotFound(t *testing.T) {
+	// CodeRabbit-2：空 conn.ID 是调用方输入错误，返回连接类稳定错误，
+	// 不得映射为 audit_failed，也不得触发安全告警。
+	p := testPrincipal()
+	alarm := &fakeAlarmSink{}
+	s := NewService(&fakeConnectionStore{}, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, &fakeAuditSink{}, alarm, &fakeResolver{}, &fakeTester{})
+
+	err := s.Update(context.Background(), p, &metadata.Connection{})
+	if !errors.Is(err, ErrConnectionNotFound) {
+		t.Fatalf("Update() error = %v, want connection_not_found", err)
+	}
+	if len(alarm.events) != 0 {
+		t.Fatalf("no security alarm expected for empty id, got %+v", alarm.events)
+	}
+}
+
+func TestConnection_UpdateAuditFailureRollsBack(t *testing.T) {
+	// CR-10：connection Update 审计追加失败 → 不提交、回滚、返回 audit_failed 且告警。
+	p := testPrincipal()
+	alarm := &fakeAlarmSink{}
+	tx := &fakeAtomicTx{appendErr: errors.New("injected audit failure")}
+	s := NewService(&fakeConnectionStore{}, &fakeAtomicTxStore{tx: tx}, &fakeMemberStore{role: metadata.RoleOwner}, &fakeAuditSink{}, alarm, &fakeResolver{}, &fakeTester{})
+
+	err := s.Update(context.Background(), p, &metadata.Connection{ID: uuid.New()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), string(ErrAuditFailed)) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when audit append fails")
+	}
+	if !tx.rolledBack {
+		t.Fatal("must roll back when audit append fails")
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %d", len(alarm.events))
 	}
 }
 

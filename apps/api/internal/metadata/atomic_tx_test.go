@@ -27,69 +27,72 @@ func TestOperationContextValidate(t *testing.T) {
 
 	cases := []struct {
 		name    string
-		op      func() *OperationContext
-		wantErr bool
+		build   func() (*OperationContext, error)
+		wantErr string // 期望的错误片段；空表示成功
 	}{
-		{"credential valid", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
-			return op
-		}, false},
-		{"connection valid", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "connection", "c1", "connection.create", &conn, actor, "user", "succeeded", "t")
-			return op
-		}, false},
-		{"nil mutation id", func() *OperationContext {
-			op, _ := NewOperationContext("", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"zero workspace", func() *OperationContext {
-			op, _ := NewOperationContext("m", uuid.Nil, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"invalid resource", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "execution", "ref", "x", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"empty resource id", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "", "credential.create", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"empty action", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"empty actor type", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "", "succeeded", "t")
-			return op
-		}, true},
-		{"empty outcome", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "", "t")
-			return op
-		}, true},
-		{"connection missing conn id", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "connection", "c1", "connection.create", nil, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"connection zero conn id", func() *OperationContext {
+		{"credential valid", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
+		}, ""},
+		{"connection valid", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "connection", "c1", "connection.create", &conn, actor, "user", "succeeded", "t")
+		}, ""},
+		{"nil mutation id", func() (*OperationContext, error) {
+			return NewOperationContext("", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
+		}, "empty mutation id"},
+		{"zero workspace", func() (*OperationContext, error) {
+			return NewOperationContext("m", uuid.Nil, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "t")
+		}, "zero workspace"},
+		{"invalid resource", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "execution", "ref", "x", nil, actor, "user", "succeeded", "t")
+		}, "invalid resource"},
+		{"empty resource id", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "", "credential.create", nil, actor, "user", "succeeded", "t")
+		}, "empty resource id"},
+		{"empty action", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "", nil, actor, "user", "succeeded", "t")
+		}, "empty action"},
+		{"empty actor type", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "", "succeeded", "t")
+		}, "empty actor type"},
+		{"empty outcome", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "", "t")
+		}, "empty outcome"},
+		{"connection missing conn id", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "connection", "c1", "connection.create", nil, actor, "user", "succeeded", "t")
+		}, "connection-scoped but missing or zero connection id"},
+		{"connection zero conn id", func() (*OperationContext, error) {
 			z := uuid.Nil
-			op, _ := NewOperationContext("m", ws, "connection", "c1", "connection.create", &z, actor, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"zero actor", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, uuid.Nil, "user", "succeeded", "t")
-			return op
-		}, true},
-		{"empty trace", func() *OperationContext {
-			op, _ := NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "")
-			return op
-		}, true},
+			return NewOperationContext("m", ws, "connection", "c1", "connection.create", &z, actor, "user", "succeeded", "t")
+		}, "connection-scoped but missing or zero connection id"},
+		{"zero actor", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, uuid.Nil, "user", "succeeded", "t")
+		}, "missing actor or trace"},
+		{"empty trace", func() (*OperationContext, error) {
+			return NewOperationContext("m", ws, "credential", "ref", "credential.create", nil, actor, "user", "succeeded", "")
+		}, "missing actor or trace"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			op := tc.op()
-			err := op.Validate()
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			// 直接断言构造器返回的错误（CodeRabbit-7）：校验失败时构造器返回 (nil, err)，
+			// 仅对成功构造的上下文再调用 Validate 保持直接覆盖。
+			op, err := tc.build()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("NewOperationContext() error = %v, want nil", err)
+				}
+				if op == nil {
+					t.Fatal("NewOperationContext() op = nil on success")
+				}
+				if verr := op.Validate(); verr != nil {
+					t.Fatalf("Validate() error = %v, want nil", verr)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("NewOperationContext() = nil error, want containing %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("NewOperationContext() error = %v, want containing %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -169,8 +172,17 @@ func TestMatchOperationContext(t *testing.T) {
 	if !matchOperationContext(op, op) {
 		t.Fatal("matchOperationContext(same) = false")
 	}
-	op2 := testOp(t, "credential", "ref", "credential.create", "succeeded", nil)
-	if matchOperationContext(op, op2) {
+	// 构造仅 mutationID 不同的第二个上下文（CodeRabbit-8）：此前 testOp 每次生成新的
+	// workspaceID/actorID，断言失败消息虽称 "different mutationID"，实际差异在身份字段，
+	// 对 mutationID 比较无回归保护。
+	other, err := NewOperationContext(
+		"mutation-2", op.WorkspaceID(), op.Resource(), op.ResourceID(), op.Action(),
+		nil, op.ActorID(), op.ActorType(), op.Outcome(), op.TraceID(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matchOperationContext(op, other) {
 		t.Fatal("matchOperationContext(different mutationID) = true")
 	}
 	if matchOperationContext(nil, op) || matchOperationContext(op, nil) {
