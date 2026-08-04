@@ -334,7 +334,7 @@ func eventAllowed(resource, action, outcome string) bool {
 | 脱敏错误（错误不含敏感信息） | **已实施** | `TestLogStorageFailureRedactsSensitive`、`TestAuditEventBuildFailedLogsRedactedRootCause` |
 | 无绕过：无未审计 mutation 入口 | **已实施** | `TestAtomicTxDomainIsolation`（跨域类型断言） |
 | 跨域资源拒绝：`BeginCredential` 收 `resource=connection`、`BeginConnection` 收 `resource=credential` → 拒绝且不执行 mutation | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`（直接调用 Begin*，拒绝且不开事务）；validate 层 `TestValidateOpForCredentialCrossDomainRejected` |
-| 错误 action/outcome 拒绝：不在原子允许矩阵内的组合（如 connection/connection.test/succeeded、credential.rotate/failed）→ 拒绝且回滚 | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`；validate 层 `TestValidateOpForCredentialInvalidEvent` |
+| 错误 action/outcome 拒绝：不在原子允许矩阵内的组合（如 connection/connection.test/succeeded、credential.rotate/failed）→ 拒绝且不启动事务、不执行 mutation | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`（validate 阶段拒绝，事务未启动）；validate 层 `TestValidateOpForCredentialInvalidEvent` |
 | nil context 拒绝：`Begin*`/`AppendAudit` 传 nil `*OperationContext` → 拒绝且不执行 mutation | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`/`TestAtomicAppendAuditRejectsNilContext`；validate 层 `TestValidateOpForCredentialNil` |
 | 审计闸门仅限原子 wrapper：`pgMetadataTx.Commit`（execution 路径）无闸门，execution.Pipeline 保持兼容 | **已实施** | `TestAtomicTxDomainIsolation`（`pgMetadataTx` 不实现原子接口） |
 | 原子事务缺失匹配 AuditEvent 时 `pgCredentialAtomicTx.Commit`/`pgConnectionAtomicTx.Commit` 拒绝并回滚 | **已实施** | `TestAtomicTxCommitWithoutAuditRollsBack`、`TestConnectionAtomicTxCommitGate`（集成） |
