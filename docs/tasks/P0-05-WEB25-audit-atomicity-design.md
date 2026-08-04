@@ -33,7 +33,7 @@
 3. **无绕过路径**：所有 credential/connection 元数据库 mutation 必须经过带审计协调器（`credentials.LifecycleManager` / `connections.Service`）。**协调器独占 `Begin`/`Commit`/`Rollback` 与原始 mutation 方法，强制成对执行 mutation + `AppendAudit`**；外部调用方只能通过强制审计的入口（`AuditedLifecycleManager` / `Service`），无法直接拿到裸事务做"mutation 后提交不写审计"。`pgMetadataTx` 的裸 mutation 方法仅用于既有非原子路径与测试，不作为生产 mutation 入口。**`Commit` 是审计完成的闸门**：`pgMetadataTx` 的 `Commit` 在 credential/connection 原子化路径校验当前事务内已追加匹配当前 mutation 的 AuditEvent，未追加则拒绝提交并回滚（见 §3 接口注释）。
 4. **AuditTx 契约（仅追加 / 租户 / 脱敏 / 精确匹配 / operation context）**：`AppendAudit` 仅支持追加。
    - **operation context 绑定**：每个 mutation 关联一个**不可变 operation context**（唯一 mutation ID、规范化 ResourceID、workspace、resource、action、connection、actor/actorType、outcome、traceID），由协调器在 `BeginCredential`/`BeginConnection`/`AppendAudit` 及强制协调器接口间传递并校验。`AuditEvent` 的 `resource_id`、身份字段（actor/workspace/connection）、outcome 与 trace identity 必须与 context **完全匹配**；拒绝缺失、错误资源或错误身份并回滚事务。补覆盖违规输入及租户/connection 隔离的负向测试。
-   - **域绑定与事件矩阵（P1）**：`BeginCredential` 强制 `resource=="credential"`，`BeginConnection` 强制 `resource=="connection"`（拒绝跨域）；`action`/`outcome` 必须落在 **E1-E6 事件矩阵**内（`eventAllowed`，包内私有，§3）：connection.create/update（E1/E2）、credential.create/rotate/retire（E3-E6）。拒绝跨域 resource 与错误 action/outcome 组合（例如 resource="connection" + action="connection.test"）。
+   - **域绑定与事件矩阵（P1）**：`BeginCredential` 强制 `resource=="credential"`，`BeginConnection` 强制 `resource=="connection"`（拒绝跨域）；`action`/`outcome` 必须落在 **原子事务允许矩阵**内（`eventAllowed`，包内私有，§3）：connection.create/update（E1/E2）、credential.create/rotate/retire（E3/E4/E6 成功事件）。**E5（`credential.rotate failed`）不在允许列表（LATEST5-CR-01）**——Rotate 失败分支（无已提交 mutation）先回滚释放行锁、再经 `writeRotateFailedAudit` 独立失败审计入口写入，不进入原子 mutation 事务。拒绝跨域 resource 与错误 action/outcome 组合（例如 resource="connection" + action="connection.test"）。
    - **connection 规则**：connection-scoped mutation（connection.create/update）必须提供并精确匹配 `ConnectionID`；credential-only mutation（credential.create/rotate/retire，E3-E6）允许 connection 为 null。`AppendAudit` 校验与匹配逻辑区分两类操作。
    - 强制包含 actor、workspace、connection、outcome、trace identity；沿现有 `AuditEvent`/`AppendAudit`/metadata 持久化路径校验，**拒绝 credential、KEK、明文密钥、raw arguments、敏感结果与 raw driver error 进入审计正文**。
    - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**：精确匹配字段集合为 `AuditMatchFields`（workspace、resource、resource_id、action、connection、mutation ID、actor_id、actor_type、outcome、trace_id，见 §3）；`AppendAudit`、`Commit` 闸门与负向测试**复用该集合**。拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
@@ -289,7 +289,6 @@ func eventAllowed(resource, action, outcome string) bool {
          "connection/connection.update/succeeded", // E2
          "credential/credential.create/succeeded", // E3
          "credential/credential.rotate/succeeded", // E4
-         "credential/credential.rotate/failed",    // E5
          "credential/credential.retire/succeeded": // E6
         return true
     }
@@ -334,9 +333,9 @@ func eventAllowed(resource, action, outcome string) bool {
 | 资源清理（事务结束、连接归还） | 待实施 | 集成测试 |
 | 脱敏错误（错误不含敏感信息） | **已实施** | `TestLogStorageFailureRedactsSensitive`、`TestAuditEventBuildFailedLogsRedactedRootCause` |
 | 无绕过：无未审计 mutation 入口 | **已实施** | `TestAtomicTxDomainIsolation`（跨域类型断言） |
-| 跨域资源拒绝：`BeginCredential` 收 `resource=connection`、`BeginConnection` 收 `resource=credential` → 拒绝且不执行 mutation | **已实施** | `TestValidateOpForCredentialCrossDomainRejected`（P1 负向） |
-| 错误 action/outcome 拒绝：不在 E1-E6 矩阵内的组合（如 connection/connection.test/succeeded）→ 拒绝且回滚 | **已实施** | `TestValidateOpForCredentialInvalidEvent`（P1 负向） |
-| nil context 拒绝：`Begin*`/`AppendAudit` 传 nil `*OperationContext` → 拒绝且不执行 mutation | **已实施** | `TestValidateOpForCredentialNil`（P2 负向） |
+| 跨域资源拒绝：`BeginCredential` 收 `resource=connection`、`BeginConnection` 收 `resource=credential` → 拒绝且不执行 mutation | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`（直接调用 Begin*，拒绝且不开事务）；validate 层 `TestValidateOpForCredentialCrossDomainRejected` |
+| 错误 action/outcome 拒绝：不在原子允许矩阵内的组合（如 connection/connection.test/succeeded、credential.rotate/failed）→ 拒绝且回滚 | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`；validate 层 `TestValidateOpForCredentialInvalidEvent` |
+| nil context 拒绝：`Begin*`/`AppendAudit` 传 nil `*OperationContext` → 拒绝且不执行 mutation | **已实施** | 原子入口 `TestBeginCredentialRejectsAtEntry`/`TestBeginConnectionRejectsAtEntry`/`TestAtomicAppendAuditRejectsNilContext`；validate 层 `TestValidateOpForCredentialNil` |
 | 审计闸门仅限原子 wrapper：`pgMetadataTx.Commit`（execution 路径）无闸门，execution.Pipeline 保持兼容 | **已实施** | `TestAtomicTxDomainIsolation`（`pgMetadataTx` 不实现原子接口） |
 | 原子事务缺失匹配 AuditEvent 时 `pgCredentialAtomicTx.Commit`/`pgConnectionAtomicTx.Commit` 拒绝并回滚 | **已实施** | `TestAtomicTxCommitWithoutAuditRollsBack`、`TestConnectionAtomicTxCommitGate`（集成） |
 | 并发轮换（LIFE-07） | **部分覆盖** | `TestLifecycleRotateConcurrentPostgres`（WEB-24；验证并发轮换 + SecretVersion，但未直接调用 `AppendAudit`） |
