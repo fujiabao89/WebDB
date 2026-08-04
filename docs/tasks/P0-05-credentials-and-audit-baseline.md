@@ -1,18 +1,24 @@
 # P0-05：凭证与审计基线
 
-> 状态：In Progress｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：Done｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
 >
-> **状态说明（Owner 2026-08-02 决策）**：P0-05 生产实现已完成并合并（PR #30/#31/#32），但收尾审查发现 3 个 P1 缺口，Owner 决策创建修复任务 [WEB-24](https://linear.app/webdb/issue/WEB-24)（并发轮换/回滚集成测试）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性）、[WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证字段长度）。**WEB-24/25/26 完成前，WEB-11 保持 In Progress**。[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产角色拆分，截止 2026-08-09）建立追踪后不阻断代码验收。
+> **状态说明（最终，WEB-11 于 2026-08-02 完成收尾）**：P0-05 生产实现与全部 P1/R6 修复任务已完成并合并（PR #30/#31/#32/#34/#35/#36/#37/#38）。收尾审查发现的 3 个 P1 缺口已由修复任务 [WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制，PR #34 已合并）、[WEB-24](https://linear.app/webdb/issue/WEB-24)（并发轮换/回滚集成测试，PR #35 已合并）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性 D11，设计 PR #36 + 代码实施 PR #38 已合并）承接并关闭；[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产角色拆分，PR #37 已合并）不阻断代码验收。
 >
 > **子任务**：
 > - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（✅ Done，[PR #30](https://github.com/fujiabao89/WebDB/pull/30) 已合并，合并后 main commit（单父）`3b9e5bd8c9af68fca56b069f3c39ad0b83872511`）
 > - [WEB-22](https://linear.app/webdb/issue/WEB-22)：P0-05B 凭证信封加密、版本轮换与 Adapter 接入（✅ Done，[PR #31](https://github.com/fujiabao89/WebDB/pull/31) 已合并，合并后 main commit（单父）`0af2625b6a00c07563e0e8ebf188e2811e1bf571`）
 > - [WEB-23](https://linear.app/webdb/issue/WEB-23)：P0-05C 追加式审计、脱敏、故障策略与最终验收（✅ Done，[PR #32](https://github.com/fujiabao89/WebDB/pull/32) 已合并，合并后 main commit（单父）`94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`）
 >
+> **P1/R6 修复子任务（WEB-11 收尾审查创建，均已合并）**：
+> - [WEB-26](https://linear.app/webdb/issue/WEB-26)：凭证 per-field 长度限制（UTF-8 字节数）→ ✅ Done，[PR #34](https://github.com/fujiabao89/WebDB/pull/34) 已合并，commit `7a2d10f`
+> - [WEB-24](https://linear.app/webdb/issue/WEB-24)：PostgreSQL 并发轮换（LIFE-07）/回滚（LIFE-08）集成测试 → ✅ Done，[PR #35](https://github.com/fujiabao89/WebDB/pull/35) 已合并，commit `e3a2920`
+> - [WEB-25](https://linear.app/webdb/issue/WEB-25)：审计原子性（D11，mutation 与 AuditEvent 原子提交）→ ✅ Done，设计 [PR #36](https://github.com/fujiabao89/WebDB/pull/36)（commit `a3a8e14`）+ 代码实施 [PR #38](https://github.com/fujiabao89/WebDB/pull/38)（commit `756a086`）均已合并
+> - [WEB-27](https://linear.app/webdb/issue/WEB-27)：R6 生产环境数据库角色拆分 → ✅ Done，[PR #37](https://github.com/fujiabao89/WebDB/pull/37) 已合并，commit `0f1b5bc`
+>
 > **方案文档**：[P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md)
 > **威胁模型**：[P0-05-threat-model.md](P0-05-threat-model.md)
 > **ADR**：[ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)（已接受）
-> **合并后 main CI**：[run 30737988480](https://github.com/fujiabao89/WebDB/actions/runs/30737988480)（success，head SHA `94eb3ca`）
+> **合并后 main CI**：[run 30896499396](https://github.com/fujiabao89/WebDB/actions/runs/30896499396)（head SHA `756a086`，含 WEB-25 代码实施）；此前 main CI run 30813651962（`0f1b5bc`）亦全绿；WEB-23 合并 CI 为 [run 30737988480](https://github.com/fujiabao89/WebDB/actions/runs/30737988480)（head `94eb3ca`）
 
 ## 目标与范围
 
@@ -34,27 +40,27 @@
 - E1-E16 追加式审计已接入连接/凭证/SQL 执行生命周期（`metadata.AuditMetadata` 强类型 + `AppendAudit` fail-closed）。
 - execution 审计感知管线（`execution.Pipeline`）实现执行前 fail-closed、执行后 `audit_failed` 且 execution 保持终态。
 - `$SECURITY_ALERT` 独立安全告警通道覆盖凭证解密失败、未知 KEK 版本、审计写入失败。
-- WEB-22 于 2026-08-01、WEB-23 于 2026-08-02 合并，合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480> 全绿（gofmt / vet / test / race / metadata 集成 / PostgreSQL·MySQL adapter 集成 全部 success）。
+- WEB-22 于 2026-08-01、WEB-23 于 2026-08-02 合并，合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>（head `94eb3ca`）与最新 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30813651962>（head `0f1b5bc`，含全部 P1/R6 修复）均全绿（gofmt / vet / test / race / metadata 集成 / PostgreSQL·MySQL adapter 集成 全部 success）。
 
 ### 验证证据分列
 
-**本机验证（2026-08-02，Windows，Go 1.26.5，`GOPROXY=off`；命令均可从仓库根目录直接复制执行，Go module 位于 `apps/api`）**：
+**本机验证（2026-08-03 收尾重跑，Windows，Go 1.26.5，`GOPROXY=off`；命令在 `apps/api` 目录执行，等价于从仓库根目录执行 `go -C apps/api …`）**：
 
-| 命令（从仓库根目录执行） | 结果 |
+| 命令（`apps/api` 目录内执行） | 结果 |
 |---|---|
-| `go -C apps/api test ./...` | PASS（exit 0，全部缓存 ok） |
-| `go -C apps/api test -count=1 ./internal/credentials ./internal/metadata ./internal/connections ./internal/execution` | PASS（exit 0） |
-| `go -C apps/api vet ./...` | PASS（exit 0） |
-| `GOOS=windows GOARCH=amd64 go -C apps/api build ./...` | PASS（exit 0） |
-| `GOOS=linux GOARCH=amd64 go -C apps/api build ./...` | PASS（exit 0） |
-| `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` | PASS（exit 0，~31.9s，228k+ execs，无 panic/crash） |
-| `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | PASS（exit 0，~31.0s，50k+ execs，无 panic/crash） |
+| `go test ./...` | PASS（exit 0） |
+| `go test -count=1 ./internal/credentials ./internal/metadata ./internal/connections ./internal/execution` | PASS（exit 0） |
+| `go vet ./...` | PASS（exit 0） |
+| `GOOS=windows GOARCH=amd64 go build ./...` | PASS（exit 0） |
+| `GOOS=linux GOARCH=amd64 go build ./...` | PASS（exit 0） |
+| `go test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` | PASS（exit 0，~34.7s，218695 execs，无 panic/crash） |
+| `go test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | PASS（exit 0，~31.2s，46497 execs，无 panic/crash） |
 | PostgreSQL metadata 集成（本机） | 见下注 |
-| `go -C apps/api test -race ./...` | **本机未通过**：Windows `CGO_ENABLED=0`，`-race requires cgo`（exit 2）。**本机不声明 race PASS** |
+| `go test -race ./...` | **本机未通过**：Windows `CGO_ENABLED=0`，`-race requires cgo`（exit 2）。**本机不声明 race PASS** |
 
 > 注：本机 PostgreSQL metadata 集成依赖本机 `postgres:16` 服务；本任务收尾不在本机重跑集成，PostgreSQL/MySQL adapter 与 metadata 集成以 main CI 结果为准。
 
-**main CI 验证（run 30737988480，head `94eb3ca`，全部 success）**：
+**main CI 验证（最新 run 30813651962，head `0f1b5bc`，全部 success；WEB-23 合并 CI run 30737988480，head `94eb3ca` 亦全绿）**：
 
 - Repository safety（无被跟踪的 `.env`，AGENTS.md / PR 模板 / CODEOWNERS 存在）
 - Contracts checks（typecheck + test）
@@ -84,24 +90,24 @@
 
 | 验收项 | 结果 | 代码/测试/CI 证据 |
 | --- | --- | --- |
-| 凭证 Payload 严格校验 | **部分覆盖（P1 待 Owner）** | `credentials/payload_test.go`：`TestPayload_*`（round-trip、v 版本、空值、非法 UTF-8、未知字段、控制字符、总大小 4096 上限）。**per-field 长度限制未实现**：`validatePayloadFields` 只校验 user/password 非空与 user 控制字符，未校验 proposal §3.2 的 user≤255 / password≤1024 字节；`payload_test.go` 亦无 PAY-06/PAY-07 对应测试。超大字段（总 JSON<4096）可到达 Adapter。**Codex P1，需 Owner 决策补实现+测试或记录有期限例外**（见「残余风险」） |
+| 凭证 Payload 严格校验 | PASS | `credentials/payload_test.go`：`TestPayload_*`（round-trip、v 版本、空值、非法 UTF-8、未知字段、控制字符、总大小 4096 上限）。**per-field 长度限制（WEB-26，PR #34 已合并）**：`validatePayloadFields` 现按 UTF-8 字节数校验 user≤255 / password≤1024（`payload.go`），并新增 PAY-06/PAY-07 边界测试（含多字节 UTF-8 用例） |
 | AES-256-GCM 信封加密与 AAD | PASS | `credentials/envelope_test.go` + `aad_validation_test.go`：`TestEnvelope_*`（RoundTrip、WrongKEK、DataAAD/WrapAAD、各类篡改）、`TestAAD_*`（48B、CrossWorkspace/SecretRef/Version） |
 | KEK Provider 与版本行为 | PASS | `credentials/kek_test.go`：`TestKEK_*`（ActiveKEK、版本、Base64/长度/弱值拒绝、2^24 包装上限、并发） |
 | create/resolve/rotate/retire | PASS | `credentials/audited_test.go`：`TestAuditedCredential_*`（CreateWritesE3、RotateSucceeded/Failed、RetireSucceeded、E14-E16） |
-| 并发轮换与事务回滚 | **部分覆盖** | 并发 wrap 预留：`credentials/kek_test.go`（`TestKEK_WrappingCounterConcurrent`、`TestKEK_WrapReservationNeverExceedsLimitConcurrently`）；轮换审计事件：`credentials/audited_test.go`（`TestAuditedCredential_RotateSucceededEvent`、`RotateFailedEvent`）。**PostgreSQL 并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的直接集成测试缺失**，作为后续任务跟踪（见「残余风险」） |
+| 并发轮换与事务回滚 | PASS | 并发 wrap 预留：`credentials/kek_test.go`（`TestKEK_WrappingCounterConcurrent`、`TestKEK_WrapReservationNeverExceedsLimitConcurrently`）；轮换审计事件：`credentials/audited_test.go`（`TestAuditedCredential_RotateSucceededEvent`、`RotateFailedEvent`）。**WEB-24（PR #35 已合并）补齐 PostgreSQL 集成测试**：`credentials/lifecycle_integration_test.go` 覆盖并发轮换（LIFE-07：恰好一个成功、其余回滚）与事务中间失败回滚（LIFE-08） |
 | 退役引用并发保护 | PASS | `metadata/integration_test.go`：`TestCountConnectionsByVersionLocksMatchingReferences`、`TestConnectionWritesRejectRetiredCredential` |
 | Policy 拒绝不解密 | PASS | `execution/audited_pipeline_test.go`：`TestAuditedExecute_PolicyDenied`（Adapter 0 次） |
 | 凭证失败 Adapter 0 次 | PASS | `execution/audited_pipeline_test.go`：`TestAuditedExecute_CredentialFailure` |
-| E1-E16 追加式审计 | **部分覆盖（P1 待 Owner）** | `metadata/integration_test.go`：`TestAudit_AppendAndQuery`、`TestAudit_UpdateRejected`、`TestAudit_DeleteRejected`、`TestAudit_TruncateRejected`；`execution/audited_pipeline_test.go`：`TestAuditedExecute_*`。**审计原子性契约矛盾未决**：`AuditedLifecycleManager.Create/Rotate/Retire` 与 `connections.Service.Create/Update` 在调用 `writeAudit` 前已提交 mutation（post-commit），而 proposal D11 声明"元数据库变更与 audit 在同一事务中原子提交"；proposal §6.2.1/6.2.3 同时描述 post-commit 行为。**Codex P1，需 Owner 决策：要么将凭证/连接 mutation 与审计写入原子化并加失败注入测试，要么同步 ADR-017/任务的原子性契约**（见「残余风险」） |
+| E1-E16 追加式审计 | PASS | `metadata/integration_test.go`：`TestAudit_AppendAndQuery`、`TestAudit_UpdateRejected`、`TestAudit_DeleteRejected`、`TestAudit_TruncateRejected`；`execution/audited_pipeline_test.go`：`TestAuditedExecute_*`。**审计原子性（D11）由 WEB-25 实现（PR #38 已合并）**：credential/connection mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门），审计失败整体回滚；目标库查询后审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外，沿用 ADR-017 post-execution fail-closed |
 | E17 安全告警 | PASS | `execution/sensitive_audit_test.go`：`TestStderrAlarmOutput`；`execution/audited_pipeline_test.go`：`TestAuditedExecute_AlarmFailureDoesNotPanic`；`metadata/security_alert_test.go`（EmitAlarm 相关测试） |
 | metadata 事件级允许列表 | PASS | `metadata/audit_metadata_test.go`：`TestAuditMetadataValidate_*`（AllowedFields、UnknownFields、TypeErrors、Malformed、NestedObject、DeadField、Canary） |
 | UPDATE/DELETE/TRUNCATE 拒绝 | PASS | `metadata/integration_test.go`：`TestAudit_UpdateRejected` / `TestAudit_DeleteRejected` / `TestAudit_TruncateRejected` |
 | 密码/KEK/DEK/SQL 正文脱敏 | PASS | `credentials/sensitive_test.go`、`execution/sensitive_audit_test.go`（`TestAuditedExecute_MetadataNoCanary`/`ErrorNoCanary`）、`metadata/audit_metadata_test.go`（`TestAuditMetadataValidate_Canary`）、`metadata/integration_test.go`（`TestNoPlaintextCredentialsInSchema`） |
 | timeout/cancel/错误路径 | PASS | `execution/audited_pipeline_test.go`：`TestAuditedExecute_Timeout`、`TestAuditedExecute_Cancelled`、`TestAuditedExecute_CancelledContextStillPersists` |
-| PostgreSQL/MySQL Adapter | PASS | main CI run 30737988480：Adapter integration test（PostgreSQL + MySQL）success |
+| PostgreSQL/MySQL Adapter | PASS | main CI run 30813651962（head `0f1b5bc`）：Adapter integration test（PostgreSQL + MySQL）success |
 | go test | PASS | 本机 `go -C apps/api test ./...`（exit 0）+ CI Test success |
 | go vet | PASS | 本机 `go -C apps/api vet ./...`（exit 0）+ CI Vet success |
-| race | PASS | **main CI** Race test success；**本机未运行**（Windows CGO_ENABLED=0，`-race requires cgo`），见"验证证据分列" |
+| race | PASS | **main CI**（run 30813651962）Race test success；**本机未运行**（Windows CGO_ENABLED=0，`-race requires cgo`，exit 2），见"验证证据分列" |
 | fuzz 30s | PASS | 本机 `go -C apps/api test ./internal/credentials -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `-fuzz='^FuzzAAD$'` 均 PASS（见"验证证据分列"） |
 | Windows/Linux build | PASS | 本机 `GOOS=windows` / `GOOS=linux` `go -C apps/api build ./...` 均 exit 0 |
 | 许可证 | PASS | 无新增第三方依赖（proposal §11：全部 Go stdlib） |
@@ -111,10 +117,9 @@
 
 全部残余风险 R1-R7 与已接受决策见 [P0-05-proposal-credentials-and-audit.md](P0-05-proposal-credentials-and-audit.md) §13 与 [P0-05-threat-model.md](P0-05-threat-model.md) §6，以及 [ADR-017](../adr/ADR-017-p0-credential-envelope-audit-failure.md)。本任务不新增、不改写任何 Owner 决策。要点：
 
-- **凭证 per-field 长度限制未实现（Codex P1 → [WEB-26](https://linear.app/webdb/issue/WEB-26)）**：`validatePayloadFields` 未校验 user≤255 / password≤1024 字节（按 UTF-8 字节数，Owner 已授权实现）。Owner 决策：不修改字段长度契约，按 UTF-8 字节数实现并补 PAY-06/07 边界测试。
-- **审计原子性契约矛盾（Codex P1 → [WEB-25](https://linear.app/webdb/issue/WEB-25)）**：D11 保留但明确作用域——同一元数据库内 credential/connection mutation 必须与 AuditEvent 原子提交；目标库查询后审计为外部副作用例外，沿用 ADR-017 post-execution fail-closed。Owner 决策：创建 P1 实现任务修复 post-commit 审计。
-- **并发轮换与事务回滚测试缺口（Codex P1 → [WEB-24](https://linear.app/webdb/issue/WEB-24)）**：`credentials/kek_test.go` 覆盖并发 wrap 计数、`credentials/audited_test.go` 覆盖轮换审计事件，但缺少直接验证并发轮换（LIFE-07）与事务中间失败回滚（LIFE-08）的 PostgreSQL 集成测试。Owner 决策：不接受例外，创建 P1 修复任务在真实 PostgreSQL 集成环境补测。
-- **R6（审计事件不防内部 DBA 篡改 → [WEB-27](https://linear.app/webdb/issue/WEB-27)）**：D15 已批准创建"生产环境数据库角色拆分"任务。Owner 2026-08-02 决策已创建 WEB-27（Backend/Security Owner，截止 2026-08-09，首次 production-like 部署前完成）；建立追踪关系后**不阻断 WEB-11 代码验收**，但阻断首次 production-like 部署。
+收尾审查创建的 3 个 P1 修复任务均已关闭：**WEB-26**（凭证 per-field 长度限制，[PR #34](https://github.com/fujiabao89/WebDB/pull/34) 已合并）、**WEB-24**（并发轮换/回滚集成测试，[PR #35](https://github.com/fujiabao89/WebDB/pull/35) 已合并）、**WEB-25**（审计原子性 D11：设计 [PR #36](https://github.com/fujiabao89/WebDB/pull/36) + 代码实施 [PR #38](https://github.com/fujiabao89/WebDB/pull/38) 均已合并）；**WEB-27**（R6 生产角色拆分，[PR #37](https://github.com/fujiabao89/WebDB/pull/37) 已合并）不阻断代码验收。仍保留的残余风险：
+
+- **R6（审计事件不防内部 DBA 篡改）**：WEB-27 已实现生产元数据库角色拆分（[PR #37](https://github.com/fujiabao89/WebDB/pull/37) 已合并），使审计表触发器/约束不受常规业务角色绕过；该防护在首次 production-like 部署时生效。
 - KEK 丢失等于对应 envelope 永久失去解密能力（ADR-017 后果）。
 - 本任务全部验证基于合成/脱敏数据；未使用真实 KEK、生产凭证或生产数据库。
 
@@ -122,7 +127,7 @@
 
 - **本收尾文档 PR**：仅影响文档状态，回滚/前向修复只涉及文档，不影响任何生产行为。
 - **功能回滚**（引用实际 commit——`3b9e5bd`/`0af2625`/`94eb3ca` 均为**单父提交**，非双父 merge commit，用普通 `git revert <sha>` 即可，**无需 `-m 1`**；**注意顺序**）：由于 WEB-23 修改了 WEB-22 引入的 credential/execution 文件，且本收尾 PR 修改了同一批文档，直接按任意顺序 `git revert` 会触发 modify/delete 冲突，需人工解决。完整回滚顺序：
-  1. 先回滚本收尾 PR（仅影响文档状态）：`git revert` 本收尾 PR 合并后的 main commit（该 PR 的提交 `896044a`、`e34a884`、`4ebe183`、`d00c6d0` 合并为一个提交）；
+  1. 先回滚本收尾 PR（仅影响文档状态）：合并后用 `git log --oneline origin/main | grep "docs(WEB-11)"` 定位 PR #33 的合并提交（仓库采用 squash merge、为单父提交），执行 `git revert <PR #33 合并 commit>`。该提交仅修改文档，回滚不影响任何生产行为；
   2. `git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32，追加式审计/脱敏/故障策略）；
   3. `git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31，凭证信封/轮换/Adapter 接入）；
   4. WEB-21（仅文档设计门，可选）：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（无生产行为）。

@@ -92,10 +92,11 @@ WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期；W
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
-- **验证（合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>，head `94eb3ca`，全部 success）**：gofmt / vet / test / **race** / metadata 集成 / PostgreSQL·MySQL adapter 集成均为 **CI 覆盖**。
-- **本机验证（Windows，Go 1.26.5，`GOPROXY=off`，命令从仓库根目录执行）**：`go -C apps/api test ./...`、`go -C apps/api vet ./...`、Windows/Linux `go -C apps/api build ./...` 均 exit 0；`go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s`（~228k execs）与 `-fuzz='^FuzzAAD$'`（~51k execs）均 **PASS**（无 panic/crash）。
+- **验证（合并后 main CI）**：WEB-23 合并 CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>（head `94eb3ca`）与最新 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30813651962>（head `0f1b5bc`，含 P1/R6 修复）均全部 success：gofmt / vet / test / **race** / metadata 集成 / PostgreSQL·MySQL adapter 集成均为 **CI 覆盖**。
+- **本机验证（2026-08-03 收尾重跑，Windows，Go 1.26.5，`GOPROXY=off`，命令从仓库根目录执行）**：`go -C apps/api test ./...`、`go -C apps/api vet ./...`、Windows/Linux `go -C apps/api build ./...` 均 exit 0；`go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s`（~34.7s / 218695 execs）与 `-fuzz='^FuzzAAD$'`（~31.2s / 46497 execs）均 **PASS**（无 panic/crash，exit 0）。
 - **本机 race 限制**：Windows `CGO_ENABLED=0`，`go -C apps/api test -race ./...` 报 `-race requires cgo`（exit 2），**本机不声明 race PASS**；由 main CI Race test success 覆盖。
 - 完整 30s fuzz 已在本机完成并通过（上述实际结果），不再有"待后续"项。
+- **P1/R6 修复（WEB-11 收尾审查创建，均已合并）**：WEB-26 凭证 per-field 长度限制（PR #34）、WEB-24 并发轮换/回滚 PostgreSQL 集成测试（PR #35）、WEB-25 审计原子性 D11 作用域设计（PR #36，设计文档 `docs/tasks/P0-05-WEB25-audit-atomicity-design.md`，代码实施按 Owner 决策选择 C 暂停）、WEB-27 生产角色拆分（PR #37）。
 
 ## 验证与回滚
 

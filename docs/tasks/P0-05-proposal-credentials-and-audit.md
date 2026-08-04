@@ -911,8 +911,8 @@ KEK 不得出现在：
 |---|---|---|
 | QA-01 | `go -C apps/api test ./...`（从仓库根目录执行） | PASS（本机 exit 0；CI Test success） |
 | QA-02 | `go -C apps/api vet ./...` | PASS（本机 exit 0；CI Vet success） |
-| QA-03 | `go -C apps/api test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
-| QA-04 | 从仓库根目录执行 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：本机两个 target 各完整 30s（`FuzzPayloadDecoder` ~228k execs、`FuzzAAD` ~51k execs），均无 panic/crash，exit 0 |
+| QA-03 | `go -C apps/api test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30813651962 / 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
+| QA-04 | 从仓库根目录执行 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：2026-08-03 收尾重跑，两个 target 各完整 30s（`FuzzPayloadDecoder` ~34.7s / 218695 execs、`FuzzAAD` ~31.2s / 46497 execs），均无 panic/crash，exit 0（exec 数随运行而异） |
 | QA-05 | `GOOS=windows GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
 | QA-06 | `GOOS=linux GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
 | QA-07 | 许可证检查 | 无新增非兼容许可证（全部 Go stdlib） |
@@ -968,3 +968,4 @@ KEK 不得出现在：
 | 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 commit（单父提交，普通 `git revert` 即可）；D1-D15 已批准决策未修改 |
 | 2026-08-02 | Codex/qodo/CodeRabbit 收尾审查处理：QA 命令统一锚定 `apps/api` 且 QA-04 补齐 `./internal/credentials` 包路径；回滚说明改为单父提交并补充收尾 PR 的 commit 与凭证回滚禁令；WEB-22 合并日期统一为 2026-08-01。**Codex P1 契约张力已如实记录（不改 D1-D15）**：D11 声明"元数据库变更与 audit 原子提交"，而凭证创建/轮换/退役及连接 mutation 实际为 post-commit 再写审计（§6.2.1/6.2.3 描述）；凭证 per-field 长度限制（§3.2 user≤255/password≤1024）未在 `validatePayloadFields` 实现。两处均需 Owner 决策（见 baseline 残余风险），本方案不擅自改动已批准决策 |
 | 2026-08-02 | **Owner 决策**：WEB-11 保持 In Progress。创建 [WEB-24](https://linear.app/webdb/issue/WEB-24)（PostgreSQL 并发轮换 LIFE-07/回滚 LIFE-08 集成测试，P1）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性，保留 D11 并明确作用域：元数据库内 mutation 与 AuditEvent 原子提交，目标库查询后审计为外部副作用例外沿用 ADR-017 post-execution fail-closed，P1）、[WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制按 UTF-8 字节数实现 + PAY-06/07 边界测试，P1）、[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产环境数据库角色拆分，Backend/Security Owner，截止 2026-08-09，首次 production-like 部署前完成）。D1-D15 已批准决策内容未修改 |
+| 2026-08-03 | **WEB-11 收尾最终确认**：[WEB-24](https://linear.app/webdb/issue/WEB-24)/[WEB-26](https://linear.app/webdb/issue/WEB-26) 代码与测试已合并（PR #34/#35）、[WEB-25](https://linear.app/webdb/issue/WEB-25) 审计原子性设计已记录（PR #36）、[WEB-27](https://linear.app/webdb/issue/WEB-27) 生产角色拆分已合并（PR #37）；最新 main CI run 30813651962（head `0f1b5bc`）全绿。QA-04 以 2026-08-03 实际重跑结果更新（Payload ~34.7s/218695 execs、AAD ~31.2s/46497 execs，均 exit 0 无 panic）。D1-D15 已批准决策内容未修改 |
