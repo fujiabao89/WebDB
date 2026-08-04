@@ -2,7 +2,7 @@
 
 > 状态：Done｜风险：High｜依赖：P0-02、P0-04、ADR-006、ADR-010、ADR-013｜建议实现者：Claude Code｜独立审查：Codex
 >
-> **状态说明（最终，WEB-11 于 2026-08-02 完成收尾）**：P0-05 生产实现与全部 P1/R6 修复任务已完成并合并（PR #30/#31/#32/#34/#35/#36/#37/#38）。收尾审查发现的 3 个 P1 缺口已由修复任务 [WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制，PR #34 已合并）、[WEB-24](https://linear.app/webdb/issue/WEB-24)（并发轮换/回滚集成测试，PR #35 已合并）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性 D11，设计 PR #36 + 代码实施 PR #38 已合并）承接并关闭；[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产角色拆分，PR #37 已合并）不阻断代码验收。
+> **状态说明（最终，WEB-11 于 2026-08-04 完成收尾）**：P0-05 生产实现与全部 P1/R6 修复任务已完成并合并（PR #30/#31/#32/#34/#35/#36/#37/#38）。收尾审查发现的 3 个 P1 缺口已由修复任务 [WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制，PR #34 已合并）、[WEB-24](https://linear.app/webdb/issue/WEB-24)（并发轮换/回滚集成测试，PR #35 已合并）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性 D11，设计 PR #36 + 代码实施 PR #38 已合并）承接并关闭；[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产角色拆分，PR #37 已合并）不阻断代码验收。
 >
 > **子任务**：
 > - [WEB-21](https://linear.app/webdb/issue/WEB-21)：P0-05A 凭证与审计方案、威胁模型及 Owner Gate（✅ Done，[PR #30](https://github.com/fujiabao89/WebDB/pull/30) 已合并，合并后 main commit（单父）`3b9e5bd8c9af68fca56b069f3c39ad0b83872511`）
@@ -40,7 +40,7 @@
 - E1-E16 追加式审计已接入连接/凭证/SQL 执行生命周期（`metadata.AuditMetadata` 强类型 + `AppendAudit` fail-closed）。
 - execution 审计感知管线（`execution.Pipeline`）实现执行前 fail-closed、执行后 `audit_failed` 且 execution 保持终态。
 - `$SECURITY_ALERT` 独立安全告警通道覆盖凭证解密失败、未知 KEK 版本、审计写入失败。
-- WEB-22 于 2026-08-01、WEB-23 于 2026-08-02 合并，合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>（head `94eb3ca`）与最新 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30813651962>（head `0f1b5bc`，含全部 P1/R6 修复）均全绿（gofmt / vet / test / race / metadata 集成 / PostgreSQL·MySQL adapter 集成 全部 success）。
+- WEB-22 于 2026-08-01、WEB-23 于 2026-08-02 合并，合并后 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>（head `94eb3ca`）与最新 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30896499396>（head `756a086`，含 WEB-25 代码实施）均全绿（gofmt / vet / test / race / metadata 集成 / PostgreSQL·MySQL adapter 集成 全部 success）；此前 run <https://github.com/fujiabao89/WebDB/actions/runs/30813651962>（head `0f1b5bc`）亦全绿。
 
 ### 验证证据分列
 
@@ -60,7 +60,7 @@
 
 > 注：本机 PostgreSQL metadata 集成依赖本机 `postgres:16` 服务；本任务收尾不在本机重跑集成，PostgreSQL/MySQL adapter 与 metadata 集成以 main CI 结果为准。
 
-**main CI 验证（最新 run 30813651962，head `0f1b5bc`，全部 success；WEB-23 合并 CI run 30737988480，head `94eb3ca` 亦全绿）**：
+**main CI 验证（最新 run 30896499396，head `756a086`，含 WEB-25 代码实施，全部 success；历史 run 30813651962，head `0f1b5bc` 亦全绿；WEB-23 合并 CI run 30737988480，head `94eb3ca` 全绿）**：
 
 - Repository safety（无被跟踪的 `.env`，AGENTS.md / PR 模板 / CODEOWNERS 存在）
 - Contracts checks（typecheck + test）
@@ -86,7 +86,7 @@
 | WEB-22 阻塞 | 已解除 |
 | WEB-23 阻塞 | 已解除（WEB-22 已合并，2026-08-01） |
 
-## 最终验收矩阵（WEB-11，2026-08-02）
+## 最终验收矩阵（WEB-11，2026-08-04）
 
 | 验收项 | 结果 | 代码/测试/CI 证据 |
 | --- | --- | --- |

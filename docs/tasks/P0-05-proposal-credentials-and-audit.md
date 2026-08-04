@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-21（方案/威胁模型/Owner Gate）、WEB-22（凭证信封加密）、WEB-23（审计接入）均已合并：[PR #30](https://github.com/fujiabao89/WebDB/pull/30)、[PR #31](https://github.com/fujiabao89/WebDB/pull/31)、[PR #32](https://github.com/fujiabao89/WebDB/pull/32)。父任务 WEB-11 已于 2026-08-02 完成收尾。
+> WEB-21（方案/威胁模型/Owner Gate）、WEB-22（凭证信封加密）、WEB-23（审计接入）均已合并：[PR #30](https://github.com/fujiabao89/WebDB/pull/30)、[PR #31](https://github.com/fujiabao89/WebDB/pull/31)、[PR #32](https://github.com/fujiabao89/WebDB/pull/32)。父任务 WEB-11 已于 2026-08-04 完成收尾。
 
 ---
 
@@ -927,18 +927,18 @@ KEK 不得出现在：
 
 ### 15.1 回滚 WEB-22
 
-- **代码回滚**：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（PR #31 实际 merge commit）
-- **数据回滚**：credential_envelopes 表仅追加，回滚代码不会破坏历史数据
-- **KEK 回滚**：保留旧版 KEK 环境变量，新 envelope 仍可解密
+- **代码回滚**：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（PR #31 合并后的单父提交）
+- **凭证回滚禁令**：`credential_envelopes` 表虽仅追加写，但**一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本**（WEB-22 之前的代码无这些能力，回滚后已有信封将无法解析/解密；保留旧 KEK 也不能修复缺少的解析能力）。回滚前须验证兼容性，或保留可处理旧信封的前向版本。
+- **审计数据**：`audit_events` 仅追加写，回滚代码不影响已写入的审计数据。
 
 ### 15.2 回滚 WEB-23
 
-- **代码回滚**：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（PR #32 实际 merge commit）
+- **代码回滚**：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（PR #32 合并后的单父提交）
 - **审计数据**：审计事件不可变（append-only），回滚代码不影响已写入的审计数据
 
 ### 15.3 回滚 WEB-21（仅文档设计门，如需完整链路）
 
-- **代码回滚**：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（PR #30 实际 merge commit，方案/威胁模型/ADR 文档，无生产行为）
+- **代码回滚**：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（PR #30 合并后的单父提交，方案/威胁模型/ADR 文档，无生产行为）
 
 ### 15.4 KEK 紧急轮换
 

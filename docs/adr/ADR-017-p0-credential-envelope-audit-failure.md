@@ -83,9 +83,9 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 - 审计事件至少保留 90 天（从 `occurred_at` 起算），P0 阶段不实施自动删除（D12 已批准）
 - 精确清理机制和归档策略另建独立任务
 
-## 实施与验证状态（WEB-22/WEB-23，2026-08-02 已合并）
+## 实施与验证状态（WEB-22 2026-08-01、WEB-23 2026-08-02 已合并）
 
-WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期；WEB-23（P0-05C）实现了本 ADR 定义的追加式审计、脱敏与故障策略，已于 2026-08-02 合并（PR #31 / #32）。
+WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期，已于 2026-08-01 合并（PR #31）；WEB-23（P0-05C）实现了本 ADR 定义的追加式审计、脱敏与故障策略，已于 2026-08-02 合并（PR #32）。
 
 - **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 ADR-017 D10 已批准的 16 字段（6 P0-05 新增 + 10 P0-04 现有）+ credential.rotate 专用 expected_version/actual_version，共 18 个 JSON 字段，事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
 - **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。E14-E16 由执行管线阶段 C'（`execution.Pipeline.recordCredentialFailure`）作为唯一权威写入者记录，携带连接上下文（WEB-25 澄清，Qodo-13），凭证解析层不再重复写入。
@@ -101,7 +101,7 @@ WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期；W
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
-- 回滚：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）、`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）；credential_envelopes 与 audit_events 仅追加写，数据不受影响
+- 回滚：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）、`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）；**凭证回滚禁令**：一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本（兼容性限制与 baseline「回滚与前向修复」一致）；`audit_events` 仅追加写，回滚代码不影响已写入的审计数据
 - KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 
 ## 相关资料
