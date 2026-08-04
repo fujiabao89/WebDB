@@ -925,7 +925,7 @@ KEK 不得出现在：
 
 ## 15. 回滚与前向修复
 
-> **强制回滚顺序**：功能回滚必须按依赖逆序执行——先 `git revert` WEB-23（PR #32，`94eb3ca...`），再 `git revert` WEB-22（PR #31，`0af2625...`），最后（可选）WEB-21（PR #30，`3b9e5bd...`）。WEB-23 修改了 WEB-22 引入的 credential/execution 文件，颠倒顺序会产生文件冲突或不完整回滚；与 baseline「回滚与前向修复」一致。
+> **强制回滚顺序**：功能回滚必须按依赖逆序执行（从最新合并到最早）——先 `git revert` WEB-25 代码（PR #38，`756a086`）→ WEB-27（PR #37，`0f1b5bc`）→ WEB-24（PR #35，`e3a2920`）→ WEB-26（PR #34，`7a2d10f`）→ WEB-23（PR #32，`94eb3ca`）→ WEB-22（PR #31，`0af2625`）→（可选）WEB-21（PR #30，`3b9e5bd`）。后续提交（WEB-23 及 WEB-24/25/26/27 修复）修改了先前提交引入的 credential/execution 文件，颠倒顺序会产生文件冲突或不完整回滚；WEB-25 设计（PR #36，`a3a8e14`）为文档记录，随 ADR/方案文档回滚。与 baseline「回滚与前向修复」一致。
 
 ### 15.1 回滚 WEB-22
 
@@ -951,6 +951,14 @@ KEK 不得出现在：
 5. 回滚：将 `WEBDB_ACTIVE_KEK_VERSION` 改回旧值并重启；旧 envelope 不受影响
 
 > **P0 不实施 DEK 重包装**：data_aad 包含 `kek_version`（D4），若用新 KEK 重新包装 DEK 后更新 envelope 的 `kek_version` 字段，data_aad 会因 `kek_version` 变化而不同，导致已有 ciphertext 的 GCM 认证失败。P0 阶段 KEK 轮换通过**追加新 envelope 版本**（生成新 DEK、重新加密 payload）实现，而非重包装已有 DEK。旧 KEK 版本必须保留，否则对应 envelope 永久无法解密。DEK 重包装能力留给后续独立任务。
+
+### 15.5 回滚 P1/R6 修复（WEB-24/25/26/27，按依赖逆序）
+
+- **WEB-25（D11 审计原子性，PR #38）**：`git revert 756a0869a46f5ca7f49aab3566f70595af58be2f`。回滚后恢复 post-commit 审计，需同步撤销 ADR-017 D11 原子语义或接受契约例外。
+- **WEB-27（R6 生产角色拆分，PR #37）**：`git revert 0f1b5bce3a26dfbfd53921a44ef419752cb882c7`。回滚后 R6 DBA 篡改防护失效。
+- **WEB-24（PostgreSQL 集成测试，PR #35）**：`git revert e3a292031a12be497d605d0e08bf04499fb3072f`。回滚仅移除测试覆盖，无生产行为。
+- **WEB-26（凭证 per-field 长度限制，PR #34）**：`git revert 7a2d10f38f9a873a9de56ae8c1f25a140bfe2489`。回滚后恢复无 per-field 校验风险。
+- **WEB-25 设计（PR #36）**：commit `a3a8e14` 为文档记录，随 ADR/方案文档回滚，无独立生产行为。
 
 ---
 

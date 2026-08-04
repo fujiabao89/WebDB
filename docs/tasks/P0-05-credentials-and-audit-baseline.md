@@ -126,11 +126,15 @@
 ## 回滚与前向修复
 
 - **本收尾文档 PR**：仅影响文档状态，回滚/前向修复只涉及文档，不影响任何生产行为。
-- **功能回滚**（引用实际 commit——`3b9e5bd`/`0af2625`/`94eb3ca` 均为**单父提交**，非双父 merge commit，用普通 `git revert <sha>` 即可，**无需 `-m 1`**；**注意顺序**）：由于 WEB-23 修改了 WEB-22 引入的 credential/execution 文件，且本收尾 PR 修改了同一批文档，直接按任意顺序 `git revert` 会触发 modify/delete 冲突，需人工解决。完整回滚顺序：
+- **功能回滚**（引用实际 commit——下列所有 commit 均为**单父提交**（仓库采用 squash merge，非双父 merge commit），用普通 `git revert <sha>` 即可，**无需 `-m 1`**；**注意顺序**）：由于后续提交（WEB-23 及 WEB-24/25/26/27 修复）修改了先前提交引入的 credential/execution 文件，且本收尾 PR 修改了同一批文档，直接按任意顺序 `git revert` 会触发 modify/delete 冲突，需人工解决。完整回滚顺序（从最新合并到最早）：
   1. 先回滚本收尾 PR（仅影响文档状态）：合并后用 `git log --oneline origin/main | grep "docs(WEB-11)"` 定位 PR #33 的合并提交（仓库采用 squash merge、为单父提交），执行 `git revert <PR #33 合并 commit>`。该提交仅修改文档，回滚不影响任何生产行为；
-  2. `git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32，追加式审计/脱敏/故障策略）；
-  3. `git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31，凭证信封/轮换/Adapter 接入）；
-  4. WEB-21（仅文档设计门，可选）：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（无生产行为）。
+  2. `git revert 756a0869a46f5ca7f49aab3566f70595af58be2f`（WEB-25 / PR #38，D11 审计原子性代码实施；回滚后恢复 post-commit 审计，需同步撤销 ADR-017 D11 原子语义或接受契约例外）；
+  3. `git revert 0f1b5bce3a26dfbfd53921a44ef419752cb882c7`（WEB-27 / PR #37，生产数据库角色拆分；回滚后 R6 DBA 篡改防护失效）；
+  4. `git revert e3a292031a12be497d605d0e08bf04499fb3072f`（WEB-24 / PR #35，PostgreSQL 并发轮换/回滚集成测试；回滚仅移除测试覆盖，无生产行为）；
+  5. `git revert 7a2d10f38f9a873a9de56ae8c1f25a140bfe2489`（WEB-26 / PR #34，凭证 per-field 长度限制；回滚后恢复无 per-field 校验风险）；
+  6. `git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32，追加式审计/脱敏/故障策略）；
+  7. `git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31，凭证信封/轮换/Adapter 接入）；
+  8. WEB-21（仅文档设计门，可选）：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（无生产行为）；WEB-25 设计 PR #36（commit `a3a8e14`）为文档记录，随 ADR/方案文档回滚，无独立生产行为。
   - **凭证回滚禁令**：`credential_envelopes` 表虽仅追加写，但**一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本**（WEB-22 之前的代码无这些能力，回滚后已有信封将无法解析/解密）。回滚前须验证兼容性，或保留可处理旧信封的前向版本；`audit_events` 仅追加写，回滚代码不影响已写入审计数据。
 - **KEK 紧急轮换（两阶段）**：见 proposal §15.4 / ADR-017「验证与回滚」。
 
