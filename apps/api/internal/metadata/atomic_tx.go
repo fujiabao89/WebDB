@@ -453,25 +453,29 @@ func (t *pgConnectionAtomicTx) AppendAudit(ctx context.Context, op *OperationCon
 }
 
 // createConnectionOnTx 在指定事务上执行连接 INSERT（复用 CreateConnection 的
-// active-envelope FOR KEY SHARE 语义）。
+// active-envelope FOR KEY SHARE 语义）。连接 ID 由调用方预生成并显式插入
+// （原子事务 op 需在 BeginConnection 前持有非零 ID）。
 func createConnectionOnTx(ctx context.Context, tx *sql.Tx, c *Connection) error {
+	if c.ID == uuid.Nil {
+		return errors.New("create connection: id must be pre-assigned")
+	}
 	const q = `
 		INSERT INTO connections
-			(workspace_id, name, engine, host, port, database, environment,
+			(id, workspace_id, name, engine, host, port, database, environment,
 			 secret_ref, secret_version, created_by)
-		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
+		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
 		FROM credential_envelopes AS active_credential
-		WHERE active_credential.workspace_id = $1
-		  AND active_credential.secret_ref = $8
-		  AND active_credential.version = $9
+		WHERE active_credential.workspace_id = $2
+		  AND active_credential.secret_ref = $9
+		  AND active_credential.version = $10
 		  AND active_credential.retired_at IS NULL
 		FOR KEY SHARE OF active_credential
-		RETURNING id, created_at, updated_at`
+		RETURNING created_at, updated_at`
 	err := tx.QueryRowContext(ctx, q,
-		c.WorkspaceID, c.Name, string(c.Engine),
+		c.ID, c.WorkspaceID, c.Name, string(c.Engine),
 		c.Host, c.Port, c.Database, string(c.Environment),
 		c.SecretRef, c.SecretVersion, c.CreatedBy,
-	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
+	).Scan(&c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf(
 			"active credential envelope (%s, %s, %d): %w",
