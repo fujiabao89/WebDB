@@ -527,7 +527,7 @@ KEK 不得出现在：
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
 
-> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。执行前审计（E9 `sql.execute.denied`，§7.1 阶段 C，Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
+> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E3/E4/E6）**；E5（`credential.rotate failed`）发生在失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（LATEST2-CR-01）。执行前审计（E9 `sql.execute.denied`，§7.1 阶段 C，Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 

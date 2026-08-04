@@ -250,6 +250,8 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
 			re := fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 			// 先释放行锁再写 E5 失败审计（CR-5）：审计写入不延长 FOR UPDATE 锁持有时间。
+			// 本分支在锁后立即失败，事务中无任何 mutation 已提交；D11 原子范围仅涵盖成功
+			// mutation 与其审计（E3/E4/E6），E5 走独立失败路径（LATEST2-CR-01）。
 			_ = atx.Rollback()
 			if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, re); auditErr != nil {
 				return nil, auditErr
@@ -266,6 +268,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 			err:      fmt.Errorf("%w", ErrVersionConflict),
 		}
 		// 先释放行锁再写 E5 失败审计（CR-5）。
+		// 本分支无已提交 mutation；D11 原子范围仅涵盖成功 mutation 与其审计，E5 走独立失败路径（LATEST2-CR-01）。
 		_ = atx.Rollback()
 		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, vce); auditErr != nil {
 			return nil, auditErr
@@ -275,6 +278,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 	if env.RetiredAt != nil {
 		re := fmt.Errorf("%w: version %d retired", ErrCredentialRetired, env.Version)
 		// 先释放行锁再写 E5 失败审计（CR-5）。
+		// 本分支无已提交 mutation；D11 原子范围仅涵盖成功 mutation 与其审计，E5 走独立失败路径（LATEST2-CR-01）。
 		_ = atx.Rollback()
 		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, re); auditErr != nil {
 			return nil, auditErr
