@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -299,5 +300,92 @@ func TestAtomicTxDomainIsolation(t *testing.T) {
 	}
 	if _, ok := metaTx.(ConnectionAtomicTx); ok {
 		t.Fatal("pgMetadataTx unexpectedly implements ConnectionAtomicTx")
+	}
+}
+
+// TestBeginCredentialRejectsAtEntry 直接调用 BeginCredential 原子入口，验证跨域、
+// 非法 action/outcome（E5 不在允许列表）与 nil OperationContext 均在开启事务前被拒绝
+// （validateOpForCredential 失败即返回错误，不触碰 DB、不执行 mutation）——LATEST5-CR-02。
+func TestBeginCredentialRejectsAtEntry(t *testing.T) {
+	store := &PGStore{} // 无 DB：validate 失败时不开事务
+	ctx := context.Background()
+	conn := uuid.New()
+
+	cases := []struct {
+		name string
+		op   *OperationContext
+	}{
+		{"cross-domain", testOp(t, "connection", "c1", "connection.create", "succeeded", &conn)},
+		{"invalid-event", testOp(t, "credential", "ref", "credential.rotate", "failed", nil)}, // E5 不在允许列表
+		{"nil-context", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := store.BeginCredential(ctx, tc.op)
+			if err == nil {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+				t.Fatalf("BeginCredential(%s) = nil error, want rejection before tx", tc.name)
+			}
+		})
+	}
+}
+
+// TestBeginConnectionRejectsAtEntry 直接调用 BeginConnection 原子入口，验证跨域、
+// 非法 action/outcome（E7 connection.test 不在允许列表）与 nil OperationContext 均被拒绝。
+func TestBeginConnectionRejectsAtEntry(t *testing.T) {
+	store := &PGStore{}
+	ctx := context.Background()
+	conn := uuid.New()
+
+	cases := []struct {
+		name string
+		op   *OperationContext
+	}{
+		{"cross-domain", testOp(t, "credential", "ref", "credential.create", "succeeded", nil)},
+		{"invalid-event", testOp(t, "connection", "c1", "connection.test", "succeeded", &conn)}, // E7 例外
+		{"nil-context", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx, err := store.BeginConnection(ctx, tc.op)
+			if err == nil {
+				if tx != nil {
+					_ = tx.Rollback()
+				}
+				t.Fatalf("BeginConnection(%s) = nil error, want rejection before tx", tc.name)
+			}
+		})
+	}
+}
+
+// TestAppendAuditRejectsNilContext 直接调用原子 wrapper 的 AppendAudit，验证 nil
+// OperationContext 在写入前被拒绝（matchOperationContext 拒绝，不触碰事务）。
+func TestAppendAuditRejectsNilContext(t *testing.T) {
+	ws := uuid.New()
+	actor := uuid.New()
+	op := testOp(t, "credential", "ref", "credential.create", "succeeded", nil)
+	atx := &pgCredentialAtomicTx{op: op} // tx 为 nil：nil op 在校验阶段被拒，不触碰 tx
+	raw, _ := (AuditMetadata{
+		SecretRef:     strPtr("ref"),
+		SecretVersion: intPtr(1),
+		EnvelopeSuite: strPtr("AES256GCM-v1"),
+		KEKVersion:    intPtr(1),
+	}).Marshal()
+	event := &AuditEvent{
+		WorkspaceID:  ws,
+		ActorType:    ActorTypeUser,
+		ActorID:      &actor,
+		Action:       ActionCredentialCreate,
+		ResourceType: "credential",
+		ResourceID:   "ref",
+		Outcome:      OutcomeSucceeded,
+		Metadata:     raw,
+		TraceID:      "trace-x",
+		OccurredAt:   time.Now().UTC(),
+	}
+	if err := atx.AppendAudit(context.Background(), nil, event); err == nil {
+		t.Fatal("AppendAudit(nil op) must be rejected before write")
 	}
 }
