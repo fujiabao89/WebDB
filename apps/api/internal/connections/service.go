@@ -36,6 +36,11 @@ const connectionTestTimeout = 5 * time.Second
 // 用户取消请求不阻止审计事件写入。
 const auditWriteTimeout = 5 * time.Second
 
+// atomicTxTimeout 原子事务的有界超时上限（WebDB 安全边界）：Create/Update 的
+// BeginConnection/mutation/AppendAudit/Commit 前置统一绑定带 deadline 的 transaction
+// context，防止调用方 ctx 无超时时事务操作无限等待；请求取消时事务回滚。
+const atomicTxTimeout = 5 * time.Second
+
 // Principal 由可信上游提供的已验证身份。
 type Principal struct {
 	UserID      uuid.UUID
@@ -78,6 +83,7 @@ type Service struct {
 	newTrace              func() string
 	connectionTestTimeout time.Duration // 可注入的连接测试超时（vpvC5）
 	auditWriteTimeout     time.Duration // 可注入的审计持久化超时（vtiLM）
+	atomicTxTimeout       time.Duration // 可注入的原子事务有界超时（WebDB 安全边界）
 	logger                *slog.Logger
 }
 
@@ -128,6 +134,7 @@ func NewService(
 		newTrace:              func() string { return uuid.NewString() },
 		connectionTestTimeout: connectionTestTimeout,
 		auditWriteTimeout:     auditWriteTimeout,
+		atomicTxTimeout:       atomicTxTimeout,
 		logger:                slog.Default(),
 	}
 }
@@ -153,13 +160,17 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 	if err != nil {
 		return nil, s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	atx, err := s.txstore.BeginConnection(ctx, op)
+	// 原子事务使用有界 transaction context（WebDB 安全边界）：Begin/mutation/AppendAudit
+	// 统一绑定带 deadline 的 ctx，防止调用方 ctx 无超时时事务操作无限等待。
+	txCtx, txCancel := context.WithTimeout(ctx, s.atomicTxTimeout)
+	defer txCancel()
+	atx, err := s.txstore.BeginConnection(txCtx, op)
 	if err != nil {
 		s.logStorageFailure("create.begin_connection", p.WorkspaceID, conn.ID, err)
 		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
 	}
 	defer atx.Rollback()
-	if err := atx.CreateConnection(ctx, conn); err != nil {
+	if err := atx.CreateConnection(txCtx, conn); err != nil {
 		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
 		s.logStorageFailure("create.connection", p.WorkspaceID, conn.ID, err)
 		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
@@ -177,7 +188,7 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 	if err != nil {
 		return nil, s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	if err := atx.AppendAudit(ctx, op, event); err != nil {
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
 		return nil, s.auditAppendFailed(ctx, conn.WorkspaceID, err)
 	}
 	if err := atx.Commit(); err != nil {
@@ -208,13 +219,16 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 	if err != nil {
 		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	atx, err := s.txstore.BeginConnection(ctx, op)
+	// 原子事务使用有界 transaction context（WebDB 安全边界）。
+	txCtx, txCancel := context.WithTimeout(ctx, s.atomicTxTimeout)
+	defer txCancel()
+	atx, err := s.txstore.BeginConnection(txCtx, op)
 	if err != nil {
 		s.logStorageFailure("update.begin_connection", p.WorkspaceID, conn.ID, err)
 		return fmt.Errorf("%w: update connection failed", ErrInternalError)
 	}
 	defer atx.Rollback()
-	if err := atx.UpdateConnection(ctx, p.WorkspaceID, conn); err != nil {
+	if err := atx.UpdateConnection(txCtx, p.WorkspaceID, conn); err != nil {
 		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
 		s.logStorageFailure("update.connection", p.WorkspaceID, conn.ID, err)
 		return fmt.Errorf("%w: update connection failed", ErrInternalError)
@@ -229,7 +243,7 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 	if err != nil {
 		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	if err := atx.AppendAudit(ctx, op, event); err != nil {
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
 		return s.auditAppendFailed(ctx, conn.WorkspaceID, err)
 	}
 	if err := atx.Commit(); err != nil {

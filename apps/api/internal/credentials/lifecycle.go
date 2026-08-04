@@ -18,6 +18,11 @@ const ErrAuditFailed ErrorCode = "audit_failed"
 // auditWriteTimeout 审计持久化的独立超时上限（与调用方取消解耦，用于失败路径审计与告警）。
 const auditWriteTimeout = 5 * time.Second
 
+// atomicTxTimeout 原子事务的有界超时上限（WebDB 安全边界）：Begin/mutation/AppendAudit/
+// Commit 前置统一绑定带 deadline 的 transaction context，防止调用方 ctx 无超时时
+// 事务操作无限等待数据库连接；请求取消时事务回滚。
+const atomicTxTimeout = 5 * time.Second
+
 // credentialReader 解析所需的信封读取能力（收窄依赖，仅 EnvelopeByRef）。
 type credentialReader interface {
 	EnvelopeByRef(ctx context.Context, wsID, secretRef uuid.UUID, version int) (*metadata.CredentialEnvelope, error)
@@ -37,6 +42,7 @@ type LifecycleManager struct {
 	clock             func() time.Time
 	newTrace          func() string
 	auditWriteTimeout time.Duration
+	atomicTxTimeout   time.Duration // 原子事务有界超时（可注入，默认 atomicTxTimeout）
 	logger            *slog.Logger
 }
 
@@ -62,6 +68,7 @@ func NewLifecycleManager(
 		clock:             func() time.Time { return time.Now().UTC() },
 		newTrace:          func() string { return uuid.NewString() },
 		auditWriteTimeout: auditWriteTimeout,
+		atomicTxTimeout:   atomicTxTimeout,
 		logger:            l,
 	}
 }
@@ -142,7 +149,12 @@ func (m *LifecycleManager) Create(ctx context.Context, wsID, actorID uuid.UUID, 
 	if err != nil {
 		return nil, m.auditEventBuildFailed(ctx, wsID, err)
 	}
-	atx, err := m.txstore.BeginCredential(ctx, op)
+	// 原子事务使用有界 transaction context（WebDB 安全边界）：Begin/mutation/AppendAudit
+	// 统一绑定带 deadline 的 ctx，防止调用方 ctx 无超时时事务操作无限等待；请求取消或
+	// 超时时事务回滚。告警仍经 auditContext（独立超时）发出。
+	txCtx, txCancel := context.WithTimeout(ctx, m.atomicTxTimeout)
+	defer txCancel()
+	atx, err := m.txstore.BeginCredential(txCtx, op)
 	if err != nil {
 		m.logStorageFailure("create.begin", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
@@ -163,7 +175,7 @@ func (m *LifecycleManager) Create(ctx context.Context, wsID, actorID uuid.UUID, 
 		return nil, err
 	}
 
-	if err := atx.InsertEnvelope(ctx, env); err != nil {
+	if err := atx.InsertEnvelope(txCtx, env); err != nil {
 		m.logStorageFailure("create.insert_envelope", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
@@ -183,7 +195,7 @@ func (m *LifecycleManager) Create(ctx context.Context, wsID, actorID uuid.UUID, 
 	if buildErr != nil {
 		return nil, m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
-	if err := atx.AppendAudit(ctx, op, event); err != nil {
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
 		return nil, m.auditAppendFailed(ctx, wsID, err)
 	}
 	if err := atx.Commit(); err != nil {
@@ -238,14 +250,16 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 	if err != nil {
 		return nil, m.auditEventBuildFailed(ctx, wsID, err)
 	}
-	atx, err := m.txstore.BeginCredential(ctx, op)
+	txCtx, txCancel := context.WithTimeout(ctx, m.atomicTxTimeout)
+	defer txCancel()
+	atx, err := m.txstore.BeginCredential(txCtx, op)
 	if err != nil {
 		m.logStorageFailure("rotate.begin", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	defer atx.Rollback()
 
-	env, err := atx.LockEnvelopeForUpdate(ctx, wsID, secretRef)
+	env, err := atx.LockEnvelopeForUpdate(txCtx, wsID, secretRef)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
 			re := fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
@@ -302,11 +316,11 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 		return nil, err
 	}
 
-	if err := atx.InsertEnvelope(ctx, newEnv); err != nil {
+	if err := atx.InsertEnvelope(txCtx, newEnv); err != nil {
 		m.logStorageFailure("rotate.insert_envelope", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
-	if err := atx.UpdateConnectionVersion(ctx, wsID, secretRef, newVersion); err != nil {
+	if err := atx.UpdateConnectionVersion(txCtx, wsID, secretRef, newVersion); err != nil {
 		m.logStorageFailure("rotate.update_connection_version", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
@@ -315,7 +329,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 	if buildErr != nil {
 		return nil, m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
-	if err := atx.AppendAudit(ctx, op, event); err != nil {
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
 		return nil, m.auditAppendFailed(ctx, wsID, err)
 	}
 	if err := atx.Commit(); err != nil {
@@ -349,14 +363,16 @@ func (m *LifecycleManager) Retire(ctx context.Context, wsID, actorID, secretRef 
 	if err != nil {
 		return m.auditEventBuildFailed(ctx, wsID, err)
 	}
-	atx, err := m.txstore.BeginCredential(ctx, op)
+	txCtx, txCancel := context.WithTimeout(ctx, m.atomicTxTimeout)
+	defer txCancel()
+	atx, err := m.txstore.BeginCredential(txCtx, op)
 	if err != nil {
 		m.logStorageFailure("retire.begin", wsID, secretRef, err)
 		return fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 	defer atx.Rollback()
 
-	env, err := atx.LockEnvelopeVersion(ctx, wsID, secretRef, version)
+	env, err := atx.LockEnvelopeVersion(txCtx, wsID, secretRef, version)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
 			return fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
@@ -366,7 +382,7 @@ func (m *LifecycleManager) Retire(ctx context.Context, wsID, actorID, secretRef 
 	}
 
 	if env.RetiredAt == nil {
-		count, err := atx.CountConnectionsByVersion(ctx, wsID, secretRef, version)
+		count, err := atx.CountConnectionsByVersion(txCtx, wsID, secretRef, version)
 		if err != nil {
 			m.logStorageFailure("retire.count_connections", wsID, secretRef, err)
 			return fmt.Errorf("%w: internal failure", ErrInternalError)
@@ -375,7 +391,7 @@ func (m *LifecycleManager) Retire(ctx context.Context, wsID, actorID, secretRef 
 			return fmt.Errorf("%w: %d connections still reference version %d", ErrCredentialInUse, count, version)
 		}
 
-		if err := atx.UpdateRetiredAt(ctx, wsID, secretRef, version); err != nil {
+		if err := atx.UpdateRetiredAt(txCtx, wsID, secretRef, version); err != nil {
 			m.logStorageFailure("retire.update_retired_at", wsID, secretRef, err)
 			return fmt.Errorf("%w: internal failure", ErrInternalError)
 		}
@@ -386,7 +402,7 @@ func (m *LifecycleManager) Retire(ctx context.Context, wsID, actorID, secretRef 
 	if buildErr != nil {
 		return m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
-	if err := atx.AppendAudit(ctx, op, event); err != nil {
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
 		return m.auditAppendFailed(ctx, wsID, err)
 	}
 	if err := atx.Commit(); err != nil {

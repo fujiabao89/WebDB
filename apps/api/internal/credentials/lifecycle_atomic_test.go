@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/fujiabao89/webdb/internal/metadata"
 	"github.com/google/uuid"
@@ -125,15 +126,18 @@ func (f *fakeAtomicTx) UpdateConnection(context.Context, uuid.UUID, *metadata.Co
 }
 
 type fakeAtomicTxStore struct {
-	tx         *fakeAtomicTx
-	beginErr   error
-	beginCalls int
-	lastOp     *metadata.OperationContext // 记录最近一次 Begin* 的 op（用于 trace 关联断言）
+	tx                      metadata.CredentialAtomicTx
+	connTx                  metadata.ConnectionAtomicTx // credentials 测试不调用 BeginConnection；connections 包有独立 fake
+	beginErr                error
+	beginCalls              int
+	lastOp                  *metadata.OperationContext // 记录最近一次 Begin* 的 op（用于 trace 关联断言）
+	lastBeginCtxHasDeadline bool                       // 记录最近一次 Begin* 收到的 ctx 是否带 deadline（有界事务检查）
 }
 
 func (s *fakeAtomicTxStore) BeginCredential(ctx context.Context, op *metadata.OperationContext) (metadata.CredentialAtomicTx, error) {
 	s.beginCalls++
 	s.lastOp = op
+	_, s.lastBeginCtxHasDeadline = ctx.Deadline()
 	if s.beginErr != nil {
 		return nil, s.beginErr
 	}
@@ -145,7 +149,7 @@ func (s *fakeAtomicTxStore) BeginConnection(ctx context.Context, op *metadata.Op
 	if s.beginErr != nil {
 		return nil, s.beginErr
 	}
-	return s.tx, nil
+	return s.connTx, nil
 }
 
 type fakeReadStore struct {
@@ -182,7 +186,7 @@ func (r *fakeAlarmRecorder) Alarm(ctx context.Context, e metadata.SecurityAlertE
 }
 
 // newTestManager 构建带 fake 依赖的 LifecycleManager。
-func newTestManager(tx *fakeAtomicTx, read *fakeReadStore, audit *fakeAuditSink, alarm *fakeAlarmRecorder, logger ...*slog.Logger) (*LifecycleManager, *fakeAtomicTxStore) {
+func newTestManager(tx metadata.CredentialAtomicTx, read *fakeReadStore, audit *fakeAuditSink, alarm *fakeAlarmRecorder, logger ...*slog.Logger) (*LifecycleManager, *fakeAtomicTxStore) {
 	txstore := &fakeAtomicTxStore{tx: tx}
 	m := NewLifecycleManager(read, txstore, audit, goodKEK(), alarm, logger...)
 	return m, txstore
@@ -290,6 +294,74 @@ func TestRotateVersionConflictWritesE5(t *testing.T) {
 	}
 	if len(audit.events) != 1 || audit.events[0].Action != metadata.ActionCredentialRotate || audit.events[0].Outcome != metadata.OutcomeFailed {
 		t.Fatalf("expected E5 failure audit, got %d events", len(audit.events))
+	}
+}
+
+// TestAtomicTxUsesBoundedContext 验证原子事务使用有界 transaction context
+// （WebDB 安全边界检查）：BeginCredential 收到的 ctx 必须带 deadline，防止调用方
+// ctx 无超时时事务操作（mutation/AppendAudit/Commit 前置）无限等待。
+func TestAtomicTxUsesBoundedContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(m *LifecycleManager, ref uuid.UUID) error
+	}{
+		{"Create", func(m *LifecycleManager, ref uuid.UUID) error {
+			_, err := m.Create(context.Background(), uuid.New(), uuid.New(), testPayload())
+			return err
+		}},
+		{"Rotate", func(m *LifecycleManager, ref uuid.UUID) error {
+			_, err := m.Rotate(context.Background(), uuid.New(), uuid.New(), ref, 1, testPayload())
+			return err
+		}},
+		{"Retire", func(m *LifecycleManager, ref uuid.UUID) error {
+			return m.Retire(context.Background(), uuid.New(), uuid.New(), ref, 1)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ref := uuid.New()
+			tx := &fakeAtomicTx{env: &metadata.CredentialEnvelope{SecretRef: ref, Version: 1}}
+			m, txstore := newTestManager(tx, &fakeReadStore{}, &fakeAuditSink{}, &fakeAlarmRecorder{})
+			if err := tc.run(m, ref); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if !txstore.lastBeginCtxHasDeadline {
+				t.Fatalf("%s: BeginCredential received ctx without deadline (must be bounded)", tc.name)
+			}
+		})
+	}
+}
+
+// blockingAtomicTx 使 InsertEnvelope 阻塞直到 ctx 到期，用于验证事务超时回滚。
+type blockingAtomicTx struct {
+	*fakeAtomicTx
+	insertBlock bool
+}
+
+func (b *blockingAtomicTx) InsertEnvelope(ctx context.Context, env *metadata.CredentialEnvelope) error {
+	if b.insertBlock {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return b.fakeAtomicTx.InsertEnvelope(ctx, env)
+}
+
+// TestAtomicTxTimeoutRollsBack 验证原子事务在有界超时到期后失败并回滚、不提交。
+func TestAtomicTxTimeoutRollsBack(t *testing.T) {
+	ref := uuid.New()
+	base := &fakeAtomicTx{env: &metadata.CredentialEnvelope{SecretRef: ref, Version: 1}}
+	tx := &blockingAtomicTx{fakeAtomicTx: base, insertBlock: true}
+	m, _ := newTestManager(tx, &fakeReadStore{}, &fakeAuditSink{}, &fakeAlarmRecorder{})
+	m.atomicTxTimeout = 50 * time.Millisecond
+
+	_, err := m.Create(context.Background(), uuid.New(), uuid.New(), testPayload())
+	if err == nil {
+		t.Fatal("expected error on tx timeout")
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit on timeout")
+	}
+	if tx.rollbackCalls == 0 {
+		t.Fatal("must roll back on timeout")
 	}
 }
 
