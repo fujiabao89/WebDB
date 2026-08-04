@@ -332,6 +332,12 @@ func validateOpForConnection(op *OperationContext) error {
 
 // ---- 实现 ---------------------------------------------------------------------
 
+// rowQuerier 抽象 *sql.DB / *sql.Tx 的单行查询执行器，供连接 mutation 共享同一份
+// SQL（CodeRabbit-9：消除 PGStore 方法与原子 tx wrapper 的 SQL 重复/漂移风险）。
+type rowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // insertAuditEvent 在指定事务上执行审计 INSERT（与 pgMetadataTx.AppendAudit 共享）。
 func insertAuditEvent(ctx context.Context, tx *sql.Tx, e *AuditEvent) error {
 	if e.OccurredAt.IsZero() {
@@ -452,14 +458,14 @@ func (t *pgConnectionAtomicTx) AppendAudit(ctx context.Context, op *OperationCon
 	return nil
 }
 
-// createConnectionOnTx 在指定事务上执行连接 INSERT（复用 CreateConnection 的
-// active-envelope FOR KEY SHARE 语义）。连接 ID 由调用方预生成并显式插入
-// （原子事务 op 需在 BeginConnection 前持有非零 ID）。
-func createConnectionOnTx(ctx context.Context, tx *sql.Tx, c *Connection) error {
+// createConnectionExec 在指定执行器上执行连接 INSERT（复用 active-envelope
+// FOR KEY SHARE 语义）。连接 ID 由调用方预生成并显式插入（原子事务 op 需在
+// BeginConnection 前持有非零 ID）。
+func createConnectionExec(ctx context.Context, q rowQuerier, c *Connection) error {
 	if c.ID == uuid.Nil {
 		return errors.New("create connection: id must be pre-assigned")
 	}
-	const q = `
+	const qsql = `
 		INSERT INTO connections
 			(id, workspace_id, name, engine, host, port, database, environment,
 			 secret_ref, secret_version, created_by)
@@ -471,7 +477,7 @@ func createConnectionOnTx(ctx context.Context, tx *sql.Tx, c *Connection) error 
 		  AND active_credential.retired_at IS NULL
 		FOR KEY SHARE OF active_credential
 		RETURNING created_at, updated_at`
-	err := tx.QueryRowContext(ctx, q,
+	err := q.QueryRowContext(ctx, qsql,
 		c.ID, c.WorkspaceID, c.Name, string(c.Engine),
 		c.Host, c.Port, c.Database, string(c.Environment),
 		c.SecretRef, c.SecretVersion, c.CreatedBy,
@@ -485,16 +491,16 @@ func createConnectionOnTx(ctx context.Context, tx *sql.Tx, c *Connection) error 
 	return err
 }
 
-// updateConnectionOnTx 在指定事务上执行连接 UPDATE（复用 UpdateConnection 语义）。
-func updateConnectionOnTx(ctx context.Context, tx *sql.Tx, wsID uuid.UUID, c *Connection) error {
+// updateConnectionExec 在指定执行器上执行连接 UPDATE（复用 UpdateConnection 语义）。
+func updateConnectionExec(ctx context.Context, q rowQuerier, wsID uuid.UUID, c *Connection) error {
 	const checkConn = `SELECT 1 FROM connections WHERE id = $1 AND workspace_id = $2`
-	if err := tx.QueryRowContext(ctx, checkConn, c.ID, wsID).Scan(new(int)); errors.Is(err, sql.ErrNoRows) {
+	if err := q.QueryRowContext(ctx, checkConn, c.ID, wsID).Scan(new(int)); errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("connection %s not found in workspace %s", c.ID, wsID)
 	} else if err != nil {
 		return err
 	}
 
-	const q = `
+	const qsql = `
 		WITH active_credential AS MATERIALIZED (
 			SELECT 1
 			FROM credential_envelopes AS envelope
@@ -511,7 +517,7 @@ func updateConnectionOnTx(ctx context.Context, tx *sql.Tx, wsID uuid.UUID, c *Co
 		FROM active_credential
 		WHERE connection.id=$9 AND connection.workspace_id=$10
 		RETURNING connection.updated_at`
-	err := tx.QueryRowContext(ctx, q,
+	err := q.QueryRowContext(ctx, qsql,
 		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
 		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
 	).Scan(&c.UpdatedAt)
@@ -525,11 +531,11 @@ func updateConnectionOnTx(ctx context.Context, tx *sql.Tx, wsID uuid.UUID, c *Co
 }
 
 func (t *pgConnectionAtomicTx) CreateConnection(ctx context.Context, conn *Connection) error {
-	return createConnectionOnTx(ctx, t.tx, conn)
+	return createConnectionExec(ctx, t.tx, conn)
 }
 
 func (t *pgConnectionAtomicTx) UpdateConnection(ctx context.Context, wsID uuid.UUID, conn *Connection) error {
-	return updateConnectionOnTx(ctx, t.tx, wsID, conn)
+	return updateConnectionExec(ctx, t.tx, wsID, conn)
 }
 
 func (t *pgConnectionAtomicTx) UpdateConnectionVersion(ctx context.Context, wsID, secretRef uuid.UUID, newVersion int) error {

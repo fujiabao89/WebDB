@@ -194,6 +194,11 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 		return err
 	}
 	conn.WorkspaceID = p.WorkspaceID
+	// 空 ID 是调用方输入错误，直接返回连接类稳定错误；不得映射为 audit_failed 或
+	// 触发 $SECURITY_ALERT（CodeRabbit-2：无效输入被误报为审计子系统故障）。
+	if conn.ID == uuid.Nil {
+		return fmt.Errorf("%w: connection id required", ErrConnectionNotFound)
+	}
 	traceID := s.newTrace()
 	op, err := metadata.NewOperationContext(
 		s.newTrace(), p.WorkspaceID, "connection", conn.ID.String(),

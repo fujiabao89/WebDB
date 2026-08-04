@@ -80,10 +80,14 @@ func (m *LifecycleManager) logStorageFailure(op string, workspaceID, secretRef u
 		"error", metadata.RedactSensitive(err.Error()))
 }
 
-// auditEventBuildFailed 统一处理审计事件构建失败：返回 audit_failed 并触发 $SECURITY_ALERT。
+// auditEventBuildFailed 统一处理审计事件构建失败：记录脱敏根因日志（与 logStorageFailure
+// 一致），返回 audit_failed 并触发 $SECURITY_ALERT（ADR-017 §6 / E17）。
 func (m *LifecycleManager) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, buildErr error) error {
 	auditCtx, cancel := m.auditContext(ctx)
 	defer cancel()
+	m.logger.Error("credential audit event build failed",
+		"workspace_id", wsID.String(),
+		"error", metadata.RedactSensitive(buildErr.Error()))
 	metadata.EmitAlarm(m.alarm, auditCtx, metadata.SecurityAlertEvent{
 		TraceID:     m.newTrace(),
 		WorkspaceID: wsID,
@@ -190,91 +194,36 @@ func (m *LifecycleManager) Create(ctx context.Context, wsID, actorID uuid.UUID, 
 }
 
 // Resolve 解析指定版本的凭证。普通执行路径：retired_at 非空时返回 credential_retired。
-// 任一失败均记录 E14-E16 并触发安全告警（decrypt 类失败）。
+// Resolve 本身不写 E14-E16 审计：凭证失败事件由执行管线（execution.Pipeline 阶段 C'
+// recordCredentialFailure）作为权威写入者，携带连接上下文并避免重复审计（Qodo-13）。
 func (m *LifecycleManager) Resolve(ctx context.Context, wsID, secretRef uuid.UUID, version int) (CredentialPayload, error) {
 	env, err := m.read.EnvelopeByRef(ctx, wsID, secretRef, version)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			re := fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
-			m.writeResolveFailureAudit(ctx, wsID, secretRef, version, re)
-			return CredentialPayload{}, re
+			return CredentialPayload{}, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 		}
 		m.logStorageFailure("resolve.envelope_by_ref", wsID, secretRef, err)
-		re := fmt.Errorf("%w: internal failure", ErrInternalError)
-		m.writeResolveFailureAudit(ctx, wsID, secretRef, version, re)
-		return CredentialPayload{}, re
+		return CredentialPayload{}, fmt.Errorf("%w: internal failure", ErrInternalError)
 	}
 
 	if env.RetiredAt != nil {
-		re := fmt.Errorf("%w: version %d retired", ErrCredentialRetired, version)
-		m.writeResolveFailureAudit(ctx, wsID, secretRef, version, re)
-		return CredentialPayload{}, re
+		return CredentialPayload{}, fmt.Errorf("%w: version %d retired", ErrCredentialRetired, version)
 	}
 
 	kek, err := m.kek.GetKEK(env.KEKVersion)
 	if err != nil {
 		m.logStorageFailure("resolve.get_kek", wsID, secretRef, err)
-		re := &KEKVersionError{
+		return CredentialPayload{}, &KEKVersionError{
 			Version: env.KEKVersion,
 			err:     fmt.Errorf("%w: unknown kek version", ErrUnknownKEKVersion),
 		}
-		m.writeResolveFailureAudit(ctx, wsID, secretRef, version, re)
-		return CredentialPayload{}, re
 	}
 
 	payload, openErr := OpenEnvelope(env, wsID, secretRef, kek)
 	if openErr != nil {
-		m.writeResolveFailureAudit(ctx, wsID, secretRef, version, openErr)
 		return payload, openErr
 	}
 	return payload, nil
-}
-
-// writeResolveFailureAudit 后置写入 Resolve 失败审计（E14 查找 / E15-E16 解密），
-// decrypt 类失败触发安全告警。
-func (m *LifecycleManager) writeResolveFailureAudit(ctx context.Context, wsID, secretRef uuid.UUID, version int, err error) {
-	code := credentialErrorCode(err)
-	var action string
-	var md metadata.AuditMetadata
-	switch code {
-	case ErrCredentialNotFound, ErrCredentialRetired, ErrInternalError:
-		action = metadata.ActionCredentialLookup
-		md = metadata.AuditMetadata{
-			SecretRef: strPtr(secretRef.String()),
-			ErrorCode: strPtr(string(code)),
-		}
-	default:
-		action = metadata.ActionCredentialDecrypt
-		md = metadata.AuditMetadata{
-			SecretRef:     strPtr(secretRef.String()),
-			SecretVersion: intPtr(version),
-			ErrorCode:     strPtr(string(code)),
-		}
-		var kekErr *KEKVersionError
-		if errors.As(err, &kekErr) {
-			md.KEKVersion = intPtr(kekErr.Version)
-		}
-		if IsDecryptFailureCode(code) {
-			alarmCtx, alarmCancel := m.auditContext(ctx)
-			defer alarmCancel()
-			metadata.EmitAlarm(m.alarm, alarmCtx, metadata.SecurityAlertEvent{
-				TraceID:     m.newTrace(),
-				WorkspaceID: wsID,
-				Code:        string(code),
-				OccurredAt:  m.clock(),
-			})
-		}
-	}
-	event, buildErr := newLifecycleAuditEvent(
-		wsID, metadata.ActorTypeSystem, nil, nil, nil,
-		action, "credential", secretRef.String(),
-		metadata.OutcomeFailed, md, m.newTrace(), m.clock(),
-	)
-	if buildErr != nil {
-		_ = m.auditEventBuildFailed(ctx, wsID, buildErr)
-		return
-	}
-	_ = m.writeFailureAudit(ctx, event)
 }
 
 // Rotate 轮换凭证：在事务中创建新版本、更新连接引用，并与 E4 审计原子提交。
@@ -299,8 +248,13 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 	env, err := atx.LockEnvelopeForUpdate(ctx, wsID, secretRef)
 	if err != nil {
 		if errors.Is(err, metadata.ErrEnvelopeNotFound) {
-			m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, fmt.Errorf("%w: credential not found", ErrCredentialNotFound))
-			return nil, fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
+			re := fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
+			// 先释放行锁再写 E5 失败审计（CR-5）：审计写入不延长 FOR UPDATE 锁持有时间。
+			_ = atx.Rollback()
+			if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, re); auditErr != nil {
+				return nil, auditErr
+			}
+			return nil, re
 		}
 		m.logStorageFailure("rotate.lock_envelope", wsID, secretRef, err)
 		return nil, fmt.Errorf("%w: internal failure", ErrInternalError)
@@ -311,12 +265,20 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 			Actual:   env.Version,
 			err:      fmt.Errorf("%w", ErrVersionConflict),
 		}
-		m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, vce)
+		// 先释放行锁再写 E5 失败审计（CR-5）。
+		_ = atx.Rollback()
+		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, vce); auditErr != nil {
+			return nil, auditErr
+		}
 		return nil, vce
 	}
 	if env.RetiredAt != nil {
 		re := fmt.Errorf("%w: version %d retired", ErrCredentialRetired, env.Version)
-		m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, re)
+		// 先释放行锁再写 E5 失败审计（CR-5）。
+		_ = atx.Rollback()
+		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, re); auditErr != nil {
+			return nil, auditErr
+		}
 		return nil, re
 	}
 
@@ -360,13 +322,14 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 }
 
 // writeRotateFailedAudit 后置写入 E5 credential.rotate failed 审计。
-func (m *LifecycleManager) writeRotateFailedAudit(ctx context.Context, wsID, actorID, secretRef uuid.UUID, expectedVersion int, err error) {
+// 审计持久化失败时 fail-closed 返回 audit_failed（ADR-017 §6 禁止静默降级），
+// 与 WEB-23 AuditedLifecycleManager 语义一致；调用方据此返回 audit_failed 而非原始业务错误。
+func (m *LifecycleManager) writeRotateFailedAudit(ctx context.Context, wsID, actorID, secretRef uuid.UUID, expectedVersion int, err error) error {
 	event, buildErr := newRotateFailedEvent(wsID, actorID, secretRef, expectedVersion, err, m.newTrace(), m.clock())
 	if buildErr != nil {
-		_ = m.auditEventBuildFailed(ctx, wsID, buildErr)
-		return
+		return m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}
-	_ = m.writeFailureAudit(ctx, event)
+	return m.writeFailureAudit(ctx, event)
 }
 
 // Retire 退役指定版本。被连接引用时拒绝。mutation（UpdateRetiredAt）与 E6 审计
