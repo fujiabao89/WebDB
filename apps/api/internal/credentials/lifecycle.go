@@ -251,7 +251,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 			re := fmt.Errorf("%w: credential not found", ErrCredentialNotFound)
 			// 先释放行锁再写 E5 失败审计（CR-5）：审计写入不延长 FOR UPDATE 锁持有时间。
 			_ = atx.Rollback()
-			if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, re); auditErr != nil {
+			if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, re); auditErr != nil {
 				return nil, auditErr
 			}
 			return nil, re
@@ -267,7 +267,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 		}
 		// 先释放行锁再写 E5 失败审计（CR-5）。
 		_ = atx.Rollback()
-		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, vce); auditErr != nil {
+		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, vce); auditErr != nil {
 			return nil, auditErr
 		}
 		return nil, vce
@@ -276,7 +276,7 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 		re := fmt.Errorf("%w: version %d retired", ErrCredentialRetired, env.Version)
 		// 先释放行锁再写 E5 失败审计（CR-5）。
 		_ = atx.Rollback()
-		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, re); auditErr != nil {
+		if auditErr := m.writeRotateFailedAudit(ctx, wsID, actorID, secretRef, expectedVersion, traceID, re); auditErr != nil {
 			return nil, auditErr
 		}
 		return nil, re
@@ -322,10 +322,11 @@ func (m *LifecycleManager) Rotate(ctx context.Context, wsID, actorID, secretRef 
 }
 
 // writeRotateFailedAudit 后置写入 E5 credential.rotate failed 审计。
+// 复用调用方（Rotate）已生成的 traceID，确保同一请求的 E4/E5 审计可关联（LATEST-CR-01）。
 // 审计持久化失败时 fail-closed 返回 audit_failed（ADR-017 §6 禁止静默降级），
 // 与 WEB-23 AuditedLifecycleManager 语义一致；调用方据此返回 audit_failed 而非原始业务错误。
-func (m *LifecycleManager) writeRotateFailedAudit(ctx context.Context, wsID, actorID, secretRef uuid.UUID, expectedVersion int, err error) error {
-	event, buildErr := newRotateFailedEvent(wsID, actorID, secretRef, expectedVersion, err, m.newTrace(), m.clock())
+func (m *LifecycleManager) writeRotateFailedAudit(ctx context.Context, wsID, actorID, secretRef uuid.UUID, expectedVersion int, traceID string, err error) error {
+	event, buildErr := newRotateFailedEvent(wsID, actorID, secretRef, expectedVersion, err, traceID, m.clock())
 	if buildErr != nil {
 		return m.auditEventBuildFailed(ctx, wsID, buildErr)
 	}

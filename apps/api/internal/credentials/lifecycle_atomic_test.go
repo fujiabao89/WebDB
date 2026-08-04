@@ -128,10 +128,12 @@ type fakeAtomicTxStore struct {
 	tx         *fakeAtomicTx
 	beginErr   error
 	beginCalls int
+	lastOp     *metadata.OperationContext // 记录最近一次 Begin* 的 op（用于 trace 关联断言）
 }
 
 func (s *fakeAtomicTxStore) BeginCredential(ctx context.Context, op *metadata.OperationContext) (metadata.CredentialAtomicTx, error) {
 	s.beginCalls++
+	s.lastOp = op
 	if s.beginErr != nil {
 		return nil, s.beginErr
 	}
@@ -288,6 +290,29 @@ func TestRotateVersionConflictWritesE5(t *testing.T) {
 	}
 	if len(audit.events) != 1 || audit.events[0].Action != metadata.ActionCredentialRotate || audit.events[0].Outcome != metadata.OutcomeFailed {
 		t.Fatalf("expected E5 failure audit, got %d events", len(audit.events))
+	}
+}
+
+// TestRotateE5TraceReusesRequestTrace 验证 E5 失败审计复用 Rotate 请求的 traceID
+// （LATEST-CR-01）：同一次 Rotate 请求不得产生第二个 trace，排障可按 trace 关联。
+func TestRotateE5TraceReusesRequestTrace(t *testing.T) {
+	ref := uuid.New()
+	tx := &fakeAtomicTx{env: &metadata.CredentialEnvelope{SecretRef: ref, Version: 2}}
+	audit := &fakeAuditSink{}
+	m, txstore := newTestManager(tx, &fakeReadStore{}, audit, &fakeAlarmRecorder{})
+
+	_, err := m.Rotate(context.Background(), uuid.New(), uuid.New(), ref, 1, testPayload())
+	if !IsErrorCode(err, ErrVersionConflict) {
+		t.Fatalf("Rotate() error = %v, want version_conflict", err)
+	}
+	if txstore.lastOp == nil {
+		t.Fatal("BeginCredential not called with op")
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("expected E5 failure audit, got %d events", len(audit.events))
+	}
+	if audit.events[0].TraceID != txstore.lastOp.TraceID() {
+		t.Fatalf("E5 trace %q != request trace %q (must reuse Rotate traceID)", audit.events[0].TraceID, txstore.lastOp.TraceID())
 	}
 }
 
