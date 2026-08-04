@@ -925,6 +925,8 @@ KEK 不得出现在：
 
 ## 15. 回滚与前向修复
 
+> **强制回滚顺序**：功能回滚必须按依赖逆序执行——先 `git revert` WEB-23（PR #32，`94eb3ca...`），再 `git revert` WEB-22（PR #31，`0af2625...`），最后（可选）WEB-21（PR #30，`3b9e5bd...`）。WEB-23 修改了 WEB-22 引入的 credential/execution 文件，颠倒顺序会产生文件冲突或不完整回滚；与 baseline「回滚与前向修复」一致。
+
 ### 15.1 回滚 WEB-22
 
 - **代码回滚**：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（PR #31 合并后的单父提交）

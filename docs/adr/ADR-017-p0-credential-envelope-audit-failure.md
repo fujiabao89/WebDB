@@ -101,7 +101,7 @@ WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期，�
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
-- 回滚：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）、`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）；**凭证回滚禁令**：一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本（兼容性限制与 baseline「回滚与前向修复」一致）；`audit_events` 仅追加写，回滚代码不影响已写入的审计数据
+- 回滚（**按依赖逆序：先 WEB-23，再 WEB-22**）：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）、`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）；**凭证回滚禁令**：一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本（兼容性限制与 baseline「回滚与前向修复」一致）；`audit_events` 仅追加写，回滚代码不影响已写入的审计数据
 - KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 
 ## 相关资料
