@@ -410,7 +410,8 @@ KEK 不得出现在：
 6. 使用 ActiveKEK 加密
 7. INSERT INTO credential_envelopes (workspace_id, secret_ref, version, ...)
 8. 写入审计事件: action="credential.create", outcome="succeeded"
-   → 审计写入失败：INSERT 已持久化，返回 audit_failed；客户端可重试审计写入。
+   → 审计写入失败：mutation 与 E3 审计在同一事务原子提交（D11，WEB-25），
+      事务整体回滚、envelope 不残留，返回 audit_failed（触发 $SECURITY_ALERT）。
       创建操作不提供幂等键——每次 CreateCredential 生成新的 secret_ref 和 envelope，
       重试必须基于上一步返回的 secret_ref 判断是否已创建，不得重复调用 CreateCredential
 ```
@@ -420,22 +421,24 @@ KEK 不得出现在：
 ```text
 1. 验证调用者有 workspace 成员资格
 2. SELECT FROM credential_envelopes WHERE (workspace_id, secret_ref, secret_version) = (...)
-3. 行不存在 → audit: credential.lookup.fail, 返回 credential_not_found
+3. 行不存在 → 返回 credential_not_found（E14 由执行管线统一写入，见下方注记）
 4. 行存在且 `retired_at IS NOT NULL` → 普通执行路径返回 credential_retired
    （审计追溯路径允许继续解密，通过独立查询接口，不经过此执行流程）
 5. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
 6. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 6. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 7. KEK ← KEKProvider.GetKEK(row.kek_version)
-8. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
+8. KEK 未知 → 返回 unknown_kek_version（E16 由执行管线统一写入）
 9. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, wrap_aad)
 10. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, data_aad)
-11. 解密失败（步骤 9 或 10）→ audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
+11. 解密失败（步骤 9 或 10）→ 返回 decryption_failed（E15 由执行管线统一写入）
 12. 验证 payload schema
 13. 返回 CredentialPayload
 ```
 
 > **约束**：步骤 10-13 任一失败，Adapter 调用次数必须为 0。步骤 3（行不存在）或步骤 4（已退役）时不执行任何加密操作。
+>
+> **E14-E16 写入者（Qodo-13）**：`ResolveCredential` 本身不写 E14-E16。执行管线（`execution.Pipeline` 阶段 C' `recordCredentialFailure`）在解析失败时作为**唯一权威写入者**记录 E14-E16，携带连接上下文（`connection_id` 非 NULL，符合 §8.1 事件矩阵），避免重复审计行；`connection.test`（E8）路径由 connections 服务写入。凭证失败触发 `$SECURITY_ALERT` 的行为由执行管线 / connections 服务保持一致。
 
 #### 6.2.3 轮换（RotateCredential）
 
@@ -453,9 +456,8 @@ KEK 不得出现在：
 8.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
 9.   UPDATE connections SET secret_version = 新 version
         WHERE workspace_id = $1 AND secret_ref = $2
-10. COMMIT
-11. 写入审计事件: credential.rotate.success
-    → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
+10. 写入审计事件: credential.rotate.success（与 1-9 的 mutation 同一事务原子提交，D11，WEB-25）
+    → 审计写入失败：事务整体回滚、新版本不残留、连接引用不变，返回 audit_failed（触发 $SECURITY_ALERT）。
        轮换冲突检测：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
        服务端在步骤 4 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
        若 expected_version 已落后（即已有其他轮换成功），当前请求的 payload 未保存，
@@ -490,8 +492,9 @@ KEK 不得出现在：
      → 计数 > 0：ROLLBACK，返回 credential_in_use
 5.   UPDATE credential_envelopes SET retired_at = now()
      WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
-6. COMMIT
-7. 写入审计事件: credential.retire
+6. 写入审计事件: credential.retire（与 mutation 同一事务原子提交，D11，WEB-25；
+   审计写入失败 → 整体回滚、retired_at 不变，返回 audit_failed 并触发 $SECURITY_ALERT）
+7. COMMIT
 ```
 
 - 步骤 4 的 `FOR SHARE` 会阻塞并发连接版本更新，直至退役事务结束。
@@ -519,12 +522,12 @@ KEK 不得出现在：
 
 | 操作 | 前置状态 | 后置状态 | 事务？ | 审计事件 |
 |---|---|---|---|---|
-| Create | — | version=1, active | 否（单 INSERT）† | `credential.create` |
+| Create | — | version=1, active | 是（单 INSERT + 审计同事务）† | `credential.create` |
 | Read | active 或 retired | 不变 | 否 | 无（除非失败） |
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
 
-> † Create 为单条 INSERT 无显式事务边界；若后续审计写入失败，envelope 行已持久化且审计失败不影响创建结果。Retire 使用显式事务以保证引用检查和退役更新的原子性。
+> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E3/E4/E6）**；E5（`credential.rotate failed`）发生在失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（LATEST2-CR-01）。执行前审计（E9 `sql.execute.denied`，§7.1 阶段 C，Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 
@@ -968,4 +971,6 @@ KEK 不得出现在：
 | 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 commit（单父提交，普通 `git revert` 即可）；D1-D15 已批准决策未修改 |
 | 2026-08-02 | Codex/qodo/CodeRabbit 收尾审查处理：QA 命令统一锚定 `apps/api` 且 QA-04 补齐 `./internal/credentials` 包路径；回滚说明改为单父提交并补充收尾 PR 的 commit 与凭证回滚禁令；WEB-22 合并日期统一为 2026-08-01。**Codex P1 契约张力已如实记录（不改 D1-D15）**：D11 声明"元数据库变更与 audit 原子提交"，而凭证创建/轮换/退役及连接 mutation 实际为 post-commit 再写审计（§6.2.1/6.2.3 描述）；凭证 per-field 长度限制（§3.2 user≤255/password≤1024）未在 `validatePayloadFields` 实现。两处均需 Owner 决策（见 baseline 残余风险），本方案不擅自改动已批准决策 |
 | 2026-08-02 | **Owner 决策**：WEB-11 保持 In Progress。创建 [WEB-24](https://linear.app/webdb/issue/WEB-24)（PostgreSQL 并发轮换 LIFE-07/回滚 LIFE-08 集成测试，P1）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性，保留 D11 并明确作用域：元数据库内 mutation 与 AuditEvent 原子提交，目标库查询后审计为外部副作用例外沿用 ADR-017 post-execution fail-closed，P1）、[WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制按 UTF-8 字节数实现 + PAY-06/07 边界测试，P1）、[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产环境数据库角色拆分，Backend/Security Owner，截止 2026-08-09，首次 production-like 部署前完成）。D1-D15 已批准决策内容未修改 |
-| 2026-08-03 | **WEB-11 收尾最终确认**：[WEB-24](https://linear.app/webdb/issue/WEB-24)/[WEB-26](https://linear.app/webdb/issue/WEB-26) 代码与测试已合并（PR #34/#35）、[WEB-25](https://linear.app/webdb/issue/WEB-25) 审计原子性设计已记录（PR #36）、[WEB-27](https://linear.app/webdb/issue/WEB-27) 生产角色拆分已合并（PR #37）；最新 main CI run 30813651962（head `0f1b5bc`）全绿。QA-04 以 2026-08-03 实际重跑结果更新（Payload ~34.7s/218695 execs、AAD ~31.2s/46497 execs，均 exit 0 无 panic）。D1-D15 已批准决策内容未修改 |
+| 2026-08-03 | **WEB-11 收尾最终确认**：[WEB-24](https://linear.app/webdb/issue/WEB-24)/[WEB-26](https://linear.app/webdb/issue/WEB-26) 代码与测试已合并（PR #34/#35）、[WEB-27](https://linear.app/webdb/issue/WEB-27) 生产角色拆分已合并（PR #37）；最新 main CI run 30813651962（head `0f1b5bc`）全绿。QA-04 以 2026-08-03 实际重跑结果更新（Payload ~34.7s/218695 execs、AAD ~31.2s/46497 execs，均 exit 0 无 panic）。D1-D15 已批准决策内容未修改 |
+| 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；执行前审计（E9 `sql.execute.denied`）fail-closed 阻止 Adapter 调用，目标库执行后结果审计（E10-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |
+| 2026-08-04 | **WEB-11 收尾完成**：WEB-25 代码实施已合并（PR #38），P0-05 全部子任务与 P1/R6 修复完成，WEB-11 标记 Done；最新 main CI run 30896499396（head `756a086`）全绿。D1-D15 已批准决策内容未修改 |

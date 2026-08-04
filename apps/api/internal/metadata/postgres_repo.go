@@ -280,33 +280,12 @@ func (s *PGStore) ListEnvelopes(ctx context.Context, wsID uuid.UUID) ([]Credenti
 // ---- ConnectionStore ------------------------------------------------------
 
 func (s *PGStore) CreateConnection(ctx context.Context, c *Connection) error {
-	const q = `
-		INSERT INTO connections
-			(workspace_id, name, engine, host, port, database, environment,
-			 secret_ref, secret_version, created_by)
-		SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10
-		FROM credential_envelopes AS active_credential
-		WHERE active_credential.workspace_id = $1
-		  AND active_credential.secret_ref = $8
-		  AND active_credential.version = $9
-		  AND active_credential.retired_at IS NULL
-		FOR KEY SHARE OF active_credential
-		RETURNING id, created_at, updated_at`
-	err := s.DB.QueryRowContext(ctx, q,
-		c.WorkspaceID, c.Name, string(c.Engine),
-		c.Host, c.Port, c.Database, string(c.Environment),
-		c.SecretRef, c.SecretVersion, c.CreatedBy,
-	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf(
-			"active credential envelope (%s, %s, %d): %w",
-			c.WorkspaceID,
-			c.SecretRef,
-			c.SecretVersion,
-			ErrEnvelopeNotFound,
-		)
+	// 连接 ID 由服务端预生成（与原子路径 createConnectionExec 契约一致，
+	// CodeRabbit-9：共享同一份 SQL，避免非原子/原子路径漂移）。
+	if c.ID == uuid.Nil {
+		c.ID = uuid.New()
 	}
-	return err
+	return createConnectionExec(ctx, s.DB, c)
 }
 
 func (s *PGStore) ConnectionByID(ctx context.Context, wsID, id uuid.UUID) (*Connection, error) {
@@ -356,45 +335,9 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 }
 
 func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
-	// 先确认连接行存在，避免 CTE 的 sql.ErrNoRows 混淆"连接缺失"与"凭证缺失"。
-	const checkConn = `SELECT 1 FROM connections WHERE id = $1 AND workspace_id = $2`
-	if err := s.DB.QueryRowContext(ctx, checkConn, c.ID, wsID).Scan(new(int)); errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("connection %s not found in workspace %s", c.ID, wsID)
-	} else if err != nil {
-		return err
-	}
-
-	const q = `
-		WITH active_credential AS MATERIALIZED (
-			SELECT 1
-			FROM credential_envelopes AS envelope
-			WHERE envelope.workspace_id = $10
-			  AND envelope.secret_ref = $7
-			  AND envelope.version = $8
-			  AND envelope.retired_at IS NULL
-			FOR KEY SHARE OF envelope
-		)
-		UPDATE connections AS connection SET
-			name=$1, engine=$2, host=$3, port=$4,
-			database=$5, environment=$6, secret_ref=$7, secret_version=$8,
-			updated_at=GREATEST(clock_timestamp(), connection.updated_at + interval '1 microsecond')
-		FROM active_credential
-		WHERE connection.id=$9 AND connection.workspace_id=$10
-		RETURNING connection.updated_at`
-	err := s.DB.QueryRowContext(ctx, q,
-		c.Name, string(c.Engine), c.Host, c.Port, c.Database,
-		string(c.Environment), c.SecretRef, c.SecretVersion, c.ID, wsID,
-	).Scan(&c.UpdatedAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf(
-			"active credential envelope (%s, %s, %d): %w",
-			wsID,
-			c.SecretRef,
-			c.SecretVersion,
-			ErrEnvelopeNotFound,
-		)
-	}
-	return err
+	// 复用共享 SQL（CodeRabbit-9）：与原子路径 updateConnectionExec 同一份
+	// active-envelope FOR KEY SHARE 语义与 updated_at 单调递增表达式。
+	return updateConnectionExec(ctx, s.DB, wsID, c)
 }
 
 // ---- ConnectionPolicyStore ------------------------------------------------

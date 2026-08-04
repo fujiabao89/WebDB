@@ -138,16 +138,34 @@ func connectionSecretVersion(t *testing.T, store *metadata.PGStore, ctx context.
 	return conn.SecretVersion
 }
 
-// failingConnStore 包装真实 ConnectionTXStore，仅在 UpdateConnectionVersion 注入失败，
-// 用于验证 Rotate 在 INSERT 新 envelope 后、COMMIT 前失败时事务完整回滚（LIFE-08）。
-type failingConnStore struct {
-	metadata.ConnectionTXStore
+// testAlarmRecorder 集成测试用的无操作告警接收器。
+type testAlarmRecorder struct{}
+
+func (*testAlarmRecorder) Alarm(context.Context, metadata.SecurityAlertEvent) {}
+
+// failingAtomicTxStore 包装真实 AtomicTxStore，仅在 BeginCredential 返回的
+// CredentialAtomicTx.UpdateConnectionVersion 注入失败，用于验证 Rotate 在
+// INSERT 新 envelope 后、COMMIT 前失败时事务完整回滚（LIFE-08，D11 原子化）。
+type failingAtomicTxStore struct {
+	metadata.AtomicTxStore
 }
 
-func (f *failingConnStore) UpdateConnectionVersion(ctx context.Context, tx *sql.Tx, wsID, secretRef uuid.UUID, newVersion int) error {
+func (s *failingAtomicTxStore) BeginCredential(ctx context.Context, op *metadata.OperationContext) (metadata.CredentialAtomicTx, error) {
+	tx, err := s.AtomicTxStore.BeginCredential(ctx, op)
+	if err != nil {
+		return nil, err
+	}
+	return &failingCredentialTx{CredentialAtomicTx: tx}, nil
+}
+
+type failingCredentialTx struct {
+	metadata.CredentialAtomicTx
+}
+
+func (f *failingCredentialTx) UpdateConnectionVersion(ctx context.Context, wsID, secretRef uuid.UUID, newVersion int) error {
 	// 先委托真实实现执行 UPDATE connections，再注入失败，
 	// 使测试同时验证真实的连接版本更新与 envelope 插入都在同一事务中被回滚。
-	if err := f.ConnectionTXStore.UpdateConnectionVersion(ctx, tx, wsID, secretRef, newVersion); err != nil {
+	if err := f.CredentialAtomicTx.UpdateConnectionVersion(ctx, wsID, secretRef, newVersion); err != nil {
 		return err
 	}
 	return errors.New("injected failure: update connection version")
@@ -162,9 +180,9 @@ func TestLifecycleRotateConcurrentPostgres(t *testing.T) {
 	db, store, ctx, u, ws := setupLifecycle(t)
 	defer db.Close()
 
-	lm := NewLifecycleManager(db, store, store, goodKEK())
+	lm := NewLifecycleManager(store, store, store, goodKEK(), &testAlarmRecorder{})
 
-	env, err := lm.Create(ctx, ws.ID, CredentialPayload{User: "u", Password: "p"})
+	env, err := lm.Create(ctx, ws.ID, u.ID, CredentialPayload{User: "u", Password: "p"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -180,7 +198,7 @@ func TestLifecycleRotateConcurrentPostgres(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, err := lm.Rotate(ctx, ws.ID, env.SecretRef, 1, CredentialPayload{User: "u2", Password: "p2"})
+			_, err := lm.Rotate(ctx, ws.ID, u.ID, env.SecretRef, 1, CredentialPayload{User: "u2", Password: "p2"})
 			errs[idx] = err
 		}(i)
 	}
@@ -230,18 +248,18 @@ func TestLifecycleRotateTxFailureRollbackPostgres(t *testing.T) {
 	db, store, ctx, u, ws := setupLifecycle(t)
 	defer db.Close()
 
-	lm := NewLifecycleManager(db, store, store, goodKEK())
-	env, err := lm.Create(ctx, ws.ID, CredentialPayload{User: "u", Password: "p"})
+	lm := NewLifecycleManager(store, store, store, goodKEK(), &testAlarmRecorder{})
+	env, err := lm.Create(ctx, ws.ID, u.ID, CredentialPayload{User: "u", Password: "p"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
 	conn := createTestConnection(t, store, ctx, ws.ID, u.ID, env.SecretRef, env.Version)
 
-	// 用注入失败的 conns 触发 Rotate 中间失败
-	failing := &failingConnStore{ConnectionTXStore: store}
-	lmFailing := NewLifecycleManager(db, store, failing, goodKEK())
-	_, err = lmFailing.Rotate(ctx, ws.ID, env.SecretRef, 1, CredentialPayload{User: "u2", Password: "p2"})
+	// 用注入失败的 atomic tx store 触发 Rotate 中间失败
+	failing := &failingAtomicTxStore{AtomicTxStore: store}
+	lmFailing := NewLifecycleManager(store, failing, store, goodKEK(), &testAlarmRecorder{})
+	_, err = lmFailing.Rotate(ctx, ws.ID, u.ID, env.SecretRef, 1, CredentialPayload{User: "u2", Password: "p2"})
 	if err == nil {
 		t.Fatal("expected rotate to fail on injected UpdateConnectionVersion error")
 	}
