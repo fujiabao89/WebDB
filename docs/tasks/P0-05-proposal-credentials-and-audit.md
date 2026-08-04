@@ -421,22 +421,24 @@ KEK 不得出现在：
 ```text
 1. 验证调用者有 workspace 成员资格
 2. SELECT FROM credential_envelopes WHERE (workspace_id, secret_ref, secret_version) = (...)
-3. 行不存在 → audit: credential.lookup.fail, 返回 credential_not_found
+3. 行不存在 → 返回 credential_not_found（E14 由执行管线统一写入，见下方注记）
 4. 行存在且 `retired_at IS NOT NULL` → 普通执行路径返回 credential_retired
    （审计追溯路径允许继续解密，通过独立查询接口，不经过此执行流程）
 5. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
 6. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 6. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 7. KEK ← KEKProvider.GetKEK(row.kek_version)
-8. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
+8. KEK 未知 → 返回 unknown_kek_version（E16 由执行管线统一写入）
 9. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, wrap_aad)
 10. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, data_aad)
-11. 解密失败（步骤 9 或 10）→ audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
+11. 解密失败（步骤 9 或 10）→ 返回 decryption_failed（E15 由执行管线统一写入）
 12. 验证 payload schema
 13. 返回 CredentialPayload
 ```
 
 > **约束**：步骤 10-13 任一失败，Adapter 调用次数必须为 0。步骤 3（行不存在）或步骤 4（已退役）时不执行任何加密操作。
+>
+> **E14-E16 写入者（Qodo-13）**：`ResolveCredential` 本身不写 E14-E16。执行管线（`execution.Pipeline` 阶段 C' `recordCredentialFailure`）在解析失败时作为**唯一权威写入者**记录 E14-E16，携带连接上下文（`connection_id` 非 NULL，符合 §8.1 事件矩阵），避免重复审计行；`connection.test`（E8）路径由 connections 服务写入。凭证失败触发 `$SECURITY_ALERT` 的行为由执行管线 / connections 服务保持一致。
 
 #### 6.2.3 轮换（RotateCredential）
 
@@ -490,8 +492,9 @@ KEK 不得出现在：
      → 计数 > 0：ROLLBACK，返回 credential_in_use
 5.   UPDATE credential_envelopes SET retired_at = now()
      WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
-6. COMMIT
-7. 写入审计事件: credential.retire
+6. 写入审计事件: credential.retire（与 mutation 同一事务原子提交，D11，WEB-25；
+   审计写入失败 → 整体回滚、retired_at 不变，返回 audit_failed 并触发 $SECURITY_ALERT）
+7. COMMIT
 ```
 
 - 步骤 4 的 `FOR SHARE` 会阻塞并发连接版本更新，直至退役事务结束。
@@ -519,7 +522,7 @@ KEK 不得出现在：
 
 | 操作 | 前置状态 | 后置状态 | 事务？ | 审计事件 |
 |---|---|---|---|---|
-| Create | — | version=1, active | 否（单 INSERT）† | `credential.create` |
+| Create | — | version=1, active | 是（单 INSERT + 审计同事务）† | `credential.create` |
 | Read | active 或 retired | 不变 | 否 | 无（除非失败） |
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
