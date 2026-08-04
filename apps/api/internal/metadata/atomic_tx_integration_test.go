@@ -96,13 +96,15 @@ func TestAtomicTxCommitWithoutAuditRollsBack(t *testing.T) {
 // TestAtomicTxCommitWithMatchingAudit 验证成功路径：mutation + 匹配审计事件
 // 原子提交，envelope 与 audit_events 均持久化。
 func TestAtomicTxCommitWithMatchingAudit(t *testing.T) {
-	db, store, _, ws, _, _, _, cleanup := setupFull(t)
+	db, store, u, ws, _, _, _, cleanup := setupFull(t)
 	defer db.Close()
 	defer cleanup()
 
 	ctx := context.Background()
 	secretRef := uuid.New()
-	actorID := uuid.New()
+	// 使用 setupFull 创建的真实用户 ID：audit_events.actor_id 受 fk_audit_actor
+	// 外键约束，随机 uuid 不在 users 表会导致 INSERT 失败（CI API checks）。
+	actorID := u.ID
 	traceID := uuid.NewString()
 	op := newCredOp(t, ws.ID, actorID, secretRef, traceID)
 
@@ -159,7 +161,7 @@ func TestAtomicTxAppendAuditWrongContextRejected(t *testing.T) {
 
 // TestConnectionAtomicTxCommitGate 验证连接原子事务闸门：无审计则拒绝提交。
 func TestConnectionAtomicTxCommitGate(t *testing.T) {
-	db, store, _, ws, _, _, env, cleanup := setupFull(t)
+	db, store, u, ws, _, _, env, cleanup := setupFull(t)
 	defer db.Close()
 	defer cleanup()
 
@@ -167,7 +169,7 @@ func TestConnectionAtomicTxCommitGate(t *testing.T) {
 	connID := uuid.New()
 	op, err := NewOperationContext(
 		uuid.NewString(), ws.ID, "connection", connID.String(),
-		ActionConnectionCreate, &connID, uuid.New(), "user", string(OutcomeSucceeded), uuid.NewString(),
+		ActionConnectionCreate, &connID, u.ID, "user", string(OutcomeSucceeded), uuid.NewString(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -187,7 +189,9 @@ func TestConnectionAtomicTxCommitGate(t *testing.T) {
 		Environment:   EnvDevelopment,
 		SecretRef:     env.SecretRef,
 		SecretVersion: env.SecretVersion,
-		CreatedBy:     uuid.New(),
+		// 使用 setupFull 创建的真实用户 ID：connections.created_by 受
+		// fk_connections_created_by 外键约束，随机 uuid 不在 users 表会导致失败。
+		CreatedBy: u.ID,
 	}
 	if err := atx.CreateConnection(ctx, conn); err != nil {
 		t.Fatalf("CreateConnection: %v", err)
