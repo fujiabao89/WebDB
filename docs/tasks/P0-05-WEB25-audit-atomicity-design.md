@@ -39,7 +39,7 @@
    - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**：精确匹配字段集合为 `AuditMatchFields`（workspace、resource、resource_id、action、connection、mutation ID、actor_id、actor_type、outcome、trace_id，见 §3）；`AppendAudit`、`Commit` 闸门与负向测试**复用该集合**。拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
    - 补负向验收测试覆盖违规输入、跨租户、connection 缺失/为 null、匹配冲突；验证 `AuditMatchFields` 任一字段不匹配即拒绝（不存在审计绕过）。
 5. **并发与回滚**：并发轮换（LIFE-07）、事务中间失败回滚（LIFE-08）由集成测试覆盖；`CountConnectionsByVersion` 必须对匹配行加 `FOR SHARE` 锁（保留既有 retire TOCTOU 防护），并发 `UpdateConnectionVersion` 必须被阻塞直至退役事务结束。**共享序列化点**：对 `credential_envelopes`/`connections` 资源定义显式隔离级别或数据库 advisory-lock 协议作为共享序列化点；**当无匹配连接行（零匹配）时仍须获取该序列化点**（例如锁定目标 envelope 行 + advisory lock），防止并发 `UpdateConnectionVersion` 在零匹配场景绕过退役检查。集成测试须覆盖**初始零匹配**与**单匹配**两种场景。
-6. **外部副作用例外不变**：目标库执行后的结果审计（E10-E13）写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警；执行前审计（E9 `sql.execute.denied`）在 Adapter 调用前写入，审计失败时 fail-closed 阻止 Adapter 调用。**E5 时序边界（LATEST2-CR-01）**：`credential.rotate failed` 发生在 Rotate 失败分支（无已提交 mutation），先回滚释放行锁、再经独立失败路径写入；D11 原子范围仅涵盖成功 mutation 与其审计，E5 属原子范围外（审计失败时 fail-closed 返回 `audit_failed`）。
+6. **外部副作用例外不变**：目标库执行后的结果审计（E10-E13）写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警；执行前审计（E9 `sql.execute.denied`）在 Adapter 调用前写入，审计失败时 fail-closed 阻止 Adapter 调用。**E5 时序边界（LATEST2-CR-01/LATEST3-CR-01）**：`credential.rotate failed` 发生在 Rotate 失败分支（无已提交 mutation），先回滚释放行锁、再经独立失败路径写入；D11 原子范围仅涵盖成功 mutation 与其审计，E5 属原子范围外（审计失败时 fail-closed 返回 `audit_failed`）。`eventAllowed`/`validateOpForCredential` 的原子事务允许列表不含 E5——`BeginCredential` 拒绝 `credential.rotate/failed` op，确保 E5 不会进入原子 mutation 事务（仅经 `writeRotateFailedAudit` 独立失败审计入口写入）。
 
 ## 3. 接口隔离设计（窄接口 + 协调器独占事务控制）
 
@@ -322,7 +322,7 @@ func eventAllowed(resource, action, outcome string) bool {
 | Retire 原子：audit 失败 → `retired_at` 不变 | **已实施** | `TestRetireAuditFailureRollsBack`（`lifecycle_atomic_test.go`，AppendAudit 失败注入） |
 | Connection Create 原子：audit 失败 → 连接不残留 | **已实施** | `TestConnection_CreateAuditFailureRollsBack`（`service_test.go`） |
 | Connection Update 原子：audit 失败 → 更新回滚 | **已实施** | `TestConnection_UpdateAuditFailureRollsBack`（`service_test.go`） |
-| 事件构建/校验失败（`AppendAudit` 拒绝非法 metadata）→ 回滚 | **已实施** | `TestRotateE5WriteFailureFailsClosed`、`TestCreateInsertFailureNoCommit` |
+| 事件构建/校验失败（`AppendAudit` 拒绝非法 metadata）→ 回滚 | **已实施** | `TestAtomicTxAppendAuditInvalidMetadataRollsBack`（`atomic_tx_integration_test.go`，AppendAudit 拒绝后事务回滚不提交） |
 | mutation 中间失败（锁/约束/DB 错误）→ 回滚 | **已实施** | `TestCreateInsertFailureNoCommit`、`TestRetireInUseNoCommit` |
 | `Begin`/`Commit`/`Rollback` 失败路径 | **已实施** | `TestAtomicTxCommitWithoutAuditRollsBack`、`TestConnectionAtomicTxCommitGate`（集成，Commit 闸门） |
 | 取消（ctx 取消）→ 事务清理 | 待实施 | credentials/connections 取消测试 |
