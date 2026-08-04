@@ -410,7 +410,8 @@ KEK 不得出现在：
 6. 使用 ActiveKEK 加密
 7. INSERT INTO credential_envelopes (workspace_id, secret_ref, version, ...)
 8. 写入审计事件: action="credential.create", outcome="succeeded"
-   → 审计写入失败：INSERT 已持久化，返回 audit_failed；客户端可重试审计写入。
+   → 审计写入失败：mutation 与 E3 审计在同一事务原子提交（D11，WEB-25），
+      事务整体回滚、envelope 不残留，返回 audit_failed（触发 $SECURITY_ALERT）。
       创建操作不提供幂等键——每次 CreateCredential 生成新的 secret_ref 和 envelope，
       重试必须基于上一步返回的 secret_ref 判断是否已创建，不得重复调用 CreateCredential
 ```
@@ -453,9 +454,8 @@ KEK 不得出现在：
 8.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
 9.   UPDATE connections SET secret_version = 新 version
         WHERE workspace_id = $1 AND secret_ref = $2
-10. COMMIT
-11. 写入审计事件: credential.rotate.success
-    → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
+10. 写入审计事件: credential.rotate.success（与 1-9 的 mutation 同一事务原子提交，D11，WEB-25）
+    → 审计写入失败：事务整体回滚、新版本不残留、连接引用不变，返回 audit_failed（触发 $SECURITY_ALERT）。
        轮换冲突检测：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
        服务端在步骤 4 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
        若 expected_version 已落后（即已有其他轮换成功），当前请求的 payload 未保存，
@@ -524,7 +524,7 @@ KEK 不得出现在：
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
 
-> † Create 为单条 INSERT 无显式事务边界；若后续审计写入失败，envelope 行已持久化且审计失败不影响创建结果。Retire 使用显式事务以保证引用检查和退役更新的原子性。
+> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。目标数据库查询后的审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外，沿用 post-commit fail-closed（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 
@@ -961,3 +961,4 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
+| 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；目标库查询后审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |
