@@ -92,7 +92,7 @@ WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
-- **D11 原子提交（WEB-25 实施，2026-08-04）**：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门）；审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。目标库查询后审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外，沿用 post-commit fail-closed（不原子）。不新增 migration、不改变稳定错误码/E17 语义。
+- **D11 原子提交（WEB-25 实施，2026-08-04）**：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门）；审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。执行前审计（E9 `sql.execute.denied`，发生在 Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，fail-closed 返回 `audit_failed`）。不新增 migration、不改变稳定错误码/E17 语义。
 - **验证**：`go test -race`、metadata/adapter 集成测试以及 CI run（<https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）中的 gofmt / vet / test 均为 **CI 覆盖**；fuzz 与 Windows/Linux 构建为**未由该 CI 覆盖的本机结果**（本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic、Windows/Linux `go build ./...` 通过；完整 30s fuzz 与跨平台构建的常驻验证待后续）。
 
 ## 验证与回滚

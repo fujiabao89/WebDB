@@ -11,13 +11,14 @@
 
 **D11 保留**，但作用域精确限定为：
 
-> **同一元数据库内**的 credential/connection mutation 必须与对应 AuditEvent 在同一事务中原子提交；**目标数据库查询完成后的审计（E9-E13）属于外部副作用例外**，沿用 ADR-017 的 post-execution fail-closed 策略（不原子，但 fail-closed 返回 `audit_failed`、触发 E17）。
+> **同一元数据库内**的 credential/connection mutation 必须与对应 AuditEvent 在同一事务中原子提交；**执行前审计（E9 `sql.execute.denied`，Adapter 调用前）失败时 fail-closed**：不调用 Adapter、返回 `audit_failed`、触发 E17；**目标库执行后的结果审计（E10-E13）属于外部副作用例外**，沿用 ADR-017 的 post-execution fail-closed 策略（不原子，但 fail-closed 返回 `audit_failed`、触发 E17）。
 
 | 场景 | 是否原子 | 说明 |
 |---|---|---|
 | credential Create/Rotate/Retire + E3-E6 | ✅ 原子 | 元数据库 mutation + AuditEvent 同一事务 |
 | connection Create/Update + E1/E2 | ✅ 原子 | 元数据库 mutation + AuditEvent 同一事务 |
-| 目标库查询后审计（E9-E13） | ❌ 外部副作用例外 | post-execution fail-closed、`audit_failed`、E17 保持不变 |
+| 执行前审计（E9 `sql.execute.denied`） | ❌ 执行前 fail-closed | Adapter 调用 0 次；审计失败返回 `audit_failed`、E17 告警 |
+| 目标库执行后结果审计（E10-E13） | ❌ 外部副作用例外 | post-execution fail-closed、`audit_failed`、E17 保持不变 |
 | connection.test（E7/E8） | 例外 | 涉及目标库连接测试，外部副作用，沿用现有 post-commit 语义 |
 
 **明确不做**：
@@ -38,7 +39,7 @@
    - **每个 mutation 必须有且仅有一个字段完全匹配的 AuditEvent**：精确匹配字段集合为 `AuditMatchFields`（workspace、resource、resource_id、action、connection、mutation ID、actor_id、actor_type、outcome、trace_id，见 §3）；`AppendAudit`、`Commit` 闸门与负向测试**复用该集合**。拒绝错误 action/resource、跨租户、缺失或多余事件，校验失败时回滚事务。
    - 补负向验收测试覆盖违规输入、跨租户、connection 缺失/为 null、匹配冲突；验证 `AuditMatchFields` 任一字段不匹配即拒绝（不存在审计绕过）。
 5. **并发与回滚**：并发轮换（LIFE-07）、事务中间失败回滚（LIFE-08）由集成测试覆盖；`CountConnectionsByVersion` 必须对匹配行加 `FOR SHARE` 锁（保留既有 retire TOCTOU 防护），并发 `UpdateConnectionVersion` 必须被阻塞直至退役事务结束。**共享序列化点**：对 `credential_envelopes`/`connections` 资源定义显式隔离级别或数据库 advisory-lock 协议作为共享序列化点；**当无匹配连接行（零匹配）时仍须获取该序列化点**（例如锁定目标 envelope 行 + advisory lock），防止并发 `UpdateConnectionVersion` 在零匹配场景绕过退役检查。集成测试须覆盖**初始零匹配**与**单匹配**两种场景。
-6. **外部副作用例外不变**：目标库查询后的审计写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警。
+6. **外部副作用例外不变**：目标库执行后的结果审计（E10-E13）写入仍为独立后置写入，失败时保持 `audit_failed`、execution 终态、E17 告警；执行前审计（E9 `sql.execute.denied`）在 Adapter 调用前写入，审计失败时 fail-closed 阻止 Adapter 调用。
 
 ## 3. 接口隔离设计（窄接口 + 协调器独占事务控制）
 

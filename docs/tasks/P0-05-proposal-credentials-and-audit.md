@@ -527,7 +527,7 @@ KEK 不得出现在：
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
 
-> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。目标数据库查询后的审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外，沿用 post-commit fail-closed（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
+> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。执行前审计（E9 `sql.execute.denied`，§7.1 阶段 C，Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 
@@ -964,4 +964,4 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
-| 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；目标库查询后审计（E9-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |
+| 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；执行前审计（E9 `sql.execute.denied`）fail-closed 阻止 Adapter 调用，目标库执行后结果审计（E10-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |
