@@ -410,7 +410,8 @@ KEK 不得出现在：
 6. 使用 ActiveKEK 加密
 7. INSERT INTO credential_envelopes (workspace_id, secret_ref, version, ...)
 8. 写入审计事件: action="credential.create", outcome="succeeded"
-   → 审计写入失败：INSERT 已持久化，返回 audit_failed；客户端可重试审计写入。
+   → 审计写入失败：mutation 与 E3 审计在同一事务原子提交（D11，WEB-25），
+      事务整体回滚、envelope 不残留，返回 audit_failed（触发 $SECURITY_ALERT）。
       创建操作不提供幂等键——每次 CreateCredential 生成新的 secret_ref 和 envelope，
       重试必须基于上一步返回的 secret_ref 判断是否已创建，不得重复调用 CreateCredential
 ```
@@ -420,22 +421,24 @@ KEK 不得出现在：
 ```text
 1. 验证调用者有 workspace 成员资格
 2. SELECT FROM credential_envelopes WHERE (workspace_id, secret_ref, secret_version) = (...)
-3. 行不存在 → audit: credential.lookup.fail, 返回 credential_not_found
+3. 行不存在 → 返回 credential_not_found（E14 由执行管线统一写入，见下方注记）
 4. 行存在且 `retired_at IS NOT NULL` → 普通执行路径返回 credential_retired
    （审计追溯路径允许继续解密，通过独立查询接口，不经过此执行流程）
 5. 验证 envelope_suite 已知；将 `envelope_suite` 映射为 `suite_tag`（枚举 → 4-byte 大端序）
 6. data_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 6. wrap_aad ← binaryEncode(version_tag=1, workspace_id, secret_ref, secret_version, suite_tag, kek_version)
 7. KEK ← KEKProvider.GetKEK(row.kek_version)
-8. KEK 未知 → audit: credential.decrypt.fail (error_code=unknown_kek_version), 返回 unknown_kek_version
+8. KEK 未知 → 返回 unknown_kek_version（E16 由执行管线统一写入）
 9. DEK ← GCM-Open(KEK, wrap_nonce, wrapped_dek, wrap_aad)
 10. plaintext ← GCM-Open(DEK, data_nonce, ciphertext, data_aad)
-11. 解密失败（步骤 9 或 10）→ audit: credential.decrypt.fail (error_code=decryption_failed), 返回 decryption_failed
+11. 解密失败（步骤 9 或 10）→ 返回 decryption_failed（E15 由执行管线统一写入）
 12. 验证 payload schema
 13. 返回 CredentialPayload
 ```
 
 > **约束**：步骤 10-13 任一失败，Adapter 调用次数必须为 0。步骤 3（行不存在）或步骤 4（已退役）时不执行任何加密操作。
+>
+> **E14-E16 写入者（Qodo-13）**：`ResolveCredential` 本身不写 E14-E16。执行管线（`execution.Pipeline` 阶段 C' `recordCredentialFailure`）在解析失败时作为**唯一权威写入者**记录 E14-E16，携带连接上下文（`connection_id` 非 NULL，符合 §8.1 事件矩阵），避免重复审计行；`connection.test`（E8）路径由 connections 服务写入。凭证失败触发 `$SECURITY_ALERT` 的行为由执行管线 / connections 服务保持一致。
 
 #### 6.2.3 轮换（RotateCredential）
 
@@ -453,9 +456,8 @@ KEK 不得出现在：
 8.   INSERT INTO credential_envelopes (新版本, retired_at=NULL)
 9.   UPDATE connections SET secret_version = 新 version
         WHERE workspace_id = $1 AND secret_ref = $2
-10. COMMIT
-11. 写入审计事件: credential.rotate.success
-    → 审计写入失败：事务已 COMMIT，返回 audit_failed；客户端可重试审计写入。
+10. 写入审计事件: credential.rotate.success（与 1-9 的 mutation 同一事务原子提交，D11，WEB-25）
+    → 审计写入失败：事务整体回滚、新版本不残留、连接引用不变，返回 audit_failed（触发 $SECURITY_ALERT）。
        轮换冲突检测：调用方须在请求中提供 expected_version（当前连接引用的 secret_version），
        服务端在步骤 4 的 SELECT FOR UPDATE 之后对比行中的 MAX(version)；
        若 expected_version 已落后（即已有其他轮换成功），当前请求的 payload 未保存，
@@ -490,8 +492,9 @@ KEK 不得出现在：
      → 计数 > 0：ROLLBACK，返回 credential_in_use
 5.   UPDATE credential_envelopes SET retired_at = now()
      WHERE workspace_id = $1 AND secret_ref = $2 AND version = $3
-6. COMMIT
-7. 写入审计事件: credential.retire
+6. 写入审计事件: credential.retire（与 mutation 同一事务原子提交，D11，WEB-25；
+   审计写入失败 → 整体回滚、retired_at 不变，返回 audit_failed 并触发 $SECURITY_ALERT）
+7. COMMIT
 ```
 
 - 步骤 4 的 `FOR SHARE` 会阻塞并发连接版本更新，直至退役事务结束。
@@ -519,12 +522,12 @@ KEK 不得出现在：
 
 | 操作 | 前置状态 | 后置状态 | 事务？ | 审计事件 |
 |---|---|---|---|---|
-| Create | — | version=1, active | 否（单 INSERT）† | `credential.create` |
+| Create | — | version=1, active | 是（单 INSERT + 审计同事务）† | `credential.create` |
 | Read | active 或 retired | 不变 | 否 | 无（除非失败） |
 | Rotate | 旧版本 active | 新版本 active，旧版本不变 | 是 | `credential.rotate` |
 | Retire | active | retired | 是（SELECT FOR UPDATE + 引用检查 + UPDATE 在同一事务） | `credential.retire` |
 
-> † Create 为单条 INSERT 无显式事务边界；若后续审计写入失败，envelope 行已持久化且审计失败不影响创建结果。Retire 使用显式事务以保证引用检查和退役更新的原子性。
+> † Create/Rotate/Retire 的元数据库 mutation 与对应 AuditEvent 在同一事务原子提交（D11，WEB-25）：审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E3/E4/E6）**；E5（`credential.rotate failed`）发生在失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（LATEST2-CR-01）。执行前审计（E9 `sql.execute.denied`，§7.1 阶段 C，Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，但 fail-closed 返回 `audit_failed`）。Retire 使用显式事务以保证引用检查和退役更新的原子性。
 
 ### 6.4 错误场景
 
@@ -961,3 +964,4 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
+| 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；执行前审计（E9 `sql.execute.denied`）fail-closed 阻止 Adapter 调用，目标库执行后结果审计（E10-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |

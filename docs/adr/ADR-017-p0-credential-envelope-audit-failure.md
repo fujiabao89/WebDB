@@ -88,10 +88,11 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策略：
 
 - **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 ADR-017 D10 已批准的 16 字段（6 P0-05 新增 + 10 P0-04 现有）+ credential.rotate 专用 expected_version/actual_version，共 18 个 JSON 字段，事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
-- **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。
+- **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。E14-E16 由执行管线阶段 C'（`execution.Pipeline.recordCredentialFailure`）作为唯一权威写入者记录，携带连接上下文（WEB-25 澄清，Qodo-13），凭证解析层不再重复写入。
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
+- **D11 原子提交（WEB-25 实施，2026-08-04）**：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门）；审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E1-E4/E6）**；E5（`credential.rotate failed`）发生在 Rotate 失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（审计持久化失败时 fail-closed 返回 `audit_failed`），属原子范围外（LATEST2-CR-01）。执行前审计（E9 `sql.execute.denied`，发生在 Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，fail-closed 返回 `audit_failed`）。不新增 migration、不改变稳定错误码/E17 语义。
 - **验证**：`go test -race`、metadata/adapter 集成测试以及 CI run（<https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）中的 gofmt / vet / test 均为 **CI 覆盖**；fuzz 与 Windows/Linux 构建为**未由该 CI 覆盖的本机结果**（本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic、Windows/Linux `go build ./...` 通过；完整 30s fuzz 与跨平台构建的常驻验证待后续）。
 
 ## 验证与回滚

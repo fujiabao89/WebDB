@@ -145,6 +145,67 @@ func (f *fakeTester) Ping(context.Context, adapter.ConnectConfig) error {
 	return f.err
 }
 
+// fakeAtomicTx 实现 metadata.ConnectionAtomicTx（记录 E1/E2 审计与提交状态）。
+type fakeAtomicTx struct {
+	events      []*metadata.AuditEvent
+	appendErr   error
+	committed   bool
+	rolledBack  bool
+	createCalls int
+	updateCalls int
+}
+
+func (f *fakeAtomicTx) AppendAudit(_ context.Context, _ *metadata.OperationContext, e *metadata.AuditEvent) error {
+	if f.appendErr != nil {
+		return f.appendErr
+	}
+	f.events = append(f.events, e)
+	return nil
+}
+func (f *fakeAtomicTx) CreateConnection(_ context.Context, c *metadata.Connection) error {
+	// 复刻真实 createConnectionOnTx 契约（CodeRabbit-0）：连接 ID 必须由服务端
+	// 在 BeginConnection 前预分配（op 需持非零 ID）；不得由 fake 重置 ID。
+	if c.ID == uuid.Nil {
+		return errors.New("create connection: id must be pre-assigned")
+	}
+	f.createCalls++
+	c.CreatedAt = time.Now()
+	c.UpdatedAt = time.Now()
+	return nil
+}
+func (f *fakeAtomicTx) UpdateConnection(_ context.Context, _ uuid.UUID, _ *metadata.Connection) error {
+	f.updateCalls++
+	return nil
+}
+func (f *fakeAtomicTx) UpdateConnectionVersion(context.Context, uuid.UUID, uuid.UUID, int) error {
+	return nil
+}
+func (f *fakeAtomicTx) CountConnectionsByVersion(context.Context, uuid.UUID, uuid.UUID, int) (int, error) {
+	return 0, nil
+}
+func (f *fakeAtomicTx) Commit() error   { f.committed = true; return nil }
+func (f *fakeAtomicTx) Rollback() error { f.rolledBack = true; return nil }
+
+type fakeAtomicTxStore struct {
+	tx       *fakeAtomicTx
+	beginErr error
+}
+
+func (s *fakeAtomicTxStore) BeginConnection(context.Context, *metadata.OperationContext) (metadata.ConnectionAtomicTx, error) {
+	if s.beginErr != nil {
+		return nil, s.beginErr
+	}
+	return s.tx, nil
+}
+func (s *fakeAtomicTxStore) BeginCredential(context.Context, *metadata.OperationContext) (metadata.CredentialAtomicTx, error) {
+	// connections 测试不使用凭证原子事务；如被意外调用则 fail-closed。
+	return nil, errors.New("BeginCredential not expected in connections tests")
+}
+
+func defaultTxStore() *fakeAtomicTxStore {
+	return &fakeAtomicTxStore{tx: &fakeAtomicTx{}}
+}
+
 func testService(
 	conns *fakeConnectionStore,
 	members *fakeMemberStore,
@@ -153,7 +214,7 @@ func testService(
 	resolver *fakeResolver,
 	tester *fakeTester,
 ) (*Service, *fakeAuditSink, *fakeAlarmSink) {
-	s := NewService(conns, members, audit, alarm, resolver, tester)
+	s := NewService(conns, defaultTxStore(), members, audit, alarm, resolver, tester)
 	return s, audit, alarm
 }
 
@@ -168,7 +229,8 @@ func TestConnection_CreateWritesE1(t *testing.T) {
 	conns := &fakeConnectionStore{}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s, _, _ := testService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm, &fakeResolver{}, &fakeTester{})
+	tx := &fakeAtomicTx{}
+	s := NewService(conns, &fakeAtomicTxStore{tx: tx}, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm, &fakeResolver{}, &fakeTester{})
 
 	conn := &metadata.Connection{
 		WorkspaceID:   p.WorkspaceID,
@@ -188,10 +250,10 @@ func TestConnection_CreateWritesE1(t *testing.T) {
 	if created.ID == uuid.Nil {
 		t.Fatal("expected generated connection id")
 	}
-	if len(audit.events) != 1 {
-		t.Fatalf("audit events = %d, want 1", len(audit.events))
+	if len(tx.events) != 1 {
+		t.Fatalf("atomic tx events = %d, want 1", len(tx.events))
 	}
-	ev := audit.events[0]
+	ev := tx.events[0]
 	if ev.Action != metadata.ActionConnectionCreate || ev.Outcome != metadata.OutcomeSucceeded {
 		t.Fatalf("event = %s/%s, want connection.create/succeeded", ev.Action, ev.Outcome)
 	}
@@ -200,6 +262,33 @@ func TestConnection_CreateWritesE1(t *testing.T) {
 	}
 	if ev.WorkspaceID != p.WorkspaceID {
 		t.Fatalf("workspace = %v, want %v", ev.WorkspaceID, p.WorkspaceID)
+	}
+	if !tx.committed {
+		t.Fatal("expected commit after successful create")
+	}
+}
+
+func TestConnection_CreateAuditFailureRollsBack(t *testing.T) {
+	p := testPrincipal()
+	alarm := &fakeAlarmSink{}
+	tx := &fakeAtomicTx{appendErr: errors.New("injected audit failure")}
+	s := NewService(&fakeConnectionStore{}, &fakeAtomicTxStore{tx: tx}, &fakeMemberStore{role: metadata.RoleOwner}, &fakeAuditSink{}, alarm, &fakeResolver{}, &fakeTester{})
+
+	_, err := s.Create(context.Background(), p, &metadata.Connection{})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), string(ErrAuditFailed)) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when audit append fails")
+	}
+	if !tx.rolledBack {
+		t.Fatal("must roll back when audit append fails")
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %d", len(alarm.events))
 	}
 }
 
@@ -223,7 +312,8 @@ func TestConnection_UpdateWritesE2(t *testing.T) {
 	conns := &fakeConnectionStore{}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s, _, _ := testService(conns, &fakeMemberStore{role: metadata.RoleAdmin}, audit, alarm, &fakeResolver{}, &fakeTester{})
+	tx := &fakeAtomicTx{}
+	s := NewService(conns, &fakeAtomicTxStore{tx: tx}, &fakeMemberStore{role: metadata.RoleAdmin}, audit, alarm, &fakeResolver{}, &fakeTester{})
 
 	conn := &metadata.Connection{
 		ID:            uuid.New(),
@@ -235,10 +325,10 @@ func TestConnection_UpdateWritesE2(t *testing.T) {
 	if err := s.Update(context.Background(), p, conn); err != nil {
 		t.Fatalf("Update() error = %v", err)
 	}
-	if len(audit.events) != 1 {
-		t.Fatalf("audit events = %d, want 1", len(audit.events))
+	if len(tx.events) != 1 {
+		t.Fatalf("atomic tx events = %d, want 1", len(tx.events))
 	}
-	ev := audit.events[0]
+	ev := tx.events[0]
 	if ev.Action != metadata.ActionConnectionUpdate || ev.Outcome != metadata.OutcomeSucceeded {
 		t.Fatalf("event = %s/%s, want connection.update/succeeded", ev.Action, ev.Outcome)
 	}
@@ -248,6 +338,47 @@ func TestConnection_UpdateWritesE2(t *testing.T) {
 	}
 	if md["environment"] != "production" {
 		t.Errorf("environment = %v, want production", md["environment"])
+	}
+}
+
+func TestConnection_UpdateEmptyIDReturnsConnectionNotFound(t *testing.T) {
+	// CodeRabbit-2：空 conn.ID 是调用方输入错误，返回连接类稳定错误，
+	// 不得映射为 audit_failed，也不得触发安全告警。
+	p := testPrincipal()
+	alarm := &fakeAlarmSink{}
+	s := NewService(&fakeConnectionStore{}, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, &fakeAuditSink{}, alarm, &fakeResolver{}, &fakeTester{})
+
+	err := s.Update(context.Background(), p, &metadata.Connection{})
+	if !errors.Is(err, ErrConnectionNotFound) {
+		t.Fatalf("Update() error = %v, want connection_not_found", err)
+	}
+	if len(alarm.events) != 0 {
+		t.Fatalf("no security alarm expected for empty id, got %+v", alarm.events)
+	}
+}
+
+func TestConnection_UpdateAuditFailureRollsBack(t *testing.T) {
+	// CR-10：connection Update 审计追加失败 → 不提交、回滚、返回 audit_failed 且告警。
+	p := testPrincipal()
+	alarm := &fakeAlarmSink{}
+	tx := &fakeAtomicTx{appendErr: errors.New("injected audit failure")}
+	s := NewService(&fakeConnectionStore{}, &fakeAtomicTxStore{tx: tx}, &fakeMemberStore{role: metadata.RoleOwner}, &fakeAuditSink{}, alarm, &fakeResolver{}, &fakeTester{})
+
+	err := s.Update(context.Background(), p, &metadata.Connection{ID: uuid.New()})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), string(ErrAuditFailed)) {
+		t.Fatalf("error = %v, want audit_failed", err)
+	}
+	if tx.committed {
+		t.Fatal("must NOT commit when audit append fails")
+	}
+	if !tx.rolledBack {
+		t.Fatal("must roll back when audit append fails")
+	}
+	if len(alarm.events) != 1 || alarm.events[0].Code != string(ErrAuditFailed) {
+		t.Fatalf("expected audit_failed alarm, got %d", len(alarm.events))
 	}
 }
 
@@ -371,7 +502,7 @@ func TestConnection_TestNonMemberRejected(t *testing.T) {
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
 	pinged := false
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleViewer}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleViewer}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
 			pinged = true
@@ -413,7 +544,7 @@ func TestConnection_TestCrossWorkspaceConnectionRejected(t *testing.T) {
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
 	pinged := false
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
 			pinged = true
@@ -449,7 +580,7 @@ func TestConnection_TestMemberLookupErrorRejected(t *testing.T) {
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
 	pinged := false
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner, err: errors.New("member store failure")},
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner, err: errors.New("member store failure")},
 		audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
@@ -487,7 +618,7 @@ func TestConnection_TestTimeoutContext(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
 			return context.DeadlineExceeded
@@ -532,7 +663,7 @@ func TestConnection_TestCancelledContext(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
 			return ctx.Err()
@@ -602,7 +733,7 @@ func TestConnection_TestMemberWorkspaceMismatchRejected(t *testing.T) {
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
 	pinged := false
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner, wsID: otherWS}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner, wsID: otherWS}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
 			pinged = true
@@ -641,7 +772,7 @@ func TestConnection_TestTimeoutContextRealDeadline(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
 			<-ctx.Done()
@@ -691,7 +822,7 @@ func TestConnection_TestCancelledContextStillWritesAudit(t *testing.T) {
 	}
 	audit := &fakeAuditSink{}
 	alarm := &fakeAlarmSink{}
-	s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+	s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 		&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 		fakeTesterFunc(func(ctx context.Context, _ adapter.ConnectConfig) error {
 			return ctx.Err()
@@ -742,7 +873,7 @@ func TestConnection_TestAuditWriteTimeoutRealDeadline(t *testing.T) {
 			}
 			audit := &blockingAuditSink{block: true}
 			alarm := &fakeAlarmSink{}
-			s := NewService(conns, &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
+			s := NewService(conns, defaultTxStore(), &fakeMemberStore{role: metadata.RoleOwner}, audit, alarm,
 				&fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}},
 				fakeTesterFunc(func(context.Context, adapter.ConnectConfig) error {
 					return nil // ping 成功，进入审计写入
@@ -773,7 +904,7 @@ func TestConnection_TestAuditWriteTimeoutRealDeadline(t *testing.T) {
 func TestConnectionLogStorageFailureRedactsSensitive(t *testing.T) {
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&buf, nil))
-	s := NewService(&fakeConnectionStore{}, &fakeMemberStore{}, &fakeAuditSink{}, &fakeAlarmSink{}, &fakeResolver{}, &fakeTester{})
+	s := NewService(&fakeConnectionStore{}, defaultTxStore(), &fakeMemberStore{}, &fakeAuditSink{}, &fakeAlarmSink{}, &fakeResolver{}, &fakeTester{})
 	s.logger = logger
 
 	sensitive := "password=classified123"

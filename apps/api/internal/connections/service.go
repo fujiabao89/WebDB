@@ -36,6 +36,11 @@ const connectionTestTimeout = 5 * time.Second
 // 用户取消请求不阻止审计事件写入。
 const auditWriteTimeout = 5 * time.Second
 
+// atomicTxTimeout 原子事务的有界超时上限（WebDB 安全边界）：Create/Update 的
+// BeginConnection/mutation/AppendAudit/Commit 前置统一绑定带 deadline 的 transaction
+// context，防止调用方 ctx 无超时时事务操作无限等待；请求取消时事务回滚。
+const atomicTxTimeout = 5 * time.Second
+
 // Principal 由可信上游提供的已验证身份。
 type Principal struct {
 	UserID      uuid.UUID
@@ -63,8 +68,12 @@ func (t AdapterPingTester) Ping(ctx context.Context, cfg adapter.ConnectConfig) 
 }
 
 // Service 连接生命周期服务（orchestration seam）。
+// Create/Update 的元数据库 mutation 与对应 AuditEvent（E1/E2）在同一
+// ConnectionAtomicTx 内原子提交（D11，WEB-25）；Test（E7/E8）为外部副作用例外，
+// 保持 post-commit 语义。
 type Service struct {
 	conns                 metadata.ConnectionStore
+	txstore               metadata.AtomicTxStore
 	members               metadata.WorkspaceMemberStore
 	audit                 metadata.AuditEventStore
 	alarm                 metadata.SecurityAlarm
@@ -74,6 +83,7 @@ type Service struct {
 	newTrace              func() string
 	connectionTestTimeout time.Duration // 可注入的连接测试超时（vpvC5）
 	auditWriteTimeout     time.Duration // 可注入的审计持久化超时（vtiLM）
+	atomicTxTimeout       time.Duration // 可注入的原子事务有界超时（WebDB 安全边界）
 	logger                *slog.Logger
 }
 
@@ -105,6 +115,7 @@ func (s *Service) auditEventBuildFailed(ctx context.Context, wsID uuid.UUID, bui
 // NewService 创建连接服务。
 func NewService(
 	conns metadata.ConnectionStore,
+	txstore metadata.AtomicTxStore,
 	members metadata.WorkspaceMemberStore,
 	audit metadata.AuditEventStore,
 	alarm metadata.SecurityAlarm,
@@ -113,6 +124,7 @@ func NewService(
 ) *Service {
 	return &Service{
 		conns:                 conns,
+		txstore:               txstore,
 		members:               members,
 		audit:                 audit,
 		alarm:                 alarm,
@@ -122,18 +134,43 @@ func NewService(
 		newTrace:              func() string { return uuid.NewString() },
 		connectionTestTimeout: connectionTestTimeout,
 		auditWriteTimeout:     auditWriteTimeout,
+		atomicTxTimeout:       atomicTxTimeout,
 		logger:                slog.Default(),
 	}
 }
 
-// Create 创建连接并写入 E1 connection.create。
+// Create 创建连接并写入 E1 connection.create。mutation（CreateConnection）与 E1 审计
+// 在同一 ConnectionAtomicTx 内原子提交；审计失败整体回滚（无连接残留）。
 func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connection) (*metadata.Connection, error) {
 	if err := s.requireManager(ctx, p); err != nil {
 		return nil, err
 	}
 	conn.WorkspaceID = p.WorkspaceID
 	conn.CreatedBy = p.UserID
-	if err := s.conns.CreateConnection(ctx, conn); err != nil {
+	// 连接 ID 由服务端预生成（原子事务 op 需在 BeginConnection 前持有非零 ID）。
+	if conn.ID == uuid.Nil {
+		conn.ID = uuid.New()
+	}
+	traceID := s.newTrace()
+	op, err := metadata.NewOperationContext(
+		s.newTrace(), p.WorkspaceID, "connection", conn.ID.String(),
+		metadata.ActionConnectionCreate, &conn.ID, p.UserID, "user",
+		string(metadata.OutcomeSucceeded), traceID,
+	)
+	if err != nil {
+		return nil, s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
+	}
+	// 原子事务使用有界 transaction context（WebDB 安全边界）：Begin/mutation/AppendAudit
+	// 统一绑定带 deadline 的 ctx，防止调用方 ctx 无超时时事务操作无限等待。
+	txCtx, txCancel := context.WithTimeout(ctx, s.atomicTxTimeout)
+	defer txCancel()
+	atx, err := s.txstore.BeginConnection(txCtx, op)
+	if err != nil {
+		s.logStorageFailure("create.begin_connection", p.WorkspaceID, conn.ID, err)
+		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
+	}
+	defer atx.Rollback()
+	if err := atx.CreateConnection(txCtx, conn); err != nil {
 		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
 		s.logStorageFailure("create.connection", p.WorkspaceID, conn.ID, err)
 		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
@@ -146,24 +183,52 @@ func (s *Service) Create(ctx context.Context, p Principal, conn *metadata.Connec
 			Engine:      strPtr(string(conn.Engine)),
 			Environment: strPtr(string(conn.Environment)),
 		},
-		s.newTrace(), s.clock(),
+		traceID, s.clock(),
 	)
 	if err != nil {
 		return nil, s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
-		return nil, err
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
+		return nil, s.auditAppendFailed(ctx, conn.WorkspaceID, err)
+	}
+	if err := atx.Commit(); err != nil {
+		s.logStorageFailure("create.commit_connection", p.WorkspaceID, conn.ID, err)
+		return nil, fmt.Errorf("%w: create connection failed", ErrInternalError)
 	}
 	return conn, nil
 }
 
-// Update 更新连接并写入 E2 connection.update。
+// Update 更新连接并写入 E2 connection.update。mutation（UpdateConnection）与 E2 审计
+// 在同一 ConnectionAtomicTx 内原子提交；审计失败整体回滚（更新不残留）。
 func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connection) error {
 	if err := s.requireManager(ctx, p); err != nil {
 		return err
 	}
 	conn.WorkspaceID = p.WorkspaceID
-	if err := s.conns.UpdateConnection(ctx, p.WorkspaceID, conn); err != nil {
+	// 空 ID 是调用方输入错误，直接返回连接类稳定错误；不得映射为 audit_failed 或
+	// 触发 $SECURITY_ALERT（CodeRabbit-2：无效输入被误报为审计子系统故障）。
+	if conn.ID == uuid.Nil {
+		return fmt.Errorf("%w: connection id required", ErrConnectionNotFound)
+	}
+	traceID := s.newTrace()
+	op, err := metadata.NewOperationContext(
+		s.newTrace(), p.WorkspaceID, "connection", conn.ID.String(),
+		metadata.ActionConnectionUpdate, &conn.ID, p.UserID, "user",
+		string(metadata.OutcomeSucceeded), traceID,
+	)
+	if err != nil {
+		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
+	}
+	// 原子事务使用有界 transaction context（WebDB 安全边界）。
+	txCtx, txCancel := context.WithTimeout(ctx, s.atomicTxTimeout)
+	defer txCancel()
+	atx, err := s.txstore.BeginConnection(txCtx, op)
+	if err != nil {
+		s.logStorageFailure("update.begin_connection", p.WorkspaceID, conn.ID, err)
+		return fmt.Errorf("%w: update connection failed", ErrInternalError)
+	}
+	defer atx.Rollback()
+	if err := atx.UpdateConnection(txCtx, p.WorkspaceID, conn); err != nil {
 		// 根因仅进服务端日志，返回保持脱敏（VuXZG）。
 		s.logStorageFailure("update.connection", p.WorkspaceID, conn.ID, err)
 		return fmt.Errorf("%w: update connection failed", ErrInternalError)
@@ -173,13 +238,17 @@ func (s *Service) Update(ctx context.Context, p Principal, conn *metadata.Connec
 		p, conn.ID, metadata.ActionConnectionUpdate, "connection", conn.ID.String(),
 		metadata.OutcomeSucceeded,
 		metadata.AuditMetadata{Environment: strPtr(string(conn.Environment))},
-		s.newTrace(), s.clock(),
+		traceID, s.clock(),
 	)
 	if err != nil {
 		return s.auditEventBuildFailed(ctx, conn.WorkspaceID, err)
 	}
-	if err := s.writeAudit(ctx, event, conn.WorkspaceID); err != nil {
-		return err
+	if err := atx.AppendAudit(txCtx, op, event); err != nil {
+		return s.auditAppendFailed(ctx, conn.WorkspaceID, err)
+	}
+	if err := atx.Commit(); err != nil {
+		s.logStorageFailure("update.commit_connection", p.WorkspaceID, conn.ID, err)
+		return fmt.Errorf("%w: update connection failed", ErrInternalError)
 	}
 	return nil
 }
@@ -290,6 +359,20 @@ func (s *Service) Test(ctx context.Context, p Principal, connID uuid.UUID) error
 		return fmt.Errorf("%w", StableErrorCode(mapConnectionTestError(testErr)))
 	}
 	return nil
+}
+
+// auditAppendFailed 处理原子事务内审计追加失败：触发告警并返回 audit_failed
+// （事务由调用方 defer Rollback 回滚，mutation 无残留）。
+func (s *Service) auditAppendFailed(ctx context.Context, wsID uuid.UUID, err error) error {
+	alarmCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.auditWriteTimeout)
+	defer cancel()
+	metadata.EmitAlarm(s.alarm, alarmCtx, metadata.SecurityAlertEvent{
+		TraceID:     s.newTrace(),
+		WorkspaceID: wsID,
+		Code:        string(ErrAuditFailed),
+		OccurredAt:  s.clock(),
+	})
+	return fmt.Errorf("%w: audit write failed", ErrAuditFailed)
 }
 
 // writeAudit 写审计；失败触发安全告警并返回 audit_failed。
