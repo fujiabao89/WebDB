@@ -324,7 +324,10 @@ func eventAllowed(resource, action, outcome string) bool {
 | Connection Update 原子：audit 失败 → 更新回滚 | **已实施** | `TestConnection_UpdateAuditFailureRollsBack`（`service_test.go`） |
 | 事件构建/校验失败（`AppendAudit` 拒绝非法 metadata）→ 回滚 | **已实施** | `TestAtomicTxAppendAuditInvalidMetadataRollsBack`（`atomic_tx_integration_test.go`，AppendAudit 拒绝后事务回滚不提交） |
 | mutation 中间失败（锁/约束/DB 错误）→ 回滚 | **已实施** | `TestCreateInsertFailureNoCommit`、`TestRetireInUseNoCommit` |
-| `Begin`/`Commit`/`Rollback` 失败路径 | **已实施** | `TestAtomicTxCommitWithoutAuditRollsBack`、`TestConnectionAtomicTxCommitGate`（集成，Commit 闸门） |
+| BeginTx 失败（`BeginCredential`/`BeginConnection` 开启事务失败）→ 返回错误且无残留 | 待实施 | credentials/connections 失败注入测试 |
+| 数据库 Commit 失败（`atx.Commit` 底层 DB 提交失败）→ 不报告成功 | 待实施 | 失败注入测试 |
+| Rollback 失败（`atx.Rollback` 底层回滚失败）→ 返回错误 | 待实施 | 失败注入测试 |
+| Commit 审计闸门（原子事务缺失匹配 AuditEvent）→ 拒绝提交并回滚 | **已实施** | `TestAtomicTxCommitWithoutAuditRollsBack`、`TestConnectionAtomicTxCommitGate`（集成） |
 | 取消（ctx 取消）→ 事务清理 | 待实施 | credentials/connections 取消测试 |
 | panic → 事务回滚、连接归还 | 待实施 | panic 恢复测试 |
 | 并发 mutation（并发轮换/并发创建） | 部分覆盖 | `TestLifecycleRotateConcurrentPostgres`（WEB-24 LIFE-07） |
@@ -339,7 +342,7 @@ func eventAllowed(resource, action, outcome string) bool {
 | 并发轮换（LIFE-07） | **部分覆盖** | `TestLifecycleRotateConcurrentPostgres`（WEB-24；验证并发轮换 + SecretVersion，但未直接调用 `AppendAudit`） |
 | 事务中间失败回滚（LIFE-08） | **部分覆盖** | `TestLifecycleRotateTxFailureRollbackPostgres`（WEB-24；真实 UPDATE 与 INSERT 回滚，但未覆盖 `AppendAudit` 失败注入） |
 | E9-E13 外部副作用例外 | 保持 | 既有 execution audit 测试 |
-| 本机 + CI 全绿（含 connections 集成测试与 execution 审计测试） | 部分（本机单元/集成编译全绿；CI 集成测试存在既有外键失败，见 WEB-25 CI 修复） | 从 `apps/api` 目录执行以下命令（本机与 CI 一致），每项成功条件均为 exit 0 / 无失败输出：<br>① `gofmt -l .` → 无输出<br>② `go vet ./...` → 无错误<br>③ `go test ./...` → 全部 `ok`<br>④ `go test -race ./...` → 全部 `ok`<br>⑤ `go test -p=1 -tags=integration ./internal/metadata/... ./internal/credentials/... ./internal/connections/... ./internal/execution/...` → 全部 `ok`（含 connections 集成与 execution 审计） |
+| 本机 + CI 全绿（metadata/credentials 集成测试；CI 未执行 connections/execution 集成测试） | 部分（本机单元测试与集成编译全绿；CI API job 仅运行 `go test -p=1 -tags=integration ./internal/metadata/... ./internal/credentials/...`（ci.yml `Metadata integration test`）与 `./internal/adapter/...`（`Adapter integration test`），**不覆盖** connections/execution 集成测试；connections/execution 由单元测试（本机 `go test ./...` 全绿）覆盖） | 从 `apps/api` 目录执行以下命令：<br>① `gofmt -l .` → 无输出<br>② `go vet ./...` → 无错误<br>③ `go test ./...` → 全部 `ok`<br>④ `go test -race ./...` → CI Race test 覆盖（本机 CGO 不可用）<br>⑤ `go test -p=1 -tags=integration ./internal/metadata/... ./internal/credentials/...` → 与 CI API job `Metadata integration test` 一致（本机编译通过，CI 执行） |
 
 > WEB-24 轮换测试仅部分覆盖 D11（并发轮换/回滚语义，未直接调用 `AppendAudit`）。WEB-25 已补充审计原子性单元测试（`lifecycle_atomic_test.go` 的 Create/Rotate/Retire 失败注入、`service_test.go` 的 Create/Update 失败注入、`TestRotateE5WriteFailureFailsClosed` fail-closed）与集成测试（Commit 闸门、`TestAtomicTxAppendAuditWrongContextRejected`）。
 
