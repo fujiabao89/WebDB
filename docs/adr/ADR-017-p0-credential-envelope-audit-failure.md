@@ -83,22 +83,25 @@ WEB-21（P0-05A）需要在任何生产实现之前冻结以下决策。
 - 审计事件至少保留 90 天（从 `occurred_at` 起算），P0 阶段不实施自动删除（D12 已批准）
 - 精确清理机制和归档策略另建独立任务
 
-## 实施与验证状态（WEB-23，2026-08-01）
+## 实施与验证状态（WEB-22 2026-08-01、WEB-23 2026-08-02 已合并）
 
-WEB-23（P0-05C）已实现本 ADR 定义的追加式审计、脱敏与故障策略：
+WEB-22（P0-05B）实现了凭证信封加密、KEK Provider 与生命周期，已于 2026-08-01 合并（PR #31）；WEB-23（P0-05C）实现了本 ADR 定义的追加式审计、脱敏与故障策略，已于 2026-08-02 合并（PR #32）。
 
 - **强类型审计 metadata**：`metadata.AuditMetadata` 仅接受 ADR-017 D10 已批准的 16 字段（6 P0-05 新增 + 10 P0-04 现有）+ credential.rotate 专用 expected_version/actual_version，共 18 个 JSON 字段，事件级 fail-closed 校验（`ValidateAuditEventMetadata`）。畸形 JSON、未知字段、错误类型、超长值一律拒绝，不再依赖 `looksLikeSQL`/`looksLikeCredential` 启发式作为安全边界。
 - **事件接入**：E1/E2（connection.create/update）、E3-E6（credential.create/rotate/retire）、E7/E8（connection.test）、E9-E13（sql.execute denied/succeeded/failed/timeout/cancelled）、E14-E16（credential.lookup/decrypt 失败、unknown KEK version）已接入对应 orchestration seam。E14-E16 由执行管线阶段 C'（`execution.Pipeline.recordCredentialFailure`）作为唯一权威写入者记录，携带连接上下文（WEB-25 澄清，Qodo-13），凭证解析层不再重复写入。
 - **审计失败策略**：执行前（阶段 C/C'）审计失败 fail-closed（Adapter 调用 0 次，返回 `audit_failed`）；执行后审计失败不返回结果、返回 `audit_failed`、execution 已记录为终态（`completed`/`failed`/`cancelled`，与超时/取消/失败路径一致）；禁止自动重试。
 - **安全告警**：凭证解密失败、未知 KEK 版本、审计写入失败触发 `$SECURITY_ALERT`（独立通道，不递归写回审计，不含敏感字段）。
 - **append-only**：`audit_events` 表数据库层拒绝 UPDATE/DELETE/TRUNCATE（集成测试覆盖）；跨工作区 actor/connection/execution 关联由复合外键拒绝（集成测试覆盖）。
-- **D11 原子提交（WEB-25 实施，2026-08-04）**：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门）；审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E1-E4/E6）**；E5（`credential.rotate failed`）发生在 Rotate 失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（审计持久化失败时 fail-closed 返回 `audit_failed`），属原子范围外（LATEST2-CR-01）。执行前审计（E9 `sql.execute.denied`，发生在 Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，fail-closed 返回 `audit_failed`）。不新增 migration、不改变稳定错误码/E17 语义。
-- **验证**：`go test -race`、metadata/adapter 集成测试以及 CI run（<https://github.com/fujiabao89/WebDB/actions/runs/30736007025>）中的 gofmt / vet / test 均为 **CI 覆盖**；fuzz 与 Windows/Linux 构建为**未由该 CI 覆盖的本机结果**（本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic、Windows/Linux `go build ./...` 通过；完整 30s fuzz 与跨平台构建的常驻验证待后续）。
+- **D11 原子提交（WEB-25 实施，2026-08-04，PR #38 已合并）**：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交（`CredentialAtomicTx`/`ConnectionAtomicTx` + Commit 审计闸门）；审计写入失败时整体回滚、无 mutation 残留，返回 `audit_failed` 并触发 `$SECURITY_ALERT`。**D11 原子范围仅涵盖成功 mutation 与其审计（E1-E4/E6）**；E5（`credential.rotate failed`）发生在 Rotate 失败分支（事务中无已提交 mutation），先回滚释放行锁、再经独立失败路径写入（审计持久化失败时 fail-closed 返回 `audit_failed`），属原子范围外。执行前审计（E9 `sql.execute.denied`，发生在 Adapter 调用前）失败时 fail-closed：不调用 Adapter、返回 `audit_failed`；目标库执行后的结果审计（E10-E13）与 connection.test（E7/E8）为 post-commit 外部副作用例外（不原子，fail-closed 返回 `audit_failed`）。不新增 migration、不改变稳定错误码/E17 语义。
+- **验证（合并后 main CI）**：WEB-23 合并 CI run <https://github.com/fujiabao89/WebDB/actions/runs/30737988480>（head `94eb3ca`）、最新 main CI run <https://github.com/fujiabao89/WebDB/actions/runs/30896499396>（head `756a086`，含 WEB-25 代码实施）均全部 success：gofmt / vet / test / **race** / metadata 集成 / PostgreSQL·MySQL adapter 集成均为 **CI 覆盖**。
+- **本机验证（2026-08-03 收尾重跑，Windows，Go 1.26.5，`GOPROXY=off`，命令从仓库根目录执行）**：`go -C apps/api test ./...`、`go -C apps/api vet ./...`、Windows/Linux `go -C apps/api build ./...` 均 exit 0；`go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s`（~34.7s / 218695 execs）与 `-fuzz='^FuzzAAD$'`（~31.2s / 46497 execs）均 **PASS**（无 panic/crash，exit 0）。
+- **本机 race 限制**：Windows `CGO_ENABLED=0`，`go -C apps/api test -race ./...` 报 `-race requires cgo`（exit 2），**本机不声明 race PASS**；由 main CI Race test success 覆盖。
+- **P1/R6 修复（WEB-11 收尾审查创建，均已合并）**：WEB-26 凭证 per-field 长度限制（PR #34）、WEB-24 并发轮换/回滚 PostgreSQL 集成测试（PR #35）、WEB-25 审计原子性 D11（设计 PR #36 + 代码实施 PR #38）、WEB-27 生产角色拆分（PR #37）。
 
 ## 验证与回滚
 
 - WEB-22/WEB-23 的测试矩阵覆盖正常、边界、故障注入、并发、fuzz 和跨平台场景
-- 回滚：`git revert` WEB-22/WEB-23 合并提交；credential_envelopes 仅追加写，数据不受影响
+- 回滚（**按依赖逆序，从最新合并到最早**）：`git revert 756a0869a46f5ca7f49aab3566f70595af58be2f`（WEB-25 / PR #38，D11 审计原子性）、`git revert 0f1b5bce3a26dfbfd53921a44ef419752cb882c7`（WEB-27 / PR #37，生产角色拆分）、`git revert e3a292031a12be497d605d0e08bf04499fb3072f`（WEB-24 / PR #35，集成测试）、`git revert 7a2d10f38f9a873a9de56ae8c1f25a140bfe2489`（WEB-26 / PR #34，per-field 长度）、`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（WEB-23 / PR #32）、`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（WEB-22 / PR #31）；WEB-21（PR #30）与 WEB-25 设计（PR #36）为文档记录，随 ADR/方案文档回滚、无独立生产行为。**凭证回滚禁令**：一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本（兼容性限制与 baseline「回滚与前向修复」一致）；`audit_events` 仅追加写，回滚代码不影响已写入的审计数据
 - KEK 紧急轮换（两阶段）：(1) 所有实例添加 `WEBDB_KEK_V{N+1}` 并滚动重启（加载新 KEK，仍用旧版写入）；(2) 确认全部正常后更新 `WEBDB_ACTIVE_KEK_VERSION={N+1}` 并再次滚动重启（切换写入版本）。回滚时恢复 ACTIVE 为旧版值
 
 ## 相关资料

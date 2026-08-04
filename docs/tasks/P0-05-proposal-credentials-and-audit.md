@@ -3,7 +3,7 @@
 > 状态：已批准（Owner Gate 通过）｜日期：2026-08-01｜作者：Claude Code｜批准人：fujiabao89
 >
 > Owner 已对 D1-D15 全部决策做出明确决定。本方案冻结 P0-05 的安全设计基线。
-> WEB-22（凭证信封加密）已基于本方案完成生产实现。WEB-23（审计接入）已完成实现并在 PR #32 独立审查中（WEB-21/WEB-22 阻塞均已解除）。
+> WEB-21（方案/威胁模型/Owner Gate）、WEB-22（凭证信封加密）、WEB-23（审计接入）均已合并：[PR #30](https://github.com/fujiabao89/WebDB/pull/30)、[PR #31](https://github.com/fujiabao89/WebDB/pull/31)、[PR #32](https://github.com/fujiabao89/WebDB/pull/32)。父任务 WEB-11 已于 2026-08-04 完成收尾。
 
 ---
 
@@ -912,31 +912,37 @@ KEK 不得出现在：
 
 | ID | 验证项 | 预期 |
 |---|---|---|
-| QA-01 | `go test ./...` | PASS |
-| QA-02 | `go vet ./...` | PASS |
-| QA-03 | `go test -race ./...` | PASS（由 GitHub Actions 覆盖） |
-| QA-04 | `go test -fuzz=. -fuzztime=30s` | 本机运行 `FuzzPayloadDecoder`/`FuzzAAD` 各约 20s 无 panic；完整 30s 待后续验证 |
-| QA-05 | `GOOS=windows go build ./...` | PASS（本机） |
-| QA-06 | `GOOS=linux go build ./...` | PASS（本机） |
-| QA-07 | 许可证检查 | 无新增非兼容许可证 |
-| QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏 |
+| QA-01 | `go -C apps/api test ./...`（从仓库根目录执行） | PASS（本机 exit 0；CI Test success） |
+| QA-02 | `go -C apps/api vet ./...` | PASS（本机 exit 0；CI Vet success） |
+| QA-03 | `go -C apps/api test -race ./...` | PASS（由 **main CI** Race test 覆盖，run 30813651962 / 30737988480 success）；本机未运行（Windows `CGO_ENABLED=0`，`-race requires cgo`），本机不声明 race PASS |
+| QA-04 | 从仓库根目录执行 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzPayloadDecoder$' -fuzztime=30s` 与 `go -C apps/api test ./internal/credentials -run='^$' -fuzz='^FuzzAAD$' -fuzztime=30s` | **PASS**：2026-08-03 收尾重跑，两个 target 各完整 30s（`FuzzPayloadDecoder` ~34.7s / 218695 execs、`FuzzAAD` ~31.2s / 46497 execs），均无 panic/crash，exit 0（exec 数随运行而异） |
+| QA-05 | `GOOS=windows GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
+| QA-06 | `GOOS=linux GOARCH=amd64 go -C apps/api build ./...` | PASS（本机，exit 0） |
+| QA-07 | 许可证检查 | 无新增非兼容许可证（全部 Go stdlib） |
+| QA-08 | 敏感信息扫描 | 无 KEK/password 泄漏（canary 测试，见 baseline 验收矩阵） |
 
 ---
 
 ## 15. 回滚与前向修复
 
+> **强制回滚顺序**：功能回滚必须按依赖逆序执行（从最新合并到最早）——先 `git revert` WEB-25 代码（PR #38，`756a086`）→ WEB-27（PR #37，`0f1b5bc`）→ WEB-24（PR #35，`e3a2920`）→ WEB-26（PR #34，`7a2d10f`）→ WEB-23（PR #32，`94eb3ca`）→ WEB-22（PR #31，`0af2625`）→（可选）WEB-21（PR #30，`3b9e5bd`）。后续提交（WEB-23 及 WEB-24/25/26/27 修复）修改了先前提交引入的 credential/execution 文件，颠倒顺序会产生文件冲突或不完整回滚；WEB-25 设计（PR #36，`a3a8e14`）为文档记录，随 ADR/方案文档回滚。与 baseline「回滚与前向修复」一致。
+
 ### 15.1 回滚 WEB-22
 
-- **代码回滚**：`git revert <WEB-22 merge commit>`
-- **数据回滚**：credential_envelopes 表仅追加，回滚代码不会破坏历史数据
-- **KEK 回滚**：保留旧版 KEK 环境变量，新 envelope 仍可解密
+- **代码回滚**：`git revert 0af2625b6a00c07563e0e8ebf188e2811e1bf571`（PR #31 合并后的单父提交）
+- **凭证回滚禁令**：`credential_envelopes` 表虽仅追加写，但**一旦写入新信封，禁止回滚到不支持 `SealEnvelope`/`OpenEnvelope`/`ResolveCredential` 的版本**（WEB-22 之前的代码无这些能力，回滚后已有信封将无法解析/解密；保留旧 KEK 也不能修复缺少的解析能力）。回滚前须验证兼容性，或保留可处理旧信封的前向版本。
+- **审计数据**：`audit_events` 仅追加写，回滚代码不影响已写入的审计数据。
 
 ### 15.2 回滚 WEB-23
 
-- **代码回滚**：`git revert <WEB-23 merge commit>`
+- **代码回滚**：`git revert 94eb3ca89a1bfb3e843af7209df45ae1ff37a2c2`（PR #32 合并后的单父提交）
 - **审计数据**：审计事件不可变（append-only），回滚代码不影响已写入的审计数据
 
-### 15.3 KEK 紧急轮换
+### 15.3 回滚 WEB-21（仅文档设计门，如需完整链路）
+
+- **代码回滚**：`git revert 3b9e5bd8c9af68fca56b069f3c39ad0b83872511`（PR #30 合并后的单父提交，方案/威胁模型/ADR 文档，无生产行为）
+
+### 15.4 KEK 紧急轮换
 
 1. 在所有实例上添加新 `WEBDB_KEK_V{N+1}` 环境变量（但不修改 `WEBDB_ACTIVE_KEK_VERSION`）
 2. 滚动重启所有实例（此时仍使用旧版 KEK 写入，新版 KEK 已加载可用于解密）
@@ -945,6 +951,14 @@ KEK 不得出现在：
 5. 回滚：将 `WEBDB_ACTIVE_KEK_VERSION` 改回旧值并重启；旧 envelope 不受影响
 
 > **P0 不实施 DEK 重包装**：data_aad 包含 `kek_version`（D4），若用新 KEK 重新包装 DEK 后更新 envelope 的 `kek_version` 字段，data_aad 会因 `kek_version` 变化而不同，导致已有 ciphertext 的 GCM 认证失败。P0 阶段 KEK 轮换通过**追加新 envelope 版本**（生成新 DEK、重新加密 payload）实现，而非重包装已有 DEK。旧 KEK 版本必须保留，否则对应 envelope 永久无法解密。DEK 重包装能力留给后续独立任务。
+
+### 15.5 回滚 P1/R6 修复（WEB-24/25/26/27，按依赖逆序）
+
+- **WEB-25（D11 审计原子性，PR #38）**：`git revert 756a0869a46f5ca7f49aab3566f70595af58be2f`。回滚后恢复 post-commit 审计，需同步撤销 ADR-017 D11 原子语义或接受契约例外。
+- **WEB-27（R6 生产角色拆分，PR #37）**：`git revert 0f1b5bce3a26dfbfd53921a44ef419752cb882c7`。回滚后 R6 DBA 篡改防护失效。
+- **WEB-24（PostgreSQL 集成测试，PR #35）**：`git revert e3a292031a12be497d605d0e08bf04499fb3072f`。回滚仅移除测试覆盖，无生产行为。
+- **WEB-26（凭证 per-field 长度限制，PR #34）**：`git revert 7a2d10f38f9a873a9de56ae8c1f25a140bfe2489`。回滚后恢复无 per-field 校验风险。
+- **WEB-25 设计（PR #36）**：commit `a3a8e14` 为文档记录，随 ADR/方案文档回滚，无独立生产行为。
 
 ---
 
@@ -964,4 +978,9 @@ KEK 不得出现在：
 | 2026-08-01 | 初版 — 提交 Owner Gate |
 | 2026-08-01 | WEB-23 实施：审计 metadata 强类型化（§1.4/§1.5 更新），E1-E17 接入完成，安全告警通道落地 |
 | 2026-08-02 | WEB-23 审查迭代完成：CI 全绿（gofmt/vet/test/race/metadata/adapter 集成），日志脱敏（RedactSensitive）、审计写入与取消解耦、E17 告警、E6/E15 契约等加固落地 |
+| 2026-08-02 | 父任务 WEB-11 收尾：WEB-21/22/23 均已合并（PR #30/#31/#32），main CI run 30737988480 全绿；QA-03 明确 race 由 main CI 覆盖（本机 CGO 限制）；QA-04 更新为两个 fuzz target 各完整 30s PASS；§15 回滚占位符替换为实际 commit（单父提交，普通 `git revert` 即可）；D1-D15 已批准决策未修改 |
+| 2026-08-02 | Codex/qodo/CodeRabbit 收尾审查处理：QA 命令统一锚定 `apps/api` 且 QA-04 补齐 `./internal/credentials` 包路径；回滚说明改为单父提交并补充收尾 PR 的 commit 与凭证回滚禁令；WEB-22 合并日期统一为 2026-08-01。**Codex P1 契约张力已如实记录（不改 D1-D15）**：D11 声明"元数据库变更与 audit 原子提交"，而凭证创建/轮换/退役及连接 mutation 实际为 post-commit 再写审计（§6.2.1/6.2.3 描述）；凭证 per-field 长度限制（§3.2 user≤255/password≤1024）未在 `validatePayloadFields` 实现。两处均需 Owner 决策（见 baseline 残余风险），本方案不擅自改动已批准决策 |
+| 2026-08-02 | **Owner 决策**：WEB-11 保持 In Progress。创建 [WEB-24](https://linear.app/webdb/issue/WEB-24)（PostgreSQL 并发轮换 LIFE-07/回滚 LIFE-08 集成测试，P1）、[WEB-25](https://linear.app/webdb/issue/WEB-25)（审计原子性，保留 D11 并明确作用域：元数据库内 mutation 与 AuditEvent 原子提交，目标库查询后审计为外部副作用例外沿用 ADR-017 post-execution fail-closed，P1）、[WEB-26](https://linear.app/webdb/issue/WEB-26)（凭证 per-field 长度限制按 UTF-8 字节数实现 + PAY-06/07 边界测试，P1）、[WEB-27](https://linear.app/webdb/issue/WEB-27)（R6 生产环境数据库角色拆分，Backend/Security Owner，截止 2026-08-09，首次 production-like 部署前完成）。D1-D15 已批准决策内容未修改 |
+| 2026-08-03 | **WEB-11 收尾最终确认**：[WEB-24](https://linear.app/webdb/issue/WEB-24)/[WEB-26](https://linear.app/webdb/issue/WEB-26) 代码与测试已合并（PR #34/#35）、[WEB-27](https://linear.app/webdb/issue/WEB-27) 生产角色拆分已合并（PR #37）；最新 main CI run 30813651962（head `0f1b5bc`）全绿。QA-04 以 2026-08-03 实际重跑结果更新（Payload ~34.7s/218695 execs、AAD ~31.2s/46497 execs，均 exit 0 无 panic）。D1-D15 已批准决策内容未修改 |
 | 2026-08-04 | WEB-25 实施（D11 原子提交）：credential Create/Rotate/Retire 与 connection Create/Update 的元数据库 mutation 与对应 AuditEvent（E1-E6）在同一事务原子提交；审计写入失败整体回滚、无 mutation 残留，返回 `audit_failed`。本方案 §6.2.1/6.2.3/6.3 同步原子语义；执行前审计（E9 `sql.execute.denied`）fail-closed 阻止 Adapter 调用，目标库执行后结果审计（E10-E13）与 connection.test（E7/E8）为外部副作用例外不变。D1-D15 已批准决策内容未修改 |
+| 2026-08-04 | **WEB-11 收尾完成**：WEB-25 代码实施已合并（PR #38），P0-05 全部子任务与 P1/R6 修复完成，WEB-11 标记 Done；最新 main CI run 30896499396（head `756a086`）全绿。D1-D15 已批准决策内容未修改 |

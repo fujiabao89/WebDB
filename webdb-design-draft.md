@@ -365,7 +365,7 @@ P0 结束前必须有两项硬门槛：
 - [x] 为 PostgreSQL 和 MySQL 编写统一 adapter 接口。（P0-03，PR #12）
 - [x] 创建元数据库迁移：8 张 P0 表。（P0-02，PR #10）
 - [x] 凭证信封 Schema + 审计元数据脱敏。（P0-02，PR #10）
-- [ ] 实现凭证加解密与密钥轮换。（P0-05）
+- [x] 实现凭证加解密与密钥轮换。（P0-05，WEB-21/WEB-22/WEB-23）
 - [ ] 实现只读 SQL 策略：单语句、按 PostgreSQL / MySQL 方言分别进行 AST 分类、超时、最大行数、取消；无法可靠判定的语句默认拒绝。
 - [x] 实现目标连接池与执行准入：上限、获取超时、取消。（P0-03，PR #12）
 - [ ] [连接池指标与压力测试](docs/tasks/P0-03-followup-pool-observability-and-load-test.md)。（P0-03-followup）
