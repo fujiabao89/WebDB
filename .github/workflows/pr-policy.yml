@@ -104,3 +104,6 @@ jobs:
         run: |
           set -euo pipefail
           bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
+
+      - name: Run candidate policy self-tests
+        run: bash "$RUNNER_TEMP/pr-policy-candidate/.github/scripts/test-pr-metadata.sh"
