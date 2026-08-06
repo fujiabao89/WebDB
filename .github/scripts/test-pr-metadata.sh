@@ -266,6 +266,27 @@ jobs:
           bash "$RUNNER_TEMP/pr-policy-candidate/.github/scripts/test-pr-metadata.sh"
 """
 
+REORDERED_INLINE_WORKFLOW_FIXTURE = r"""jobs:
+  validate:
+    steps:
+      - run: |
+          trusted_ref=${{ github.event.pull_request.base.sha }}
+          candidate_ref=$GITHUB_SHA
+          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
+          jq --exit-status --raw-output \
+            'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+        name: Fetch trusted and candidate policy files
+
+      - run: 'bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"'
+        name: Validate Linear metadata and required PR sections with trusted policy
+
+      - env:
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
+        run: 'bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"'
+        name: Test candidate policy against the trusted contract
+"""
+
 
 def indentation(line: str) -> int:
     prefix = line[: len(line) - len(line.lstrip())]
@@ -337,19 +358,26 @@ def parse_validate_steps(source: str) -> list[dict[str, object]]:
     for position, start in enumerate(starts):
         end = starts[position + 1] if position + 1 < len(starts) else steps_end
         first_field = content(lines[start])[1:].lstrip()
-        name_match = re.fullmatch(r"name:[ ]*(.+)", first_field)
         step: dict[str, object] = {
-            "name": scalar(name_match.group(1)) if name_match else "",
+            "name": "",
             "env": {},
             "run": [],
         }
-        index = start + 1
+        index = start
         while index < end:
-            line = lines[index]
-            if ignored(line) or indentation(line) != 8:
+            if index == start:
+                stripped = first_field
+            else:
+                line = lines[index]
+                if ignored(line) or indentation(line) != 8:
+                    index += 1
+                    continue
+                stripped = content(line)
+            name_match = re.fullmatch(r"name:[ ]*(.+)", stripped)
+            if name_match:
+                step["name"] = scalar(name_match.group(1))
                 index += 1
                 continue
-            stripped = content(line)
             if stripped == "env:":
                 env_end = block_end(lines, index, 8, end)
                 env = step["env"]
@@ -365,7 +393,8 @@ def parse_validate_steps(source: str) -> list[dict[str, object]]:
                         env[match.group(1)] = scalar(match.group(2))
                 index = env_end
                 continue
-            if re.fullmatch(r"run:[ ]*[|>][-+]?", stripped):
+            block_run = re.fullmatch(r"run:[ ]*([|>])[-+]?", stripped)
+            if block_run:
                 run_end = block_end(lines, index, 8, end)
                 block = lines[index + 1 : run_end]
                 block_indent = min(
@@ -375,6 +404,11 @@ def parse_validate_steps(source: str) -> list[dict[str, object]]:
                     item[block_indent:] if content(item) else "" for item in block
                 ]
                 index = run_end
+                continue
+            inline_run = re.fullmatch(r"run:[ ]*(.+)", stripped)
+            if inline_run:
+                step["run"] = [scalar(inline_run.group(1))]
+                index += 1
                 continue
             index += 1
         parsed.append(step)
@@ -418,6 +452,12 @@ def assert_workflow(source: str) -> None:
         fetch,
         '"$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"',
     )
+    require_command(fetch, "jq --exit-status --raw-output \\")
+    require_command(
+        fetch,
+        "'select(.encoding == \"base64\" and (.content | type == \"string\") "
+        "and (.content | length > 0)) | .content'",
+    )
 
     validation = target_step(
         steps, "Validate Linear metadata and required PR sections with trusted policy"
@@ -456,6 +496,8 @@ try:
     source = (
         DECOY_WORKFLOW_FIXTURE
         if sys.argv[1] == "--decoy"
+        else REORDERED_INLINE_WORKFLOW_FIXTURE
+        if sys.argv[1] == "--valid-variants"
         else Path(sys.argv[1]).read_text(encoding="utf-8")
     )
     assert_workflow(source)
@@ -481,6 +523,11 @@ fi
 
 if ! assert_pr_policy_workflow "$workflow"; then
   echo "FAIL: PR policy workflow trust-boundary structure is invalid"
+  failures=$((failures + 1))
+fi
+
+if ! assert_pr_policy_workflow --valid-variants; then
+  echo "FAIL: structured workflow assertion rejected valid field ordering or inline run"
   failures=$((failures + 1))
 fi
 

@@ -41,7 +41,11 @@ jobs:
                 --header "X-GitHub-Api-Version: 2022-11-28" \
                 "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
             )"
-            content="$(printf '%s' "$response" | jq --exit-status --raw-output '.content')"
+            content="$(
+              printf '%s' "$response" |
+                jq --exit-status --raw-output \
+                  'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+            )"
             printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
           }
 
