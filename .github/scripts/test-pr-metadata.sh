@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-validator="$(dirname "$0")/validate-pr-metadata.sh"
+validator="${PR_POLICY_VALIDATOR:-$(dirname "$0")/validate-pr-metadata.sh}"
 failures=0
 required_sections_suffix='
 ## 改动与风险
@@ -195,6 +195,21 @@ if ! grep -Fq 'permissions:' "$workflow" ||
   ! grep -Fq 'contents: read' "$workflow" ||
   ! grep -Fq 'pull-requests: read' "$workflow"; then
   echo "FAIL: PR policy must keep explicit read-only permissions"
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'trusted_ref=${{ github.event.pull_request.base.sha }}' "$workflow"; then
+  echo "FAIL: required PR validation must load policy files from the trusted base commit"
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'candidate_ref=$GITHUB_SHA' "$workflow"; then
+  echo "FAIL: candidate policy tests must target the pull request merge commit"
+  failures=$((failures + 1))
+fi
+
+if ! grep -Fq 'PR_POLICY_VALIDATOR: $RUNNER_TEMP/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh' "$workflow"; then
+  echo "FAIL: trusted regression tests must exercise the candidate validator"
   failures=$((failures + 1))
 fi
 
