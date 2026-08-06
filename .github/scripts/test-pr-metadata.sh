@@ -664,6 +664,118 @@ jobs:
           bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
 """
 
+EXPORT_OVERRIDE_BAIT_FIXTURE = r"""# A compliant assignment is kept but the ref is rewritten with bash builtins
+# (export / printf -v) that a plain-assignment matcher cannot see, so the real
+# fetch would use the merge ref for the trusted files.
+name: Invalid PR policy fixture
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: PR contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch trusted and candidate policy files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/pr-policy-trusted"
+          candidate_root="$RUNNER_TEMP/pr-policy-candidate"
+          trusted_ref=${{ github.event.pull_request.base.sha }}
+          candidate_ref=$GITHUB_SHA
+          export trusted_ref=$GITHUB_SHA
+          printf -v candidate_ref "$GITHUB_SHA"
+          fetch_policy_file() {
+            local ref=$1
+            local source_path=$2
+            local destination=$3
+            response="$(curl --fail --silent --show-error --header "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref")"
+            content="$(printf '%s' "$response" | jq --exit-status --raw-output 'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content')"
+            printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
+          }
+          fetch_policy_file "$trusted_ref" '.github/workflows/pr-policy.yml' "$trusted_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file "$trusted_ref" '.github/scripts/test-pr-metadata.sh' "$trusted_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file "$trusted_ref" '.github/scripts/validate-pr-metadata.sh' "$trusted_root/.github/scripts/validate-pr-metadata.sh"
+          fetch_policy_file "$candidate_ref" '.github/workflows/pr-policy.yml' "$candidate_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file "$candidate_ref" '.github/scripts/test-pr-metadata.sh' "$candidate_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file "$candidate_ref" '.github/scripts/validate-pr-metadata.sh' "$candidate_root/.github/scripts/validate-pr-metadata.sh"
+
+      - name: Validate Linear metadata and required PR sections with trusted policy
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
+
+      - name: Test candidate policy against the trusted contract
+        env:
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
+"""
+
+DECLARE_EVAL_BAIT_FIXTURE = r"""# A compliant assignment is kept but the ref is rewritten through declare, read,
+# eval and source, which can run arbitrary commands and reassign the variables.
+name: Invalid PR policy fixture
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: PR contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch trusted and candidate policy files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/pr-policy-trusted"
+          candidate_root="$RUNNER_TEMP/pr-policy-candidate"
+          trusted_ref=${{ github.event.pull_request.base.sha }}
+          candidate_ref=$GITHUB_SHA
+          declare trusted_ref=$GITHUB_SHA
+          read candidate_ref <<< "$GITHUB_SHA"
+          eval "trusted_ref=\$GITHUB_SHA"
+          source /etc/profile
+          . /etc/profile
+          fetch_policy_file() {
+            local ref=$1
+            local source_path=$2
+            local destination=$3
+            response="$(curl --fail --silent --show-error --header "Authorization: Bearer $GH_TOKEN" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref")"
+            content="$(printf '%s' "$response" | jq --exit-status --raw-output 'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content')"
+            printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
+          }
+          fetch_policy_file "$trusted_ref" '.github/workflows/pr-policy.yml' "$trusted_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file "$trusted_ref" '.github/scripts/test-pr-metadata.sh' "$trusted_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file "$trusted_ref" '.github/scripts/validate-pr-metadata.sh' "$trusted_root/.github/scripts/validate-pr-metadata.sh"
+          fetch_policy_file "$candidate_ref" '.github/workflows/pr-policy.yml' "$candidate_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file "$candidate_ref" '.github/scripts/test-pr-metadata.sh' "$candidate_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file "$candidate_ref" '.github/scripts/validate-pr-metadata.sh' "$candidate_root/.github/scripts/validate-pr-metadata.sh"
+
+      - name: Validate Linear metadata and required PR sections with trusted policy
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
+
+      - name: Test candidate policy against the trusted contract
+        env:
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
+"""
+
 
 def indentation(line: str) -> int:
     prefix = line[: len(line) - len(line.lstrip())]
@@ -902,6 +1014,29 @@ def assert_fetch_semantics(fetch: dict[str, object]) -> None:
     lines = run_lines(fetch)
     body_start, body, body_end = fetch_function_lines(lines)
 
+    # Reject bash constructs that could rewrite a ref variable without looking
+    # like a plain assignment, either directly (export/declare/typeset/
+    # printf -v/read) or indirectly (eval/source/. can run anything).
+    rewrite_patterns = (
+        re.compile(r"\bexport\b.*\b(?:trusted_ref|candidate_ref)\b"),
+        re.compile(r"\b(?:declare|typeset)\b.*\b(?:trusted_ref|candidate_ref)\b"),
+        re.compile(r"printf\s+-v\s+(?:trusted_ref|candidate_ref)\b"),
+        re.compile(r"\bread\b.*\b(?:trusted_ref|candidate_ref)\b"),
+        re.compile(r"\beval\b"),
+        re.compile(r"\bsource\b"),
+        re.compile(r"^\.\s"),
+    )
+    for line in lines:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        for pattern in rewrite_patterns:
+            if pattern.search(line):
+                raise AssertionFailure(
+                    "fetch step must not rewrite trusted_ref/candidate_ref via "
+                    "bash builtins (export/declare/typeset/printf -v/read/eval/"
+                    f"source): {line.strip()}"
+                )
+
     # Collect every assignment to the ref variables outside the function body,
     # at any indentation. Exactly one assignment per variable must appear
     # before the first fetch_policy_file() call with the expected value; a
@@ -1059,6 +1194,10 @@ try:
         if sys.argv[1] == "--comment-bait"
         else INDENTED_OVERRIDE_BAIT_FIXTURE
         if sys.argv[1] == "--indented-override-bait"
+        else EXPORT_OVERRIDE_BAIT_FIXTURE
+        if sys.argv[1] == "--export-override-bait"
+        else DECLARE_EVAL_BAIT_FIXTURE
+        if sys.argv[1] == "--declare-eval-bait"
         else Path(sys.argv[1]).read_text(encoding="utf-8")
     )
     assert_workflow(source)
@@ -1114,6 +1253,16 @@ fi
 
 if assert_pr_policy_workflow --indented-override-bait >/dev/null 2>&1; then
   echo "FAIL: structured workflow assertion accepted indented ref overrides"
+  failures=$((failures + 1))
+fi
+
+if assert_pr_policy_workflow --export-override-bait >/dev/null 2>&1; then
+  echo "FAIL: structured workflow assertion accepted export/printf -v ref rewrites"
+  failures=$((failures + 1))
+fi
+
+if assert_pr_policy_workflow --declare-eval-bait >/dev/null 2>&1; then
+  echo "FAIL: structured workflow assertion accepted declare/read/eval/source ref rewrites"
   failures=$((failures + 1))
 fi
 
