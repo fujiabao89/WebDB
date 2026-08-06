@@ -99,8 +99,8 @@ jobs:
 
       - name: Test candidate policy against the trusted contract
         env:
-          PR_POLICY_VALIDATOR: $RUNNER_TEMP/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
-          PR_POLICY_WORKFLOW: $RUNNER_TEMP/pr-policy-candidate/.github/workflows/pr-policy.yml
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
         run: |
           set -euo pipefail
           bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"

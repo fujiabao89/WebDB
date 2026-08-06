@@ -208,7 +208,7 @@ if ! grep -Fq 'candidate_ref=$GITHUB_SHA' "$workflow"; then
   failures=$((failures + 1))
 fi
 
-if ! grep -Fq 'PR_POLICY_VALIDATOR: $RUNNER_TEMP/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh' "$workflow"; then
+if ! grep -Fq 'PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh' "$workflow"; then
   echo "FAIL: trusted regression tests must exercise the candidate validator"
   failures=$((failures + 1))
 fi
