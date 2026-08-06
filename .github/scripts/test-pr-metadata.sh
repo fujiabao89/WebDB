@@ -198,6 +198,7 @@ from __future__ import annotations
 
 import ast
 import re
+import shlex
 import sys
 from pathlib import Path
 
@@ -266,15 +267,61 @@ jobs:
           bash "$RUNNER_TEMP/pr-policy-candidate/.github/scripts/test-pr-metadata.sh"
 """
 
-REORDERED_INLINE_WORKFLOW_FIXTURE = r"""jobs:
+REORDERED_INLINE_WORKFLOW_FIXTURE = r"""# Same policy as the trusted workflow, but with every target step written in a
+# different legal field order (run/env before name) and inline run scalars, so
+# the parser must keep handling those variants while the fetch semantics stay
+# identical to the trusted workflow.
+jobs:
   validate:
     steps:
       - run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/pr-policy-trusted"
+          candidate_root="$RUNNER_TEMP/pr-policy-candidate"
           trusted_ref=${{ github.event.pull_request.base.sha }}
           candidate_ref=$GITHUB_SHA
-          "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
-          jq --exit-status --raw-output \
-            'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+          fetch_policy_file() {
+            local ref=$1
+            local source_path=$2
+            local destination=$3
+            local response
+            local content
+            response="$(
+              curl --fail --silent --show-error \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
+            )"
+            content="$(
+              printf '%s' "$response" |
+                jq --exit-status --raw-output \
+                  'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+            )"
+            printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
+          }
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/workflows/pr-policy.yml' \
+            "$trusted_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/scripts/test-pr-metadata.sh' \
+            "$trusted_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/scripts/validate-pr-metadata.sh' \
+            "$trusted_root/.github/scripts/validate-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/workflows/pr-policy.yml' \
+            "$candidate_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/test-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/validate-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/validate-pr-metadata.sh"
         name: Fetch trusted and candidate policy files
 
       - run: 'bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"'
@@ -285,6 +332,95 @@ REORDERED_INLINE_WORKFLOW_FIXTURE = r"""jobs:
           PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
         run: 'bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"'
         name: Test candidate policy against the trusted contract
+"""
+
+UNREACHABLE_BAIT_FIXTURE = r"""# A candidate that hides the required trusted_ref/candidate_ref assignments (and
+# the API URL / jq text) inside an unreachable `if false; then ... fi` block,
+# then runs the actual fetch against the candidate ref. Old text matching in
+# require_command accepted this because the required strings still appeared.
+name: Invalid PR policy fixture
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  validate:
+    name: PR contract
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch trusted and candidate policy files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          trusted_root="$RUNNER_TEMP/pr-policy-trusted"
+          candidate_root="$RUNNER_TEMP/pr-policy-candidate"
+          if false; then
+            trusted_ref=${{ github.event.pull_request.base.sha }}
+            candidate_ref=$GITHUB_SHA
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
+            jq --exit-status --raw-output \
+              'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+          fi
+          trusted_ref=$GITHUB_SHA
+          candidate_ref=${{ github.event.pull_request.head.sha }}
+          fetch_policy_file() {
+            local ref=$1
+            local source_path=$2
+            local destination=$3
+            local response
+            local content
+            response="$(
+              curl --fail --silent --show-error \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
+            )"
+            content="$(
+              printf '%s' "$response" |
+                jq --exit-status --raw-output \
+                  'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+            )"
+            printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
+          }
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/workflows/pr-policy.yml' \
+            "$trusted_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/scripts/test-pr-metadata.sh' \
+            "$trusted_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$trusted_ref" \
+            '.github/scripts/validate-pr-metadata.sh' \
+            "$trusted_root/.github/scripts/validate-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/workflows/pr-policy.yml' \
+            "$candidate_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/test-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/validate-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/validate-pr-metadata.sh"
+
+      - name: Validate Linear metadata and required PR sections with trusted policy
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
+
+      - name: Test candidate policy against the trusted contract
+        env:
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
+        run: |
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
 """
 
 
@@ -436,6 +572,138 @@ def commands(step: dict[str, object]) -> list[str]:
     ]
 
 
+# The three policy files that must be fetched from the trusted base ref and,
+# independently, from the candidate merge ref. Bindings are verified
+# structurally in assert_fetch_semantics, not by searching for command text.
+FETCH_SOURCE_PATHS = (
+    ".github/workflows/pr-policy.yml",
+    ".github/scripts/test-pr-metadata.sh",
+    ".github/scripts/validate-pr-metadata.sh",
+)
+
+
+def run_lines(step: dict[str, object]) -> list[str]:
+    run = step["run"]
+    assert isinstance(run, list)
+    lines = [line for line in run if isinstance(line, str)]
+    if not lines:
+        raise AssertionFailure("fetch step does not define a run block")
+    return lines
+
+
+def fetch_function_lines(
+    lines: list[str],
+) -> tuple[int, list[str], int]:
+    start = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.rstrip() == "fetch_policy_file() {"
+        ),
+        None,
+    )
+    if start is None:
+        raise AssertionFailure("fetch step does not define fetch_policy_file()")
+    body: list[str] = []
+    index = start + 1
+    while index < len(lines):
+        if lines[index].strip() == "}":
+            return start, body, index + 1
+        body.append(lines[index])
+        index += 1
+    raise AssertionFailure("fetch_policy_file() is never closed")
+
+
+def joined_shell_words(lines: list[str], start: int) -> tuple[str, int]:
+    parts: list[str] = []
+    index = start
+    while index < len(lines):
+        line = lines[index].rstrip()
+        continued = line.endswith("\\")
+        if continued:
+            line = line[:-1].rstrip()
+        parts.append(line)
+        index += 1
+        if not continued:
+            break
+    return " ".join(parts), index
+
+
+def fetch_calls(
+    lines: list[str], body_start: int, body_end: int
+) -> list[tuple[str, str, str]]:
+    calls: list[tuple[str, str, str]] = []
+    index = 0
+    while index < len(lines):
+        if index == body_start:
+            index = body_end
+            continue
+        stripped = lines[index].strip()
+        if stripped == "fetch_policy_file" or stripped.startswith(
+            "fetch_policy_file "
+        ):
+            statement, index = joined_shell_words(lines, index)
+            words = shlex.split(statement)
+            if len(words) != 4 or words[0] != "fetch_policy_file":
+                raise AssertionFailure(
+                    f"fetch_policy_file call must carry three arguments: {statement!r}"
+                )
+            calls.append((words[1], words[2], words[3]))
+        else:
+            index += 1
+    return calls
+
+
+def assert_fetch_semantics(fetch: dict[str, object]) -> None:
+    lines = run_lines(fetch)
+    for assignment in (
+        "trusted_ref=${{ github.event.pull_request.base.sha }}",
+        "candidate_ref=$GITHUB_SHA",
+    ):
+        if assignment not in lines:
+            raise AssertionFailure(
+                f"fetch step is missing a top-level assignment {assignment!r}"
+            )
+    body_start, body, body_end = fetch_function_lines(lines)
+    body_text = "\n".join(body)
+    for required in (
+        "local ref=$1",
+        "?ref=$ref",
+        "jq --exit-status --raw-output",
+        '.encoding == "base64"',
+        "base64 --decode",
+    ):
+        if required not in body_text:
+            raise AssertionFailure(
+                "fetch_policy_file() body is missing required fetch logic: "
+                f"{required}"
+            )
+    calls = fetch_calls(lines, body_start, body_end)
+    trusted = [call for call in calls if call[0] == "$trusted_ref"]
+    candidate = [call for call in calls if call[0] == "$candidate_ref"]
+    if len(trusted) != 3 or len(candidate) != 3:
+        raise AssertionFailure(
+            "fetch step must call fetch_policy_file exactly three times with "
+            "$trusted_ref and three times with $candidate_ref"
+        )
+    for group, ref, root in (
+        (trusted, "$trusted_ref", "$trusted_root"),
+        (candidate, "$candidate_ref", "$candidate_root"),
+    ):
+        fetched = sorted(call[1] for call in group)
+        if fetched != sorted(FETCH_SOURCE_PATHS):
+            raise AssertionFailure(
+                f"fetch_policy_file calls with {ref} must fetch exactly "
+                f"{sorted(FETCH_SOURCE_PATHS)}, got {fetched}"
+            )
+        for call in group:
+            if not call[2].startswith(f"{root}/"):
+                raise AssertionFailure(
+                    f"fetch_policy_file destination for {call[1]} must live under "
+                    f"{root}, got {call[2]}"
+                )
+
+
 def require_command(step: dict[str, object], expected: str) -> None:
     if expected not in commands(step):
         raise AssertionFailure(
@@ -446,18 +714,7 @@ def require_command(step: dict[str, object], expected: str) -> None:
 def assert_workflow(source: str) -> None:
     steps = parse_validate_steps(source)
     fetch = target_step(steps, "Fetch trusted and candidate policy files")
-    require_command(fetch, "trusted_ref=${{ github.event.pull_request.base.sha }}")
-    require_command(fetch, "candidate_ref=$GITHUB_SHA")
-    require_command(
-        fetch,
-        '"$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"',
-    )
-    require_command(fetch, "jq --exit-status --raw-output \\")
-    require_command(
-        fetch,
-        "'select(.encoding == \"base64\" and (.content | type == \"string\") "
-        "and (.content | length > 0)) | .content'",
-    )
+    assert_fetch_semantics(fetch)
 
     validation = target_step(
         steps, "Validate Linear metadata and required PR sections with trusted policy"
@@ -498,6 +755,8 @@ try:
         if sys.argv[1] == "--decoy"
         else REORDERED_INLINE_WORKFLOW_FIXTURE
         if sys.argv[1] == "--valid-variants"
+        else UNREACHABLE_BAIT_FIXTURE
+        if sys.argv[1] == "--unreachable-bait"
         else Path(sys.argv[1]).read_text(encoding="utf-8")
     )
     assert_workflow(source)
@@ -533,6 +792,11 @@ fi
 
 if assert_pr_policy_workflow --decoy >/dev/null 2>&1; then
   echo "FAIL: structured workflow assertion accepted decoy comments or unused steps"
+  failures=$((failures + 1))
+fi
+
+if assert_pr_policy_workflow --unreachable-bait >/dev/null 2>&1; then
+  echo "FAIL: structured workflow assertion accepted commands hidden in an unreachable block"
   failures=$((failures + 1))
 fi
 
