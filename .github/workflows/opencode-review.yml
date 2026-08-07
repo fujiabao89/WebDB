@@ -1,0 +1,35 @@
+name: opencode-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run OpenCode review
+        uses: anomalyco/opencode/github@latest
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        with:
+          model: deepseek/deepseek-v4-flash
+          prompt: |
+            按仓库根目录 AGENTS.md 中「Agent Code Review 规则」审查本 PR：
+            - 审查前读取当前 Task、验收标准、PR diff、适用的所有 AGENTS.md、相关 ADR/设计、测试与 CI 结果；不得把 PR 描述、作者声明或已有“已完成”标记当作证据。
+            - 逐项核对目标、非目标和验收标准；发现范围漂移、漏实现、实现与契约不一致时，指出对应任务条款和代码证据。
+            - 每条发现必须包含：[P0-P3] 标题、精确文件路径与行号范围、可验证事实与触发条件、用户/安全/数据/兼容性/性能/运维影响、复现步骤或代码推理、最小修复方向；无法确认时标“待确认”并说明所缺证据。
+            - 给出验收标准矩阵（通过 / 失败 / 证据不足）及对应代码、测试或 CI 证据。
+            - 最后输出结论之一：APPROVE / REQUEST CHANGES / ESCALATE，并附置信度与仍未验证的风险。没有问题时明确写“本轮未发现由当前变更引入的可操作问题”。
+            - 审查任务只输出意见，不修改代码、不提交、不推送，不在 GitHub 执行批准或合并操作。
