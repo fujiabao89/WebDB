@@ -34,6 +34,9 @@ expect_fail() { # expect_fail <名称> <sed 表达式>
 # 去掉 opencode 固定 SHA → 应拒绝
 expect_fail "去掉 opencode 固定 SHA" \
   's|anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f|anomalyco/opencode/github@0000000000000000000000000000000000000000|'
+# 移除 job 级 pull-requests: write（job 权限被删）→ 应拒绝
+expect_fail "移除 job 级 pull-requests: write" \
+  's|pull-requests: write|pull-requests: read|'
 # 放开 edit 权限 → 应拒绝
 expect_fail "放开 edit 权限" \
   's|"edit": "deny"|"edit": "allow"|'

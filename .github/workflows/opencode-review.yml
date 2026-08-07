@@ -40,7 +40,10 @@ jobs:
       # 用 base.sha 的可信根 AGENTS.md 覆盖，并把这些变更标记 skip-worktree——
       # 否则 action 的 branchIsDirty 会把删除动作 commit+push 到 PR 分支。
       # 同时把可信 AGENTS.md 写入 opencode 全局配置目录（始终加载）。
+      # 仅当 secret 存在（同仓库 PR 且已配置 DEEPSEEK_API_KEY）时执行：fork PR 不传递 secrets，
+      # 且 origin 无 fork 分支 ref，git fetch 必然失败；无 secret 时审查本应跳过（见 P2-3）。
       - name: Use trusted AGENTS.md from base ref
+        if: ${{ env.HAS_SECRET == 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
