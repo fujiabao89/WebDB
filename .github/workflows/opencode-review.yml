@@ -19,6 +19,13 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Diagnose fork PR settings
+        run: |
+          echo "secrets present: ${{ secrets.DEEPSEEK_API_KEY != '' }}"
+          echo "secrets length: ${#DEEPSEEK_API_KEY}"
+          echo "oidc url present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "oidc token env: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+
       - name: Run OpenCode review
         uses: anomalyco/opencode/github@latest
         env:
