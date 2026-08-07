@@ -13,17 +13,25 @@ jobs:
     name: PR contract
     runs-on: ubuntu-latest
     steps:
-      - name: Fetch policy files from the pull request merge commit
+      - name: Fetch trusted and candidate policy files
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          policy_root="$RUNNER_TEMP/pr-policy"
-          mkdir -p "$policy_root/.github/scripts" "$policy_root/.github/workflows"
+          trusted_root="$RUNNER_TEMP/pr-policy-trusted"
+          candidate_root="$RUNNER_TEMP/pr-policy-candidate"
+          trusted_ref=${{ github.event.pull_request.base.sha }}
+          candidate_ref=$GITHUB_SHA
+          mkdir -p \
+            "$trusted_root/.github/scripts" \
+            "$trusted_root/.github/workflows" \
+            "$candidate_root/.github/scripts" \
+            "$candidate_root/.github/workflows"
 
           fetch_policy_file() {
-            local source_path=$1
-            local destination=$2
+            local ref=$1
+            local source_path=$2
+            local destination=$3
             local response
             local content
             response="$(
@@ -31,33 +39,53 @@ jobs:
                 --header "Authorization: Bearer $GH_TOKEN" \
                 --header "Accept: application/vnd.github+json" \
                 --header "X-GitHub-Api-Version: 2022-11-28" \
-                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$GITHUB_SHA"
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$ref"
             )"
-            content="$(printf '%s' "$response" | jq --exit-status --raw-output '.content')"
+            content="$(
+              printf '%s' "$response" |
+                jq --exit-status --raw-output \
+                  'select(.encoding == "base64" and (.content | type == "string") and (.content | length > 0)) | .content'
+            )"
             printf '%s' "$content" | tr -d '\n' | base64 --decode >"$destination"
           }
 
           fetch_policy_file \
+            "$trusted_ref" \
             '.github/workflows/pr-policy.yml' \
-            "$policy_root/.github/workflows/pr-policy.yml"
+            "$trusted_root/.github/workflows/pr-policy.yml"
           fetch_policy_file \
+            "$trusted_ref" \
             '.github/scripts/test-pr-metadata.sh' \
-            "$policy_root/.github/scripts/test-pr-metadata.sh"
+            "$trusted_root/.github/scripts/test-pr-metadata.sh"
           fetch_policy_file \
+            "$trusted_ref" \
             '.github/scripts/validate-pr-metadata.sh' \
-            "$policy_root/.github/scripts/validate-pr-metadata.sh"
+            "$trusted_root/.github/scripts/validate-pr-metadata.sh"
 
-      - name: Test PR metadata policy
-        run: bash "$RUNNER_TEMP/pr-policy/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/workflows/pr-policy.yml' \
+            "$candidate_root/.github/workflows/pr-policy.yml"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/test-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/test-pr-metadata.sh"
+          fetch_policy_file \
+            "$candidate_ref" \
+            '.github/scripts/validate-pr-metadata.sh' \
+            "$candidate_root/.github/scripts/validate-pr-metadata.sh"
 
-      - name: Validate Linear metadata and required PR sections
+      - name: Test trusted PR metadata policy
+        run: bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
+
+      - name: Validate Linear metadata and required PR sections with trusted policy
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_HEAD_REF: ${{ github.head_ref }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           set -euo pipefail
-          bash "$RUNNER_TEMP/pr-policy/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/validate-pr-metadata.sh" "$PR_TITLE" "$PR_HEAD_REF" "$PR_BODY"
 
           # 检测未填写的模板占位符。模板占位符特征为 <!-- 后跟中文提示（例如/无则填/Low / Medium/人类或/Codex 链接）。
           # 完整移除 CodeRabbit 等工具自动生成的 HTML 注释块（从开标记到闭标记之间的所有行），
@@ -72,3 +100,14 @@ jobs:
             echo "PR 描述仍包含未填写的模板内容。"
             exit 1
           fi
+
+      - name: Test candidate policy against the trusted contract
+        env:
+          PR_POLICY_VALIDATOR: ${{ runner.temp }}/pr-policy-candidate/.github/scripts/validate-pr-metadata.sh
+          PR_POLICY_WORKFLOW: ${{ runner.temp }}/pr-policy-candidate/.github/workflows/pr-policy.yml
+        run: |
+          set -euo pipefail
+          bash "$RUNNER_TEMP/pr-policy-trusted/.github/scripts/test-pr-metadata.sh"
+
+      - name: Run candidate policy self-tests
+        run: bash "$RUNNER_TEMP/pr-policy-candidate/.github/scripts/test-pr-metadata.sh"
