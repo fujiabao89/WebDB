@@ -8,6 +8,23 @@ set -euo pipefail
 workflow="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/workflows/opencode-review.yml}"
 failures=0
 
+# 结构断言需要能 import yaml 的 Python 解释器；优先 python3（GitHub Actions runner），
+# 回退 python（Windows 本地）。逐个候选实测可用（能 import yaml）才采用，
+# 避免 Windows Store 的 python3 存根被误判为可用。
+PYTHON_BIN="${PYTHON_BIN:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  for candidate in python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import yaml, sys' >/dev/null 2>&1; then
+      PYTHON_BIN=$candidate
+      break
+    fi
+  done
+  if [ -z "$PYTHON_BIN" ]; then
+    echo "FAIL: 未找到可用的 python3/python（需支持 yaml）"
+    exit 1
+  fi
+fi
+
 fail() {
   echo "FAIL: $1"
   failures=$((failures + 1))
@@ -68,6 +85,57 @@ check "skip-worktree 隐藏规则变更" 'git update-index --skip-worktree'
 # --- P3-1 base.sha 经 env 传递 ---
 check "BASE_SHA 从 env 取用" 'BASE_SHA: ${{ github.event.pull_request.base.sha }}'
 check_absent "run 脚本不得直插 base.sha 模板" 'ref=${{ github.event.pull_request.base.sha }}'
+
+# --- YAML 结构断言（python3）：grep 只能验证文本存在，无法验证配置位置/值，
+#     如"仅保留注释但删除实际配置"会漏检，故按 YAML 层级断言 workflow/job 权限、
+#     Run 步骤的 env 与 if、job env 的 secret 暴露面。 ---
+if ! struct_output="$("$PYTHON_BIN" - "$workflow" <<'PYEOF' 2>&1
+import sys
+import yaml
+
+data = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+errors = []
+review = (data.get("jobs") or {}).get("review")
+
+def err(msg):
+    errors.append(msg)
+
+if review is None:
+    err("缺少 jobs.review")
+else:
+    wf_perms = data.get("permissions") or {}
+    if set(wf_perms.items()) != {("contents", "read")}:
+        err("workflow 级 permissions 必须仅为 contents: read，实际: %r" % (wf_perms,))
+    job_perms = review.get("permissions") or {}
+    if set(job_perms.items()) != {("contents", "read"), ("pull-requests", "write")}:
+        err("job 级 permissions 必须为 contents: read + pull-requests: write，实际: %r" % (job_perms,))
+    job_env = review.get("env") or {}
+    if "DEEPSEEK_API_KEY" in job_env:
+        err("raw DEEPSEEK_API_KEY 不得出现在 job env（P3-2）")
+    if "HAS_SECRET" not in job_env or "secrets.DEEPSEEK_API_KEY !=" not in str(job_env.get("HAS_SECRET")):
+        err("job env 必须含 HAS_SECRET 布尔派生（secrets.DEEPSEEK_API_KEY !=）")
+    runs = [s for s in (review.get("steps") or []) if s.get("name") == "Run OpenCode review"]
+    if len(runs) != 1:
+        err("必须恰有一个 Run OpenCode review 步骤")
+    else:
+        r = runs[0]
+        renv = r.get("env") or {}
+        if renv.get("OPENCODE_DISABLE_PROJECT_CONFIG") != "true":
+            err("Run 步骤 env 必须含 OPENCODE_DISABLE_PROJECT_CONFIG: true（仅注释不算数）")
+        if "DEEPSEEK_API_KEY" not in renv:
+            err("Run 步骤 env 必须注入 DEEPSEEK_API_KEY")
+        if "HAS_SECRET" not in (r.get("if") or ""):
+            err("Run 步骤 if 必须引用 HAS_SECRET")
+
+for line in errors:
+    print("STRUCT FAIL: %s" % line)
+sys.exit(1 if errors else 0)
+PYEOF
+)"; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && fail "$line"
+  done <<< "$struct_output"
+fi
 
 if (( failures > 0 )); then
   echo "opencode-review workflow 不变量校验失败：$failures 项"

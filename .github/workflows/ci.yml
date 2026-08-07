@@ -57,14 +57,49 @@ jobs:
           test -s .github/CODEOWNERS
 
   # opencode-review.yml 的回归测试独立执行，不依赖被测 workflow 自身的自校验步骤。
-  # 若 workflow 被误改或削弱，本 job 会失败并暴露问题（ADR-019 决策 6）。
+  # 与 pr-policy.yml 一致，通过 GitHub Contents API 从 GITHUB_SHA 拉取测试脚本与
+  # workflow 文件，不使用 actions/checkout：避免把 GITHUB_TOKEN 写入本地 git config
+  # （仓库的 ecc orphan gitlink 使 persist-credentials: false 不可用，见 opencode-review.yml），
+  # 也避免未固定 SHA 的 action 引用。
+  # 注意：脚本随本 PR 首次引入，合并前脚本来源与 PR 相同；合并后本 job 以受保护版本运行，
+  # 成为后续 PR 的独立回归门禁（ADR-019 决策 6）。
   opencode-review-policy:
     name: Opencode review workflow invariants
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - name: Fetch opencode workflow policy files
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          policy_root="$RUNNER_TEMP/opencode-policy"
+          mkdir -p "$policy_root/.github/scripts" "$policy_root/.github/workflows"
+          fetch_policy_file() {
+            local source_path=$1
+            local destination=$2
+            local content
+            content="$(
+              curl --fail --silent --show-error \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$GITHUB_SHA"
+            )"
+            printf '%s' "$content" | jq --exit-status --raw-output '.content' | tr -d '\n' | base64 --decode >"$destination"
+          }
+          fetch_policy_file \
+            '.github/scripts/validate-opencode-workflow.sh' \
+            "$policy_root/.github/scripts/validate-opencode-workflow.sh"
+          fetch_policy_file \
+            '.github/scripts/test-opencode-workflow.sh' \
+            "$policy_root/.github/scripts/test-opencode-workflow.sh"
+          fetch_policy_file \
+            '.github/workflows/opencode-review.yml' \
+            "$policy_root/.github/workflows/opencode-review.yml"
       - name: Test opencode review workflow invariants
-        run: bash .github/scripts/test-opencode-workflow.sh
+        run: bash "$RUNNER_TEMP/opencode-policy/.github/scripts/test-opencode-workflow.sh"
 
   web:
     name: Web checks

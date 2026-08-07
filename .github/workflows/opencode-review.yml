@@ -57,8 +57,9 @@ jobs:
         run: |
           set -euo pipefail
           # 复刻 action 内部的 head 分支 checkout，使下面的工作区修改对审查会话生效。
+          # source-only fetch 只更新 FETCH_HEAD，不保证本地分支存在，故用 --detach 直接检出。
           git fetch origin --depth=1 "$HEAD_REF"
-          git checkout "$HEAD_REF"
+          git checkout --detach FETCH_HEAD
           # 删除工作区全部指令文件 AGENTS.md/CLAUDE.md/CONTEXT.md（含子目录与 .opencode/），
           # 阻断恶意 PR 的嵌套规则注入。opencode 的 instructionFiles 包含这三者。
           find . -path ./.git -prune -o -type f \( -iname 'AGENTS.md' -o -iname 'CLAUDE.md' -o -iname 'CONTEXT.md' \) -print0 | xargs -0 -r rm -f --
@@ -153,3 +154,26 @@ jobs:
             - 给出验收标准矩阵（通过 / 失败 / 证据不足）及对应代码、测试或 CI 证据。
             - 最后输出结论之一：APPROVE / REQUEST CHANGES / ESCALATE，并附置信度与仍未验证的风险。没有问题时明确写“本轮未发现由当前变更引入的可操作问题”。
             - 审查任务只输出意见，不修改代码、不提交、不推送，不在 GitHub 执行批准或合并操作。
+
+            评论输出必须使用 CodeRabbit 风格的 HTML 折叠结构（这是硬性要求）：
+            - 第一行（永远可见）：结论徽章 + 一句话摘要，格式：
+              `**✅ APPROVE** / `**❌ REQUEST CHANGES** / `**⚠️ ESCALATE` — N 个 P0 / N 个 P1 / N 个 P2 / N 个 P3 待处理（无问题时写“本轮未发现由当前变更引入的可操作问题”）。
+            - 详细 Findings 必须包在 `<details>` 里：
+              <details>
+              <summary>📋 Findings（N 条）</summary>
+
+              ### [P1] 简短标题 — `文件路径:行号`
+              事实 / 触发 / 影响 / 依据 / 最小修复，每项一行，总长不超过 8 行。
+
+              </details>
+            - 验收标准矩阵必须包在独立的 `<details>` 里：
+              <details>
+              <summary>✅ 验收标准矩阵</summary>
+
+              | 验收项 | 结果 | 证据 |
+              | --- | --- | --- |
+
+              </details>
+            - 结论与置信度放在所有折叠块之外（永远可见），作为评论的最后两行。
+            - 评论开头不要使用“I've completed my review”之类的客套话，直接以结论徽章开头。
+            - 每个折叠块之间用 `---` 分隔；整个评论控制在 150 行以内，避免 GitHub 评论过长。

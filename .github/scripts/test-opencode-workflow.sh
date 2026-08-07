@@ -49,6 +49,12 @@ expect_fail "raw secret 泄漏到 job env" \
 # 删除项目级配置禁用 Flag → 应拒绝
 expect_fail "删除 OPENCODE_DISABLE_PROJECT_CONFIG" \
   '/OPENCODE_DISABLE_PROJECT_CONFIG/d'
+# 仅保留注释但删除实际 OPENCODE_DISABLE_PROJECT_CONFIG 配置（grep 漏检，需 YAML 结构断言）→ 应拒绝
+expect_fail "仅保留注释但删除 OPENCODE_DISABLE_PROJECT_CONFIG 配置" \
+  's|OPENCODE_DISABLE_PROJECT_CONFIG: "true"||'
+# 新增 workflow 级 pull-requests: write（job 级被削弱）→ 应拒绝
+expect_fail "新增 workflow 级 pull-requests: write" \
+  '0,/^permissions:/s|^permissions:|permissions:\n  pull-requests: write|'
 # 删除嵌套 AGENTS.md 清理命令 → 应拒绝
 expect_fail "删除嵌套 AGENTS.md 清理命令" \
   '/-iname/d'
