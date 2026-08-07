@@ -5,33 +5,96 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
-  id-token: write
   contents: read
-  pull-requests: write
-  issues: read
+
+concurrency:
+  group: opencode-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    env:
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 1
 
-      - name: Diagnose fork PR settings
+      - name: Remove persisted git credentials
         run: |
-          echo "secrets present: ${{ secrets.DEEPSEEK_API_KEY != '' }}"
-          echo "secrets length: ${#DEEPSEEK_API_KEY}"
-          echo "oidc url present: ${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
-          echo "oidc token env: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+          git config --local --unset-all "http.https://github.com/.extraheader" || true
+
+      - name: Use trusted AGENTS.md from base ref
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          curl -sf \
+            --header "Authorization: Bearer $GITHUB_TOKEN" \
+            --header "Accept: application/vnd.github.raw+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/AGENTS.md?ref=${{ github.event.pull_request.base.sha }}" \
+            > AGENTS.md
+          test -s AGENTS.md
+
+      - name: Configure review agent permissions
+        run: |
+          mkdir -p "$HOME/.config/opencode"
+          cat > "$HOME/.config/opencode/opencode.json" <<EOF
+          {
+            "\$schema": "https://opencode.ai/config.json",
+            "permission": {
+              "read": "allow",
+              "glob": "allow",
+              "grep": "allow",
+              "list": "allow",
+              "edit": "deny",
+              "write": "deny",
+              "webfetch": "deny",
+              "external_directory": {
+                "/tmp/**": "allow",
+                "$HOME/**": "allow",
+                "*": "deny"
+              },
+              "bash": {
+                "git log*": "allow",
+                "git diff*": "allow",
+                "git show*": "allow",
+                "git status*": "allow",
+                "git rev-parse*": "allow",
+                "git ls-files*": "allow",
+                "*": "deny"
+              }
+            }
+          }
+          EOF
+
+      - name: Validate workflow invariants
+        run: |
+          set -euo pipefail
+          workflow="$GITHUB_WORKSPACE/.github/workflows/opencode-review.yml"
+          grep -q 'uses: anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f' "$workflow" || { echo "FAIL: opencode action must be pinned to known SHA"; exit 1; }
+          grep -q 'uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262' "$workflow" || { echo "FAIL: checkout must be pinned to known SHA"; exit 1; }
+          grep -Eq '^\s+contents: read' "$workflow" || { echo "FAIL: job must keep contents: read"; exit 1; }
+          grep -q '"edit": "deny"' "$workflow" || { echo "FAIL: edit must be denied"; exit 1; }
+          grep -q '"write": "deny"' "$workflow" || { echo "FAIL: write must be denied"; exit 1; }
+          grep -q '"webfetch": "deny"' "$workflow" || { echo "FAIL: webfetch must be denied"; exit 1; }
+          grep -q "env.DEEPSEEK_API_KEY != ''" "$workflow" || { echo "FAIL: secret guard must exist"; exit 1; }
+          echo "OK: workflow invariants satisfied"
 
       - name: Run OpenCode review
-        uses: anomalyco/opencode/github@latest
+        if: ${{ env.DEEPSEEK_API_KEY != '' }}
+        uses: anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
         with:
           model: deepseek/deepseek-v4-flash
+          use_github_token: true
           prompt: |
             按仓库根目录 AGENTS.md 中「Agent Code Review 规则」审查本 PR：
             - 审查前读取当前 Task、验收标准、PR diff、适用的所有 AGENTS.md、相关 ADR/设计、测试与 CI 结果；不得把 PR 描述、作者声明或已有“已完成”标记当作证据。
