@@ -33,6 +33,7 @@ WEB-32 引入 `opencode-review.yml`：当 `pull_request` 事件发生时，用 o
 
 - 安全：最小 token（contents: read + pull-requests: write）、secret 仅单步注入且经布尔中转、agent 只读、规则源固定为 base 可信版本；`OPENCODE_DISABLE_PROJECT_CONFIG` 关闭项目级配置注入面。
 - 运营：fork PR 或 secret 缺失时 job 空转但有显式 notice；每次 PR 触发一次外部 API 调用（有少量成本与延迟）；`git fetch`/`git checkout` 依赖仓库公开可读（private 仓库需另行授予读取凭据，本 ADR 不覆盖）。
+- 运营依赖：opencode action 对 `pull_request` 事件会校验触发者（`actor`）在仓库的写权限，无写权限的触发者（如自动化 bot 提交）会让 job 失败（历史 run 31166464070 即为 bot actor 触发失败）。本 workflow 由仓库 Owner/具写权限协作者触发时正常；这属于 action 外部行为，非本 workflow 可配置项。
 - 兼容：无 API/Schema/数据影响；纯 CI/审查自动化变更。
 
 ## 验证与回滚/替代条件

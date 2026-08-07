@@ -35,8 +35,9 @@ check "checkout 固定 SHA" 'actions/checkout@11d5960a326750d5838078e36cf38b85af
 
 # --- 权限边界 ---
 check "use_github_token 开启" 'use_github_token: true'
-# pull-requests: write 只出现在 job 级 permissions 块（workflow 级仅 contents: read），
-# 用它确认 job 级 permissions 存在，避免"仅 workflow 级残留也通过"的弱断言。
+# pull-requests: write 在整个文件中只可能出现在 job 级 permissions 块
+# （workflow 级仅 contents: read），故存在即证明 job 级权限存在——这是轻量静态校验，
+# 不做 YAML 结构解析，断言的是"至少存在一处 job 级 pull-requests: write"。
 check "job 级 permissions 存在（含 pull-requests: write）" 'pull-requests: write'
 check "permissions 含 contents: read" 'contents: read'
 check_absent "job 权限不含 id-token" 'id-token'
