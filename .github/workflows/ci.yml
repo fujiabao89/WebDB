@@ -56,6 +56,16 @@ jobs:
           test -s .github/PULL_REQUEST_TEMPLATE.md
           test -s .github/CODEOWNERS
 
+  # opencode-review.yml 的回归测试独立执行，不依赖被测 workflow 自身的自校验步骤。
+  # 若 workflow 被误改或削弱，本 job 会失败并暴露问题（ADR-019 决策 6）。
+  opencode-review-policy:
+    name: Opencode review workflow invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test opencode review workflow invariants
+        run: bash .github/scripts/test-opencode-workflow.sh
+
   web:
     name: Web checks
     runs-on: ubuntu-latest
