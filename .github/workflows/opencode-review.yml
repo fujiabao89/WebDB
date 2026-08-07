@@ -14,8 +14,10 @@ concurrency:
 jobs:
   review:
     runs-on: ubuntu-latest
+    # HAS_SECRET 只暴露布尔值（secrets 是否非空），不暴露 secret 本身。
+    # 原始 secret 仅在下方 Run 步骤的 env 中注入（P3-2）。
     env:
-      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      HAS_SECRET: ${{ secrets.DEEPSEEK_API_KEY != '' }}
     permissions:
       contents: read
       pull-requests: write
@@ -27,19 +29,49 @@ jobs:
 
       - name: Remove persisted git credentials
         run: |
+          # 仓库存在 orphan gitlink `ecc`（无 .gitmodules）。实测 actions/checkout@v4/v6 在
+          # persist-credentials: false 下会做 submodule 清理并因 "No url found for submodule path 'ecc'"
+          # 直接失败，因此改为 checkout 后手动清除凭据，这是等效替代。
           git config --local --unset-all "http.https://github.com/.extraheader" || true
 
+      # P2-1：审查规则源只信任 base.sha 的根 AGENTS.md。
+      # opencode action 内部会重新 checkout PR head 分支（github.handler.ts 的 checkoutLocalBranch），
+      # 因此本步骤先把工作区切到 head 分支，再删除工作区全部 AGENTS.md（含子目录与 .opencode/），
+      # 用 base.sha 的可信根 AGENTS.md 覆盖，并把这些变更标记 skip-worktree——
+      # 否则 action 的 branchIsDirty 会把删除动作 commit+push 到 PR 分支。
+      # 同时把可信 AGENTS.md 写入 opencode 全局配置目录（始终加载）。
       - name: Use trusted AGENTS.md from base ref
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
+          set -euo pipefail
+          # 复刻 action 内部的 head 分支 checkout，使下面的工作区修改对审查会话生效。
+          git fetch origin --depth=1 "$HEAD_REF"
+          git checkout "$HEAD_REF"
+          # 删除工作区全部指令文件 AGENTS.md/CLAUDE.md/CONTEXT.md（含子目录与 .opencode/），
+          # 阻断恶意 PR 的嵌套规则注入。opencode 的 instructionFiles 包含这三者。
+          find . -path ./.git -prune -o -type f \( -iname 'AGENTS.md' -o -iname 'CLAUDE.md' -o -iname 'CONTEXT.md' \) -print0 | xargs -0 -r rm -f --
+          rm -rf -- .opencode
+          # 从 base.sha 拉取可信根 AGENTS.md（P3-1：经 env 传递，避免模板表达式直插脚本）。
           curl -sf \
             --header "Authorization: Bearer $GITHUB_TOKEN" \
             --header "Accept: application/vnd.github.raw+json" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
-            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/AGENTS.md?ref=${{ github.event.pull_request.base.sha }}" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/AGENTS.md?ref=$BASE_SHA" \
             > AGENTS.md
           test -s AGENTS.md
+          mkdir -p "$HOME/.config/opencode"
+          cp AGENTS.md "$HOME/.config/opencode/AGENTS.md"
+          # 隐藏规则文件变更，保持 git status 干净，防止 action 自动 commit+push。
+          git ls-files -z | while IFS= read -r -d '' f; do
+            case "$f" in
+              AGENTS.md|*/AGENTS.md|CLAUDE.md|*/CLAUDE.md|CONTEXT.md|*/CONTEXT.md|.opencode/*)
+                git update-index --skip-worktree -- "$f" || true
+                ;;
+            esac
+          done
 
       - name: Configure review agent permissions
         run: |
@@ -73,25 +105,31 @@ jobs:
           }
           EOF
 
+      # 自校验说明：该步骤校验 merge ref 的 workflow 文件。对 pull_request 事件 GitHub 总是运行
+      # PR 提供的 workflow 文件，恶意 PR 可同时改写 workflow 与该校验，因此本检查只防误改（告警），
+      # 不是安全边界。真正的控制是：本 job 不设为 required 门禁、最小 token 权限、
+      # 以及 PR 中由人工审查 workflow 文件的 diff。
       - name: Validate workflow invariants
         run: |
           set -euo pipefail
-          workflow="$GITHUB_WORKSPACE/.github/workflows/opencode-review.yml"
-          grep -q 'uses: anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f' "$workflow" || { echo "FAIL: opencode action must be pinned to known SHA"; exit 1; }
-          grep -q 'uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262' "$workflow" || { echo "FAIL: checkout must be pinned to known SHA"; exit 1; }
-          grep -Eq '^\s+contents: read' "$workflow" || { echo "FAIL: job must keep contents: read"; exit 1; }
-          grep -q '"edit": "deny"' "$workflow" || { echo "FAIL: edit must be denied"; exit 1; }
-          grep -q '"write": "deny"' "$workflow" || { echo "FAIL: write must be denied"; exit 1; }
-          grep -q '"webfetch": "deny"' "$workflow" || { echo "FAIL: webfetch must be denied"; exit 1; }
-          grep -q "env.DEEPSEEK_API_KEY != ''" "$workflow" || { echo "FAIL: secret guard must exist"; exit 1; }
-          echo "OK: workflow invariants satisfied"
+          bash "$GITHUB_WORKSPACE/.github/scripts/test-opencode-workflow.sh"
 
+      # P2-3：secret 缺失（如 fork PR 不传递 secrets）时显式提示跳过，避免绿检空转。
+      - name: Notice when review is skipped
+        if: ${{ env.HAS_SECRET != 'true' }}
+        run: |
+          echo "::notice::DEEPSEEK_API_KEY 未配置或当前运行不提供 secrets（例如 fork PR），opencode 自动审查已跳过。本 job 仅产出审查意见，请勿将其设为 required 门禁。"
+
+      # P2-1：OPENCODE_DISABLE_PROJECT_CONFIG 使 opencode 不加载任何项目级 AGENTS.md/.opencode 配置，
+      # 规则来源仅剩全局配置目录的可信 AGENTS.md 与本 prompt。
+      # P2-3/P3-2：仅当 secret 存在时运行；secret 只在本步骤 env 注入。
       - name: Run OpenCode review
-        if: ${{ env.DEEPSEEK_API_KEY != '' }}
+        if: ${{ env.HAS_SECRET == 'true' }}
         uses: anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
+          OPENCODE_DISABLE_PROJECT_CONFIG: "true"
         with:
           model: deepseek/deepseek-v4-flash
           use_github_token: true
