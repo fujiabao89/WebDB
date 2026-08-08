@@ -107,17 +107,19 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 
 ### 浏览器不得接收或控制
 
+**浏览器绝不接收**（任何响应均不得出现）：
 - 数据库密码、连接串、KEK、DEK、nonce
 - `secret_ref`、`secret_version`
-- 未脱敏数据库错误
-- 原始审计内部错误
+- 未脱敏数据库错误、原始审计内部错误
 - UserID、ActorID、可信角色（由服务端 Principal 派生，浏览器不自报）
-- SQL 方言、`Connection.Engine`、`Environment`（由服务端连接元数据派生）
 - MySQL lexer/session mode
-- ConnectionPolicy 上限（max_rows/timeout 客户端不可覆盖）
-- trace ID（**D14 已批准**：audit receipt 可含服务端生成的 `trace_id`，仅用于相关性与支持排查；不接受客户端输入，不作为授权或资源访问凭证；错误响应仍不含 trace_id）
 - `SortKey.Unique` 或任何唯一性证明
 - continuation token 的内部状态（客户端仅持 opaque handle）
+
+**浏览器可接收但不得控制**（服务端派生；客户端提交覆盖一律忽略）：
+- SQL 方言、`Connection.Engine`、`Environment`——**D02 已批准**连接 DTO 公开 `engine`/`environment`，浏览器可接收用于展示，但不得在请求中提交
+- `ConnectionPolicy` 上限（`max_rows`/`timeout` 客户端不可覆盖）
+- `trace_id`——**D14 已批准**：audit receipt 可含服务端生成的 `trace_id`，仅用于相关性与支持排查；不接受客户端输入，不作为授权或资源访问凭证；错误响应仍不含 trace_id
 
 ---
 
@@ -151,6 +153,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
   - B：由可信反向代理注入 `X-*` 头，服务端校验并映射——需要演示层代理，超出 P0 Compose。
   - C：Compose 内置 dev-only 固定 token——仍是未认证的伪凭据，且容易被误用于生产。
 - **D01b 已批准（方案 A）**：`Principal{UserID, WorkspaceID}` 从服务端固定演示配置注入，浏览器不得自报 actor/角色/方言/策略；任何来自客户端的 `workspace_id` 覆盖必须被忽略（路由中的 `{workspace_id}` 仅用于与 Principal.WorkspaceID 比对，不一致即 403/404）。
+- **D01b fail-closed（补强）**：演示 Principal 配置缺失、格式非法、角色无效或指向不存在的 workspace/user 时**拒绝启动（fatal）**；禁止以零值、默认值或任何客户端提供的身份作为回退。运行时无法从可信配置解析出有效 Principal 时，请求返回 `unauthorized`（401）。
 
 ### 5.3 传输约定
 
@@ -158,13 +161,19 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 - 请求体大小上限：256 KiB（**D06b 已批准**）。
 - 方法：GET 用于浏览类、POST 用于执行/续页（执行有副作用，禁止 GET）。
 - 统一成功 envelope（结果 DTO 直返，不分层）：
+
   ```json
   { "data": { ... }, "meta": { "page": {...}, "audit": {...} } }
   ```
+
+  - `data` 恒为结果；`meta` 仅在携带分页（`page`）或审计（`audit`）信息的路由**必需**（executions、query-pages）；无分页/审计的浏览类路由（connections、schemas/tables/columns）`meta` **可选、可省略**（§6 连接列表示例省略 `meta`）。
+
 - 统一错误 envelope（固定安全摘要）：
+
   ```json
   { "error": { "code": "forbidden", "message": "forbidden" } }
   ```
+
   错误体**禁止**包含：SQL 正文、Args、token、host/database username、凭证或密钥、原始数据库错误、lexer/parser 原始错误、内部 Go error 字符串、trace_id（错误响应一律不含；trace_id 仅出现在成功响应 audit receipt，D14）。
 - HTTP 状态：见 §12 错误码映射表；`429` 携带 `Retry-After`（**D15d 已批准**）。
 
@@ -183,8 +192,8 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 成功响应 DTO（安全连接 DTO，**D02/D03 已批准**） | 公开字段：`id`、`name`、`engine`、`environment`、`database`。`host`、`port`、`secret_ref`、`secret_version`、`created_by`、`workspace_id`、`created_at`、`updated_at` **不公开** |
 | 空数据语义 | `200` + 空数组 `"data": []`；不返回 404（工作区/连接不可见统一为授权拒绝，见错误码） |
 | 错误码 | `invalid_scope`(400)、`unauthorized`(401)、`forbidden`(403)、`internal_error`(500) |
-| 超时/取消 | 元数据库查询有界超时；HTTP 取消传播到元数据库查询 |
-| 硬上限 | 响应体上限 8 MiB（D06b 已批准）；列表大小默认 200 行封顶（D06c 已批准），避免一次性拉全量 |
+| 超时/取消 | 元数据库查询**有界超时**（默认 5s、上限 10s；配置缺失/非法时 fail-closed 拒绝，禁止无界）；HTTP 取消传播到元数据库查询；取消/超时后连接归还 |
+| 硬上限 | 响应体上限 8 MiB（D06b 已批准）；列表大小默认 200 行封顶（D06c 已批准）。**超限行为**：行数超过 200 时返回 `result_too_large`（422），**不静默截断**；元数据列表分页留待后续任务 |
 | 是否访问目标数据库 | **否**（仅元数据库） |
 | 是否创建 Execution | 否 |
 | 是否追加 AuditEvent | **D05b 已批准**：连接列表读取**不**写 AuditEvent；保留脱敏指标与服务端日志。连接/凭证变更 E1-E8 仍照常审计 |
@@ -213,14 +222,14 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 |---|---|
 | 授权条件（每次请求重新检查） | ① 成员资格（可读角色）；② 连接归属该 workspace（`ConnectionByID`，不存在/跨工作区统一 `connection_not_found`）；③ `ConnectionPolicy.AllowRead == true`。**授权通过后才解析凭证**（阶段 C' 顺序，凭证失败 Adapter/目标库 0 次访问） |
 | 请求字段 | 路径 `connection_id`；query `schema`、`table`（可选，依赖路由层级） |
-| 标识符处理 | `schema`/`table` 为**参数绑定**（不拼接进 SQL 字符串由驱动转义；`adapter` 内部经 `quoteIdent` 处理 + `validIdent` 校验，但 HTTP 边界仍需长度/字符白名单并参数化） |
+| 标识符处理 | HTTP 边界先校验长度（≤63 字符）与字符白名单；`schema`/`table` 作为 **information_schema 查询的值参数**经驱动参数绑定（`pgTables/pgColumns` 用 `table_schema=$1`/`table_name=$2`，`mysqlTables/mysqlColumns` 用 `?`），**不是标识符拼接**。仅当未来出现将用户输入作为标识符拼接的路径时，才需按方言 `quoteIdent`。补充标识符注入负向测试（CT-16） |
 | "授权 Schema"语义 | 仅表示**连接级授权 ∩ 目标数据库原生可见性**的交集；P0 **不新增逐 Schema ACL**（**D04 已批准**）。目标库内存在但用户原生权限不可见的 schema/table 不返回，且不提示其存在 |
 | 成功状态码 | `200 OK` |
-| 成功响应 DTO | schemas：`[{ "name": "public", "catalog": "db" }]`；tables：`[{ "schema","name","type": "TABLE|VIEW" }]`；columns：`[{ "name","ordinal","native_type","nullable","has_default" }]`（对齐 `adapter` Schema/Table/Column 结构，§15） |
+| 成功响应 DTO | schemas：`[{ "name": "public", "catalog": "db" }]`；tables：`[{ "schema","name","type": "TABLE / VIEW" }]`；columns：`[{ "name","ordinal","native_type","nullable","has_default" }]`（对齐 `adapter` Schema/Table/Column 结构，§15） |
 | 空数据语义 | `200` + 空数组；不返回 404 |
 | 错误码 | `invalid_scope`、`unauthorized`、`forbidden`、`connection_not_found`、`policy_not_configured`(404)、`read_not_allowed`(403)、`connection_busy`、`database_error`、`internal_error` |
-| 超时/取消 | 每次浏览操作有界超时（复用 `connAcquireTimeout` 语义），HTTP 取消传播并归还连接 |
-| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b） |
+| 超时/取消 | 每次浏览操作**有界超时**：目标库连接获取默认 5s、上限 15s（复用 `connAcquireTimeout` 语义）；配置缺失/非法时 fail-closed 拒绝；HTTP 取消传播到目标库并归还连接 |
+| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断** |
 | 是否访问目标数据库 | **是**（`PoolHandle.Schemas/Tables/Columns`）；每次浏览重新获取连接，不做无界缓存 |
 | 是否创建 Execution | 否（Schema 浏览不是 SQL 执行；不创建 `executions` 行） |
 | 是否追加 AuditEvent | **D05a 已批准**：Schema 树逐节点读取**不**写 AuditEvent；保留脱敏指标与服务端日志。未来若新增显式 Schema 刷新任务，再通过独立事件契约决定审计 |
@@ -240,7 +249,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 ```json
 {
   "connection_id": "uuid",
-  "sql": "SELECT * FROM t WHERE id = $1",
+  "sql": "SELECT * FROM t ORDER BY id LIMIT 100",
   "page_size": 100,
   "order_by": [ { "column": "id", "order": "ASC", "nulls_last": false } ]
 }
@@ -249,10 +258,10 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 字段 | 公开？ | 说明 |
 |---|---|---|
 | `connection_id` | 是 | 必填，UUID；不存在/跨工作区统一 `connection_not_found` |
-| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；原始 SQL 不进入日志/错误/审计 |
+| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**请求 SQL 不得包含未绑定参数占位符（`$N`/`?`/具名参数）**，**禁止客户端自行内联用户输入**；原始 SQL 不进入日志/错误/审计 |
 | `page_size` | 是 | 可选；0 用默认；**服务端钳制** ≤ 500 且 ≤ effectiveMaxRows（客户端不可提高上限） |
 | `order_by` | 是（意图字段） | 可选；**只是请求意图，不是唯一性证明**；唯一性只由 `VerifySortPlan` 产生（ADR-014） |
-| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）；SQL 内参数化占位符由调用方自行内联或走非参数化路径 |
+| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含 `$N`/`?`/具名参数占位符的 SQL 无绑定值来源，**服务端一律拒绝**（`sql_parse_error`/`statement_not_allowed`），不允许客户端内联值绕过参数化边界 |
 | `engine` | 否 | 服务端从 `Connection.Engine` 派生（`pipeline.go:196-200`） |
 | `workspace_id`/`user`/`actor`/`trace` | 否 | 服务端 Principal/路由派生；客户端提交覆盖一律忽略 |
 | `policy max_rows`/`timeout` | 否 | 服务端策略上限；客户端 `page_size` 只可缩小不可放大 |
@@ -266,11 +275,10 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 ```json
 {
   "data": {
-    "columns": [ { "name": "id", "data_type": "int4" } ],
-    "rows": [ [1, "a"], [2, "b"] ],
+    "columns": [ { "name": "id", "wire_type": "int" }, { "name": "name", "wire_type": "text" } ],
+    "rows": [ ["1", "a"], ["2", "b"] ],
     "returned_rows": 2,
-    "total_returned": 2,
-    "next_page_token": "opaque-64-hex"
+    "total_returned": 2
   },
   "meta": {
     "page": { "page_size": 100, "has_more": false },
@@ -279,7 +287,8 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 }
 ```
 
-- `next_page_token` 只在"需要分页 且 VerifiedSortPlan 有效 且确有后续页"时出现；单页受限请求（effectiveMaxRows ≤ page_size）不得发 token（ADR-014）。
+- `next_page_token` 只在"需要分页 且 VerifiedSortPlan 有效 且确有后续页"时出现；单页受限请求（effectiveMaxRows ≤ page_size）不得发 token（ADR-014）。上例 `has_more=false` 故**不含 token**。
+- `columns[].wire_type` 为**必需**字段（D08，决定前端解码）；数据库原生 `data_type`（如 `int4`）为可选辅助字段。整数/decimal 结果以十进制字符串返回（如 `"1"`）。
 - `meta.audit` 为**审计 receipt**（§11，**D14 已批准**）：`state`、`audit_event_id`、`execution_id`、服务端生成的 `trace_id`、`outcome`。
 
 ### 8.3 语义
@@ -294,6 +303,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 分页前置 | `requiresPagination` 时无有效 VerifiedSortPlan → `unsupported_query`（422），目标库 0 访问 |
 | 超时 | 服务端 `StatementTimeoutMs` 生效；响应超时见 §12 |
 | 取消 | transport abort（D13 已批准）：HTTP 断开取消数据库查询；Execution/审计在独立有界 context 终结；浏览器用本地取消状态 |
+| 结果脱敏边界 | P0-06 **不提供结果列值脱敏**；控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007，§14）。演示库账号不得有读取密钥承载表权限 |
 
 ---
 
@@ -472,11 +482,14 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 整数（int）及任意精度 decimal | **十进制字符串**（`"123"`/`"123.45"`，防精度丢失） |
 | boolean | JSON boolean（`true`/`false`） |
 | 有限浮点（float） | JSON number |
-| 时间（timestamp/timestamptz/date/time） | 规范字符串（ISO-8601 UTC，`RFC3339`） |
+| date | `YYYY-MM-DD`（保留原语义，**不 UTC 归一化**） |
+| time / time(p) | `HH:MM:SS[.ffffff]`（保留原语义，**不 UTC 归一化**） |
+| timestamp / timestamp(p) without time zone | `YYYY-MM-DDTHH:MM:SS[.ffffff]`（无时区后缀，**不转换**） |
+| timestamptz / timestamp(p) with time zone | ISO-8601 UTC（`RFC3339`） |
 | binary（bytea/blob） | Base64 字符串 |
 | JSON/JSONB | 有界 `json_text`（透传 JSON，实施带字节上限） |
 | 其他文本/枚举/UUID/网络类型 | 字符串（数据库驱动文本表示） |
-| 超大值（> MaxCellBytes） | 截断或拒绝（`result_too_large`/`internal_error`），`MaxCellBytes` 默认 256 KiB（`types.go:127`） |
+| 超大值（> MaxCellBytes） | **拒绝**：返回 `result_too_large`（422），**不静默截断、不提供截断标记路径**；`MaxCellBytes` 默认 256 KiB（`types.go:127`） |
 | 列元数据 | 每列携带稳定 `wire_type`（决定前端解码方式） |
 
 - 空数据语义：空数组 `[]` 或空对象，不返回 null 的 data。
@@ -502,9 +515,10 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 - **可信边界内部**：方言/Engine/Environment/Policy 上限/Actor/trace 全部服务端派生；凭证在授权+策略通过后才解析（阶段 C'），失败时 Adapter/目标库 0 次访问。
 - **防枚举**：`connection_not_found`/`policy_not_configured` 统一 404，不区分不存在/跨工作区/不可见；Schema 层不提示目标库内不可见对象的存在。
 - **防重放**：pagination token 单次使用 + digest 存储 + 原子 claim/Rotate；claim 后不恢复。
-- **防注入**：schema/table 标识符参数绑定；SQL 单语句 AST fail-closed；MySQL ECM lexer 前置。
+- **防注入**：schema/table 作为 information_schema 查询的**值参数**绑定（非标识符拼接）；SQL 单语句 AST fail-closed；MySQL ECM lexer 前置。
 - **审计完整**：append-only；审计失败扣留结果；`$SECURITY_ALERT` 告警；D11 原子提交延续。
-- **资源有界**：连接池上限（ADR-008）、准入（ADR-016）、分页容量（ADR-015）、无无界队列/缓存。
+- **资源有界**：连接池上限（ADR-008）、准入（ADR-016）、分页容量（ADR-015）、无无界队列/缓存；列表/浏览超限 `result_too_large` 不静默截断（§6/§7）。
+- **查询结果脱敏边界**：P0-06 **不提供结果列值脱敏**。安全控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007）：演示/测试库账号不得授予读取凭据/KEK/密钥承载表或危险函数（SECURITY DEFINER）的权限。服务端结果列脱敏不在 P0-06 范围，如需须新 ADR 并经 Owner 批准。响应 canary 只断言不含 WebDB 自身凭据/KEK/连接串（CT-11 扩展覆盖 API 响应）。
 - **残余风险（接受后继续有效）**：SELECT 函数副作用无 session 级只读事务保护（R5）；Go 无法保证内存清零（R1）；服务重启 token 失效（R7）。
 
 ---
@@ -614,10 +628,15 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | CT-08 | 取消/超时/panic 后资源释放 | 连接归还、permit Release、无遗留 pending/running |
 | CT-09 | 429 + Retry-After | `rate_limited`/`connection_busy`/`pagination_capacity_exhausted` |
 | CT-10 | 审计失败扣留结果 | 返回 `audit_failed`，不返回结果，execution 为终态 |
-| CT-11 | SQL/Args/password/token canary 不进入日志/错误/审计 | 全链路扫描 |
+| CT-11 | SQL/Args/password/token/KEK canary 不进入日志/错误/审计/**API 响应** | 全链路扫描（含响应） |
 | CT-12 | 错误响应不含内部码/原始错误/trace_id；receipt 的 trace_id 仅服务端生成 | 固定安全摘要 |
-| CT-13 | 结果 wire 类型与列 `wire_type` 一致（decimal 字符串、bool、浮点 number、时间字符串、binary Base64、NULL null） | 解码与 D08 一致 |
+| CT-13 | 结果 wire 类型与列 `wire_type` 一致（decimal 字符串、bool、浮点 number、时间字符串、binary Base64、NULL null；date/time/timestamp 无时区不 UTC 归一化） | 解码与 D08 一致 |
 | CT-14 | 连接列表/Schema 浏览不产生 AuditEvent（D05a/D05b） | 审计表无对应事件；脱敏指标/日志保留 |
+| CT-15 | 请求 SQL 含 `$N`/`?`/具名占位符（无 args 绑定） | 拒绝（`sql_parse_error`/`statement_not_allowed`），Adapter 0 次 |
+| CT-16 | schema/table 标识符注入（`;`/`--`/引号/超长） | 长度/字符校验拒绝，Adapter 0 次 |
+| CT-17 | 连接列表/Schema 列表超限（>200/>1000） | `result_too_large`(422)，不静默截断 |
+| CT-18 | 演示 Principal 缺失/非法/角色无效 | 启动 fatal 或请求 `unauthorized`；无零值/默认/客户端回退 |
+| CT-19 | 元数据浏览超时/取消后连接归还 | 超时/取消触发，连接归还，无遗留 |
 
 ### 19.2 E2E（Compose）
 
@@ -672,3 +691,4 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 2026-08-08 | 初版 Draft — 提交 Owner Gate（状态：Pending）。全部 D01-D18 待 Owner 决定；未实现任何 API。 |
 | 2026-08-08 | 独立审查修复：§12.1 错误码映射批准状态改为"业务码已批准；HTTP 映射待批准"（后随 Owner Gate 批准）；D05a/D05b/D15d 编号引用修正；§8.2 JSON 注释移出；删除含真实 Google token 的 `docs/frontend design/.env`（token 已暴露，需用户轮换）。 |
 | 2026-08-08 | **Owner Gate 通过（fujiabao89）**：D01–D18 全部批准。D05a（连接/Schema 浏览不写 AuditEvent）、D08（wire 类型：decimal/整数十进制字符串、bool、浮点 number、时间规范字符串、binary Base64、JSON 有界 json_text、NULL null、列 wire_type）、D11（每物理页独立 Execution + 返回页面前持久化 AuditEvent）、D13（仅 transport abort）、D14（receipt 含服务端 trace_id，不作为授权凭证）、D15f（公共 API 仅 query_timeout/query_cancelled，历史兼容读取）专项决定；状态由 Draft 更新为已批准。 |
+| 2026-08-08 | 响应 Greptile（1 条）与 CodeRabbit（13 条）PR 审查：§3 区分"绝不接收/可接收不得控制"（Engine/Environment 可见性）；D01b fail-closed（启动 fatal/unauthorized）；`meta` 必需性；连接/Schema 列表超限 `result_too_large` 不静默截断；元数据超时边界（5s/10s/15s）；标识符处理澄清为 information_schema 值参数绑定（非 quoteIdent 拼接）；`TABLE / VIEW`；查询结果脱敏边界明确（P0 不提供列值脱敏，需新 ADR）；请求示例去占位符并禁止内联参数；响应示例去 token 且加 `wire_type`；date/time/timestamp 无时区与 timestamptz 分开定义；超大值拒绝不截断；CT-11 覆盖响应、新增 CT-15..19。 |
