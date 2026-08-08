@@ -261,9 +261,13 @@ jobs:
               echo "审查输出格式校验通过"
               exit 0
             else
-              echo "审查输出格式不合格（尝试 $attempt），模型输出如下："
-              echo "----- model-output.md (head -100) -----"
-              head -100 "$ctx/model-output.md" >&2 || true
+              echo "审查输出格式不合格（尝试 $attempt）"
+              echo "----- model-output size=$(wc -c < "$ctx/model-output.md" 2>/dev/null || echo 0) lines=$(wc -l < "$ctx/model-output.md" 2>/dev/null || echo 0) -----"
+              echo "----- model-output base64 (前 6000 字符) -----"
+              base64 -w0 "$ctx/model-output.md" 2>/dev/null | head -c 6000 || true
+              echo ""
+              echo "----- model-error tail -----"
+              tail -30 "$ctx/model-error.log" 2>/dev/null || true
               echo "----- end -----"
               printf '\n\n以上输出格式不合格，原因见校验器报错。请严格按 PROMPT 指定的格式重新输出完整审查。\n' >> "$prompt_file"
             fi
