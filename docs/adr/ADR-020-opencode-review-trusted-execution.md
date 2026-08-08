@@ -27,7 +27,7 @@ WEB-32 的 `opencode-review.yml` 原基于 `anomalyco/opencode/github` action。
 
 1. **agent 完全禁用 bash**；不再使用 `git diff*`/`git show*` 通配白名单。agent 仅通过 `read`/`glob`/`grep`/`list` 读取工作区与受信上下文；`edit`/`write`/`webfetch` 一律 deny。
 2. **受信上下文准备**：模型启动前由受信 workflow 步骤生成只读上下文到 `$RUNNER_TEMP/review-context/`：base 的可信 `AGENTS.md`、完整 PR diff、PR 元数据、CI check rollup、证据限制说明。模型不持有 `GITHUB_TOKEN`，只能读这些文件与工作区。
-3. **执行方式无自动提交路径**：弃用 `anomalyco/opencode/github` action 的 `github run` 子命令（其含 `branchIsDirty → git add && git commit && git push`）。改为直接调用固定版本的 `opencode run --no-share`，该子命令无自动 commit/push 逻辑。
+3. **执行方式无自动提交路径**：弃用 `anomalyco/opencode/github` action 的 `github run` 子命令（其含 `branchIsDirty → git add && git commit && git push`）。改为直接调用固定版本的 `opencode run --no-share`，该子命令无自动 commit/push 逻辑。**已验证的 CLI 参数行为**：v1.18.15 的 `-f/--file` 为 array 选项，会贪婪吞并其后所有位置参数，故消息文本必须置于 `-f` 之前（`opencode run <消息> -f <文件>`）；`-f <文件> <消息>` 会把消息误当文件路径导致 `File not found: <消息>`（2026-08-08 在真实 runner 与本地 v1.18.15 均复现）。
 4. **固定 CLI 运行时**：固定 `opencode-linux-x64.tar.gz` v1.18.15 并校验 sha256（`d842e0e8…`，已实际下载计算）。安装步骤下载固定 URL 压缩包 + `sha256sum -c` 校验，无 `curl | bash`、无 `latest`、无可变 tag。工作流内所有 action 只允许 `actions/checkout@11d5960a…`（完整 SHA）。
 5. **模型与发布分离**：模型步骤只持 `DEEPSEEK_API_KEY`（不持 `GITHUB_TOKEN`）；输出写入 `$RUNNER_TEMP`。受信发布步骤持 `GITHUB_TOKEN`，只发布已通过格式校验的输出，不追加 footer/session 链接。
 6. **Task/CI 证据 fail closed**：受信上下文提供真实 CI check rollup；Linear WEB-32 为空且本任务未获 Linear 凭据授权，审查输出须为 `ESCALATE`/证据不足，不得声称完成协议要求。新增 Linear 凭据/外部网络/身份策略属高风险，须先升级 Owner 并经新 ADR 批准。
