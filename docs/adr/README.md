@@ -22,3 +22,5 @@
 | [016](ADR-016-admission-reservation-before-execution.md) | Admission 预留与 Execution 创建时序 | 已接受 |
 | [017](ADR-017-p0-credential-envelope-audit-failure.md) | P0 凭证信封加密、KEK 生命周期与审计失败策略 | 已接受 |
 | [018](ADR-018-prod-roles-under-compose-exception.md) | 生产角色拆分脚本暂驻 deploy/compose 的有期限例外 | 已接受 |
+| [019](ADR-019-opencode-review-bounded-automation.md) | opencode 自动 PR 审查的受限自动化边界 | 已接受（ADR-020 拟替代，待 Owner 批准） |
+| [020](ADR-020-opencode-review-trusted-execution.md) | opencode 自动审查的受信执行架构（拟替代 ADR-019） | 提议 |

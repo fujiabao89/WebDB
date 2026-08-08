@@ -56,6 +56,14 @@ jobs:
           test -s .github/PULL_REQUEST_TEMPLATE.md
           test -s .github/CODEOWNERS
 
+  # opencode-review.yml 的回归测试：受信校验器/harness 必须来自 base 的受保护版本，
+  # 候选 workflow 仅作为数据读取（finding 5）。由于 test/validate-opencode-workflow.sh 随
+  # WEB-32 本 PR 首次引入，base（main）尚不存在受保护版本，因此本 PR 不在 ci.yml 提供
+  # 独立门禁——避免从 PR 可控的 GITHUB_SHA 读取候选脚本造成假独立。
+  # 【阻塞项】独立门禁的 Owner、期限与后续 Linear Task 尚未获得授权：不得声称"有期限例外"
+  # 或"以后接入"。需 Owner 提供上述信息后，方可安排从 base 取受信版本的门禁（见 ADR-020 决策 8）。
+  # 当前回归测试仅由 workflow 内部 Validate workflow invariants 步骤以"非安全自检"方式运行。
+
   web:
     name: Web checks
     runs-on: ubuntu-latest
