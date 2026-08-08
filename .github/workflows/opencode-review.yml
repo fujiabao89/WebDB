@@ -15,7 +15,6 @@ jobs:
   review:
     runs-on: ubuntu-latest
     # HAS_SECRET 只暴露布尔值（secrets 是否非空），不暴露 secret 本身。
-    # 原始 secret 仅在下方 Run 步骤的 env 中注入（P3-2）。
     env:
       HAS_SECRET: ${{ secrets.DEEPSEEK_API_KEY != '' }}
     permissions:
@@ -25,69 +24,113 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          # 检出 PR head 提交，使工作区与下方 gh pr diff（base...head）一致，
+          # 避免冲突 PR 下模型读到的代码与 diff 错位（P3）。
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 1
 
+      # 受信步骤：清除 checkout 持久化到 .git/config 的凭据并校验结果，避免 GITHUB_TOKEN
+      # 残留在 .git/config 中被模型进程读取。仓库存在 orphan gitlink `ecc`（无 .gitmodules），
+      # 实测 actions/checkout 在 persist-credentials: false 下会做 submodule 清理并失败（见 ADR-020），
+      # 因此保留手动清理方案，但不允许静默吞错。
       - name: Remove persisted git credentials
         run: |
-          # 仓库存在 orphan gitlink `ecc`（无 .gitmodules）。实测 actions/checkout@v4/v6 在
-          # persist-credentials: false 下会做 submodule 清理并因 "No url found for submodule path 'ecc'"
-          # 直接失败，因此改为 checkout 后手动清除凭据，这是等效替代（任务约定保留）。
-          # 不允许静默吞错：清除后必须校验 extraheader 已不存在，避免 GITHUB_TOKEN 残留在
-          # .git/config 中被审查 agent 读到并打印进公开评论。
+          set -euo pipefail
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           if git config --local --get-all "http.https://github.com/.extraheader" >/dev/null 2>&1; then
-            echo "::error::persisted git credentials not removed (http.https://github.com/.extraheader still present)" >&2
+            echo "::error::persisted git credentials not removed" >&2
             exit 1
           fi
 
-      # P2-1：审查规则源只信任 base.sha 的根 AGENTS.md。
-      # opencode action 内部会重新 checkout PR head 分支（github.handler.ts 的 checkoutLocalBranch），
-      # 因此本步骤先把工作区切到 head 分支，再删除工作区全部 AGENTS.md（含子目录与 .opencode/），
-      # 用 base.sha 的可信根 AGENTS.md 覆盖，并把这些变更标记 skip-worktree——
-      # 否则 action 的 branchIsDirty 会把删除动作 commit+push 到 PR 分支。
-      # 同时把可信 AGENTS.md 写入 opencode 全局配置目录（始终加载）。
-      # 仅当 secret 存在（同仓库 PR 且已配置 DEEPSEEK_API_KEY）时执行：fork PR 不传递 secrets，
-      # 且 origin 无 fork 分支 ref，git fetch 必然失败；无 secret 时审查本应跳过（见 P2-3）。
-      - name: Use trusted AGENTS.md from base ref
+      # 非安全自检（finding 5）：对本 workflow 做静态不变量校验。由于本脚本随本 PR 首次引入、
+      # 与候选 workflow 同源，只防良性漂移、不是独立安全边界；受信门禁待脚本进入 base 后另行接入。
+      # 仅在具备 secret（同仓库 PR）时执行，避免 fork PR 无谓消耗 runner。
+      - name: Validate workflow invariants
         if: ${{ env.HAS_SECRET == 'true' }}
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
-          # 复刻 action 内部的 head 分支 checkout，使下面的工作区修改对审查会话生效。
-          # source-only fetch 只更新 FETCH_HEAD，不保证本地分支存在，故用 --detach 直接检出。
-          git fetch origin --depth=1 "$HEAD_REF"
-          git checkout --detach FETCH_HEAD
-          # 删除工作区全部指令文件 AGENTS.md/CLAUDE.md/CONTEXT.md（含子目录与 .opencode/），
-          # 阻断恶意 PR 的嵌套规则注入。opencode 的 instructionFiles 包含这三者。
-          find . -path ./.git -prune -o -type f \( -iname 'AGENTS.md' -o -iname 'CLAUDE.md' -o -iname 'CONTEXT.md' \) -print0 | xargs -0 -r rm -f --
-          rm -rf -- .opencode
-          # 从 base.sha 拉取可信根 AGENTS.md（P3-1：经 env 传递，避免模板表达式直插脚本）。
-          curl -sf \
-            --max-time 30 \
-            --retry 3 \
-            --retry-connrefused \
-            --header "Authorization: Bearer $GITHUB_TOKEN" \
+          # 聚合入口运行全部确定性测试（finding 4）；非安全自检，不是独立安全门禁
+          bash "$GITHUB_WORKSPACE/.github/scripts/test-opencode-review.sh"
+
+      # 受信步骤：在模型启动前生成只读审查上下文（P0）。本步骤持有 GITHUB_TOKEN，
+      # 输出到 $RUNNER_TEMP/review-context/（纯文本，不含 secret）。模型进程不持有
+      # GITHUB_TOKEN，只能通过 read/glob/grep/list 读取本目录与工作区。
+      - name: Prepare trusted review context
+        if: ${{ env.HAS_SECRET == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/review-context"
+          mkdir -p "$ctx"
+          # 可信规则：base.sha 的根 AGENTS.md（P3-1：经 env 传递，避免模板表达式直插脚本）
+          curl -sf --max-time 30 --retry 3 --retry-connrefused \
+            --header "Authorization: Bearer $GH_TOKEN" \
             --header "Accept: application/vnd.github.raw+json" \
             --header "X-GitHub-Api-Version: 2022-11-28" \
             "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/AGENTS.md?ref=$BASE_SHA" \
-            > AGENTS.md
-          test -s AGENTS.md
-          mkdir -p "$HOME/.config/opencode"
-          cp AGENTS.md "$HOME/.config/opencode/AGENTS.md"
-          # 隐藏规则文件变更，保持 git status 干净，防止 action 自动 commit+push。
-          git ls-files -z | while IFS= read -r -d '' f; do
-            case "$f" in
-              AGENTS.md|*/AGENTS.md|CLAUDE.md|*/CLAUDE.md|CONTEXT.md|*/CONTEXT.md|.opencode/*)
-                git update-index --skip-worktree -- "$f" || true
-                ;;
-            esac
-          done
+            > "$ctx/AGENTS.md"
+          test -s "$ctx/AGENTS.md"
+          # 完整 PR diff（读 API，非工作区 git）
+          gh pr diff "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" > "$ctx/pr.diff"
+          test -s "$ctx/pr.diff"
+          # PR 元数据：title/body/author/分支/文件/提交（body 仅作参考，不作 Task 权威证据）
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json title,body,author,headRefName,baseRefName,additions,deletions,files,commits \
+            > "$ctx/pr-meta.json"
+          # CI check rollup（结构化 JSON）。fetch-ci-rollup.sh 处理 exit 0/8/真实失败：
+          # pending（自身 review job 必然 pending）保留为有效证据，只有真实失败才 CI_EVIDENCE_UNAVAILABLE。
+          bash "$GITHUB_WORKSPACE/.github/scripts/fetch-ci-rollup.sh" \
+            "$PR_NUMBER" "$GITHUB_REPOSITORY" "$ctx/ci-checks.json" gh || true
+          test -s "$ctx/ci-checks.json"
+          # 通用 Task 证据：当前无受信 Task 来源（未接入 Linear 等，未经 Owner 批准不得新增
+          # 身份/网络方案）。PR 标题/分支中的 Issue ID 仅作不受信参考，不得声称已读取其任务卡。
+          printf '%s\n' "TASK_EVIDENCE_UNAVAILABLE" > "$ctx/task-evidence.txt"
+          printf '%s\n' \
+            "TASK_EVIDENCE_UNAVAILABLE: no trusted Task source is connected (no Owner-approved identity/network)." \
+            "Any Issue ID parsed from the PR title or branch is an UNTRUSTED reference only; do not claim to have read its task card." \
+            "PR body / author statements / prior bot comments are NOT authoritative Task or CI evidence." \
+            "Use ci-checks.json for the actual check rollup." \
+            "If ci-checks.json contains CI_EVIDENCE_UNAVAILABLE or task-evidence.txt contains TASK_EVIDENCE_UNAVAILABLE, the required conclusion is ESCALATE." \
+            > "$ctx/evidence-limits.txt"
+          # 计算 required conclusion：CI 或 Task 证据不足时程序化强制 ESCALATE（finding 二/三）
+          if grep -q 'CI_EVIDENCE_UNAVAILABLE' "$ctx/ci-checks.json" || grep -q 'TASK_EVIDENCE_UNAVAILABLE' "$ctx/task-evidence.txt"; then
+            printf '%s\n' "ESCALATE" > "$ctx/required-conclusion.txt"
+          else
+            : > "$ctx/required-conclusion.txt"
+          fi
+          echo "review context prepared: $(ls "$ctx" | tr '\n' ' ')"
 
-      - name: Configure review agent permissions
+      # 受信步骤：安装固定版本 OpenCode CLI（P1）。固定 URL + sha256 校验，无 curl|bash、
+      # 无 latest、无可变 tag。二进制为 linux-x64（GitHub runner 环境）。
+      - name: Install pinned OpenCode CLI
+        if: ${{ env.HAS_SECRET == 'true' }}
         run: |
+          set -euo pipefail
+          OPENCODE_VERSION="v1.18.15"
+          OPENCODE_SHA256="d842e0e8c622c672a481b7dc6f0329009b64db96b2ba6041e56f4f93f0293b1c"
+          install_dir="$RUNNER_TEMP/opencode"
+          mkdir -p "$install_dir"
+          archive="$install_dir/opencode-linux-x64.tar.gz"
+          curl -sfL --max-time 300 --retry 3 \
+            "https://github.com/anomalyco/opencode/releases/download/$OPENCODE_VERSION/opencode-linux-x64.tar.gz" \
+            -o "$archive"
+          # 校验和验证（真实值，已实际下载计算）
+          echo "$OPENCODE_SHA256  $archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$install_dir"
+          chmod +x "$install_dir/opencode"
+          echo "opencode installed: $($install_dir/opencode --version 2>/dev/null | head -1)"
+
+      # 受信步骤：配置 agent 最小权限。bash 完全禁用（P0）；edit/write/webfetch deny；
+      # 只允许 read/glob/grep/list。external_directory（已确认在 ConfigPermissionV1 schema，
+      # v1.18.15）放行临时上下文目录。share 用 schema 合法值 "disabled"（仅接受 manual/auto/disabled
+      # 字符串；布尔 false 会使整个配置加载失败），并辅以模型步骤的 --no-share。
+      - name: Configure review agent permissions
+        if: ${{ env.HAS_SECRET == 'true' }}
+        run: |
+          set -euo pipefail
           mkdir -p "$HOME/.config/opencode"
           cat > "$HOME/.config/opencode/opencode.json" <<EOF
           {
@@ -100,80 +143,117 @@ jobs:
               "edit": "deny",
               "write": "deny",
               "webfetch": "deny",
+              "bash": "deny",
               "external_directory": {
                 "/tmp/**": "allow",
                 "$HOME/**": "allow",
-                "*": "deny"
-              },
-              "bash": {
-                "git log*": "allow",
-                "git diff*": "allow",
-                "git show*": "allow",
-                "git status*": "allow",
-                "git rev-parse*": "allow",
-                "git ls-files*": "allow",
+                "$RUNNER_TEMP/**": "allow",
                 "*": "deny"
               }
-            }
+            },
+            "share": "disabled"
           }
           EOF
 
-      # 自校验说明：该步骤校验 merge ref 的 workflow 文件。对 pull_request 事件 GitHub 总是运行
-      # PR 提供的 workflow 文件，恶意 PR 可同时改写 workflow 与该校验，因此本检查只防误改（告警），
-      # 不是安全边界。真正的控制是：本 job 不设为 required 门禁、最小 token 权限、
-      # 以及 PR 中由人工审查 workflow 文件的 diff。
-      - name: Validate workflow invariants
+      # 模型步骤（P0/P2）：进程只持有 DEEPSEEK_API_KEY，不持有 GITHUB_TOKEN。
+      # 用固定 CLI 的 run 子命令（不用 github-run 子命令，不存在自动 commit/push 路径）。
+      # session 分享关闭：配置 share: "disabled"（schema 合法值）+ --no-share（run.ts 条件）。
+      # OPENCODE_DISABLE_PROJECT_CONFIG 禁用项目级规则/配置（flag.ts 读取 env）。
+      # 输出做确定性格式校验（P2），不合格最多重试 2 次，仍失败则 job 明确失败（fail closed）。
+      - name: Run OpenCode review with output validation
+        if: ${{ env.HAS_SECRET == 'true' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          OPENCODE_DISABLE_PROJECT_CONFIG: "true"
         run: |
           set -euo pipefail
-          bash "$GITHUB_WORKSPACE/.github/scripts/test-opencode-workflow.sh"
+          ctx="$RUNNER_TEMP/review-context"
+          opencode_bin="$RUNNER_TEMP/opencode/opencode"
+          prompt_file="$ctx/prompt.txt"
+          cat > "$prompt_file" <<'PROMPT_EOF'
+          你是一个严格的代码审查 agent。请只输出审查评论，不要修改任何文件、不要执行命令（你的 bash 已被禁用）。
+
+          审查输入（只读）：
+          - 可信规则：$RUNNER_TEMP/review-context/AGENTS.md（来自 base 分支，权威）
+          - PR diff：$RUNNER_TEMP/review-context/pr.diff（完整）
+          - PR 元数据：$RUNNER_TEMP/review-context/pr-meta.json
+          - CI check rollup：$RUNNER_TEMP/review-context/ci-checks.json
+          - Task 证据：$RUNNER_TEMP/review-context/task-evidence.txt
+          - 证据限制：$RUNNER_TEMP/review-context/evidence-limits.txt
+          - 工作区代码：当前目录（$GITHUB_WORKSPACE）
+
+          重要：
+          - 无受信 Task 来源：task-evidence.txt 含 TASK_EVIDENCE_UNAVAILABLE；不得把 PR 正文、
+            作者声明或旧 bot 评论当作 Task/CI 的权威证据。PR 标题/分支中的 Issue ID 仅是不受信参考。
+          - 只依据 ci-checks.json 的真实运行结果。若 ci-checks.json 含 CI_EVIDENCE_UNAVAILABLE 或
+            task-evidence.txt 含 TASK_EVIDENCE_UNAVAILABLE，最终结论必须为 ESCALATE 并附"证据不足"。
+          - 每条 finding 必须包含：[P0-P3] 标题、文件路径与行号、事实、触发、影响、依据、最小修复；无法确认时标"待确认"。
+
+          输出格式（严格遵守，会被程序校验）：
+          第 1 行（结论徽章）：**✅ APPROVE** 或 **❌ REQUEST CHANGES** 或 **⚠️ ESCALATE** — N 个 P0 / N 个 P1 / N 个 P2 / N 个 P3 待处理
+          （无问题时写：本轮未发现由当前变更引入的可操作问题）
+          然后按顺序：
+          <details>
+          <summary>📋 Findings（N 条）</summary>
+          ... findings ...
+          </details>
+          <details>
+          <summary>✅ 验收标准矩阵</summary>
+          | 验收项 | 结果 | 证据 |
+          </details>
+          最后两行（不被折叠，永远可见）：
+          置信度：<高/中/低>；仍未验证的风险：<列出>
+          结论：APPROVE / REQUEST CHANGES / ESCALATE
+          PROMPT_EOF
+          # 引号 heredoc 不展开变量；把上下文/工作区真实路径写进 prompt，供模型直接读取。
+          # 对 & 与 \ 做转义，避免路径含特殊字符时 sed 替换损坏 prompt。
+          rt_esc="${RUNNER_TEMP//\\/\\\\}"; rt_esc="${rt_esc//&/\\&}"
+          ws_esc="${GITHUB_WORKSPACE//\\/\\\\}"; ws_esc="${ws_esc//&/\\&}"
+          sed -i "s|\$RUNNER_TEMP|$rt_esc|g; s|\$GITHUB_WORKSPACE|$ws_esc|g" "$prompt_file"
+
+          # required conclusion（受信步骤计算；空则不强制）传给校验器作程序约束（finding 二）
+          required_flag=""
+          if [ -s "$ctx/required-conclusion.txt" ]; then
+            required_flag="--required $(cat "$ctx/required-conclusion.txt")"
+          fi
+
+          for attempt in 1 2 3; do
+            echo "=== 审查尝试 $attempt/3 ==="
+            if ! "$opencode_bin" run --model deepseek/deepseek-v4-flash --no-share \
+                -f "$prompt_file" "请按附加文件中的审查要求执行，只输出审查评论" \
+                > "$ctx/model-output.md" 2>"$ctx/model-error.log"; then
+              echo "opencode run 失败（尝试 $attempt）"
+              tail -20 "$ctx/model-error.log" >&2 || true
+              # 运行失败（非格式问题）：追加运行失败说明，避免误导为格式问题
+              printf '\n\n上次执行未能完成（运行错误，非格式问题）。请重新按要求输出完整审查。\n' >> "$prompt_file"
+            elif python3 "$GITHUB_WORKSPACE/.github/scripts/validate-review-output.py" \
+                $required_flag "$ctx/model-output.md"; then
+              cp "$ctx/model-output.md" "$ctx/model-output.validated.md"
+              echo "审查输出格式校验通过"
+              exit 0
+            else
+              echo "审查输出格式不合格（尝试 $attempt），追加修正说明后重试"
+              printf '\n\n以上输出格式不合格，原因见校验器报错。请严格按 PROMPT 指定的格式重新输出完整审查。\n' >> "$prompt_file"
+            fi
+          done
+          echo "::error::审查输出在 3 次尝试后仍不合格（fail closed）" >&2
+          exit 1
+
+      # 受信步骤：发布评论。持有 GITHUB_TOKEN，不持有 DEEPSEEK_API_KEY。
+      # 只发布已通过格式校验的内容，不追加任何 footer/session 链接（P0/P2）。
+      - name: Publish review comment
+        if: ${{ env.HAS_SECRET == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          ctx="$RUNNER_TEMP/review-context"
+          test -s "$ctx/model-output.validated.md"
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$ctx/model-output.validated.md"
 
       # P2-3：secret 缺失（如 fork PR 不传递 secrets）时显式提示跳过，避免绿检空转。
       - name: Notice when review is skipped
         if: ${{ env.HAS_SECRET != 'true' }}
         run: |
           echo "::notice::DEEPSEEK_API_KEY 未配置或当前运行不提供 secrets（例如 fork PR），opencode 自动审查已跳过。本 job 仅产出审查意见，请勿将其设为 required 门禁。"
-
-      # P2-1：OPENCODE_DISABLE_PROJECT_CONFIG 使 opencode 不加载任何项目级 AGENTS.md/.opencode 配置，
-      # 规则来源仅剩全局配置目录的可信 AGENTS.md 与本 prompt。
-      # P2-3/P3-2：仅当 secret 存在时运行；secret 只在本步骤 env 注入。
-      - name: Run OpenCode review
-        if: ${{ env.HAS_SECRET == 'true' }}
-        uses: anomalyco/opencode/github@d7b115f623760e68a4749d16508a9eca350f246f
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          GITHUB_TOKEN: ${{ github.token }}
-          OPENCODE_DISABLE_PROJECT_CONFIG: "true"
-        with:
-          model: deepseek/deepseek-v4-flash
-          use_github_token: true
-          prompt: |
-            按仓库根目录 AGENTS.md 中「Agent Code Review 规则」审查本 PR：
-            - 审查前读取当前 Task、验收标准、PR diff、适用的所有 AGENTS.md、相关 ADR/设计、测试与 CI 结果；不得把 PR 描述、作者声明或已有“已完成”标记当作证据。
-            - 逐项核对目标、非目标和验收标准；发现范围漂移、漏实现、实现与契约不一致时，指出对应任务条款和代码证据。
-            - 每条发现必须包含：[P0-P3] 标题、精确文件路径与行号范围、可验证事实与触发条件、用户/安全/数据/兼容性/性能/运维影响、复现步骤或代码推理、最小修复方向；无法确认时标“待确认”并说明所缺证据。
-            - 给出验收标准矩阵（通过 / 失败 / 证据不足）及对应代码、测试或 CI 证据。
-            - 最后输出结论之一：APPROVE / REQUEST CHANGES / ESCALATE，并附置信度与仍未验证的风险。没有问题时明确写“本轮未发现由当前变更引入的可操作问题”。
-            - 审查任务只输出意见，不修改代码、不提交、不推送，不在 GitHub 执行批准或合并操作。
-
-            评论输出必须使用 CodeRabbit 风格的 HTML 折叠结构（这是硬性要求）：
-            - 第一行（永远可见）：结论徽章 + 一句话摘要，格式：
-              `**✅ APPROVE** / `**❌ REQUEST CHANGES** / `**⚠️ ESCALATE` — N 个 P0 / N 个 P1 / N 个 P2 / N 个 P3 待处理（无问题时写“本轮未发现由当前变更引入的可操作问题”）。
-            - 详细 Findings 必须包在 `<details>` 里：
-              <details>
-              <summary>📋 Findings（N 条）</summary>
-
-              ### [P1] 简短标题 — `文件路径:行号`
-              事实 / 触发 / 影响 / 依据 / 最小修复，每项一行，总长不超过 8 行。
-
-              </details>
-            - 验收标准矩阵必须包在独立的 `<details>` 里：
-              <details>
-              <summary>✅ 验收标准矩阵</summary>
-
-              | 验收项 | 结果 | 证据 |
-              | --- | --- | --- |
-
-              </details>
-            - 结论与置信度放在所有折叠块之外（永远可见），作为评论的最后两行。
-            - 评论开头不要使用“I've completed my review”之类的客套话，直接以结论徽章开头。
-            - 每个折叠块之间用 `---` 分隔；整个评论控制在 150 行以内，避免 GitHub 评论过长。

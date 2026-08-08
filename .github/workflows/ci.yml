@@ -56,50 +56,13 @@ jobs:
           test -s .github/PULL_REQUEST_TEMPLATE.md
           test -s .github/CODEOWNERS
 
-  # opencode-review.yml 的回归测试独立执行，不依赖被测 workflow 自身的自校验步骤。
-  # 与 pr-policy.yml 一致，通过 GitHub Contents API 从 GITHUB_SHA 拉取测试脚本与
-  # workflow 文件，不使用 actions/checkout：避免把 GITHUB_TOKEN 写入本地 git config
-  # （仓库的 ecc orphan gitlink 使 persist-credentials: false 不可用，见 opencode-review.yml），
-  # 也避免未固定 SHA 的 action 引用。
-  # 注意：脚本随本 PR 首次引入，合并前脚本来源与 PR 相同；合并后本 job 以受保护版本运行，
-  # 成为后续 PR 的独立回归门禁（ADR-019 决策 6）。
-  opencode-review-policy:
-    name: Opencode review workflow invariants
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Fetch opencode workflow policy files
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          policy_root="$RUNNER_TEMP/opencode-policy"
-          mkdir -p "$policy_root/.github/scripts" "$policy_root/.github/workflows"
-          fetch_policy_file() {
-            local source_path=$1
-            local destination=$2
-            local content
-            content="$(
-              curl --fail --silent --show-error \
-                --header "Authorization: Bearer $GH_TOKEN" \
-                --header "Accept: application/vnd.github+json" \
-                --header "X-GitHub-Api-Version: 2022-11-28" \
-                "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/$source_path?ref=$GITHUB_SHA"
-            )"
-            printf '%s' "$content" | jq --exit-status --raw-output '.content' | tr -d '\n' | base64 --decode >"$destination"
-          }
-          fetch_policy_file \
-            '.github/scripts/validate-opencode-workflow.sh' \
-            "$policy_root/.github/scripts/validate-opencode-workflow.sh"
-          fetch_policy_file \
-            '.github/scripts/test-opencode-workflow.sh' \
-            "$policy_root/.github/scripts/test-opencode-workflow.sh"
-          fetch_policy_file \
-            '.github/workflows/opencode-review.yml' \
-            "$policy_root/.github/workflows/opencode-review.yml"
-      - name: Test opencode review workflow invariants
-        run: bash "$RUNNER_TEMP/opencode-policy/.github/scripts/test-opencode-workflow.sh"
+  # opencode-review.yml 的回归测试：受信校验器/harness 必须来自 base 的受保护版本，
+  # 候选 workflow 仅作为数据读取（finding 5）。由于 test/validate-opencode-workflow.sh 随
+  # WEB-32 本 PR 首次引入，base（main）尚不存在受保护版本，因此本 PR 不在 ci.yml 提供
+  # 独立门禁——避免从 PR 可控的 GITHUB_SHA 读取候选脚本造成假独立。
+  # 【阻塞项】独立门禁的 Owner、期限与后续 Linear Task 尚未获得授权：不得声称"有期限例外"
+  # 或"以后接入"。需 Owner 提供上述信息后，方可安排从 base 取受信版本的门禁（见 ADR-020 决策 8）。
+  # 当前回归测试仅由 workflow 内部 Validate workflow invariants 步骤以"非安全自检"方式运行。
 
   web:
     name: Web checks
