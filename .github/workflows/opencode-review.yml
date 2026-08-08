@@ -145,8 +145,11 @@ jobs:
               "webfetch": "deny",
               "bash": "deny",
               "external_directory": {
+                "/tmp/*": "allow",
                 "/tmp/**": "allow",
+                "$HOME/*": "allow",
                 "$HOME/**": "allow",
+                "$RUNNER_TEMP/*": "allow",
                 "$RUNNER_TEMP/**": "allow",
                 "*": "deny"
               }
@@ -154,6 +157,9 @@ jobs:
             "share": "disabled"
           }
           EOF
+          # 诊断：输出实际写入的配置，确认 $HOME/$RUNNER_TEMP 已展开为真实路径
+          echo "----- opencode.json -----"
+          cat "$HOME/.config/opencode/opencode.json"
 
       # 模型步骤（P0/P2）：进程只持有 DEEPSEEK_API_KEY，不持有 GITHUB_TOKEN。
       # 用固定 CLI 的 run 子命令（不用 github-run 子命令，不存在自动 commit/push 路径）。
