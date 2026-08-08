@@ -219,11 +219,13 @@ jobs:
 
           for attempt in 1 2 3; do
             echo "=== 审查尝试 $attempt/3 ==="
-            if ! "$opencode_bin" run --model deepseek/deepseek-v4-flash --no-share \
+            if ! timeout 600 "$opencode_bin" run --model deepseek/deepseek-v4-flash --no-share \
+                --print-logs \
                 "请按附加文件中的审查要求执行，只输出审查评论" -f "$prompt_file" \
+                < /dev/null \
                 > "$ctx/model-output.md" 2>"$ctx/model-error.log"; then
-              echo "opencode run 失败（尝试 $attempt）"
-              tail -20 "$ctx/model-error.log" >&2 || true
+              echo "opencode run 失败（尝试 $attempt，退出码 $?）"
+              tail -50 "$ctx/model-error.log" >&2 || true
               # 运行失败（非格式问题）：追加运行失败说明，避免误导为格式问题
               printf '\n\n上次执行未能完成（运行错误，非格式问题）。请重新按要求输出完整审查。\n' >> "$prompt_file"
             elif python3 "$GITHUB_WORKSPACE/.github/scripts/validate-review-output.py" \
