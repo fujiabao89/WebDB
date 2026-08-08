@@ -125,7 +125,9 @@ jobs:
 
       # 受信步骤：配置 agent 最小权限。bash 完全禁用（P0）；edit/write/webfetch deny；
       # 只允许 read/glob/grep/list。external_directory（已确认在 ConfigPermissionV1 schema，
-      # v1.18.15）放行临时上下文目录。share 用 schema 合法值 "disabled"（仅接受 manual/auto/disabled
+      # v1.18.15）放行临时上下文目录；规则按后定义优先匹配，故不配置 "*" deny 兜底
+      # （否则会吞掉所有放行规则），未匹配请求落到内置 "*" ask → 非交互模式自动拒绝（fail closed）。
+      # share 用 schema 合法值 "disabled"（仅接受 manual/auto/disabled
       # 字符串；布尔 false 会使整个配置加载失败），并辅以模型步骤的 --no-share。
       - name: Configure review agent permissions
         if: ${{ env.HAS_SECRET == 'true' }}
@@ -151,7 +153,8 @@ jobs:
                 "$HOME/**": "allow",
                 "$RUNNER_TEMP/*": "allow",
                 "$RUNNER_TEMP/**": "allow",
-                "*": "deny"
+                "$RUNNER_TEMP/review-context/*": "allow",
+                "$RUNNER_TEMP/review-context/**": "allow"
               }
             },
             "share": "disabled"
