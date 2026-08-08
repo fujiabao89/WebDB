@@ -192,15 +192,6 @@
       "scope": [
         "deploy/compose/**"
       ]
-    },
-    {
-      "path": "docs/adr/ADR-019-opencode-review-bounded-automation.md",
-      "description": "当前已接受的自动审查安全边界；ADR-020 获批前继续生效",
-      "scope": [
-        ".github/**",
-        "docs/adr/ADR-019-opencode-review-bounded-automation.md",
-        "docs/adr/ADR-020-opencode-review-trusted-execution.md"
-      ]
     }
   ]
 }

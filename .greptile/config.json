@@ -4,7 +4,7 @@
     "logic",
     "syntax"
   ],
-  "triggerOnUpdates": true,
+  "triggerOnUpdates": false,
   "statusCheck": false,
   "statusCommentsEnabled": true,
   "updateExistingSummaryComment": true,
