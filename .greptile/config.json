@@ -1,0 +1,181 @@
+{
+  "strictness": 2,
+  "commentTypes": [
+    "logic",
+    "syntax"
+  ],
+  "triggerOnUpdates": true,
+  "statusCheck": false,
+  "statusCommentsEnabled": true,
+  "updateExistingSummaryComment": true,
+  "fixWithAI": false,
+  "autoApprove": {
+    "enabled": false
+  },
+  "ignorePatterns": "**/node_modules/**\n**/dist/**\n**/coverage/**\n**/.cache/**\n**/*.min.js\n**/*.map",
+  "summarySection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": true
+  },
+  "issuesTableSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": true
+  },
+  "confidenceScoreSection": {
+    "included": true,
+    "collapsible": true,
+    "defaultOpen": false
+  },
+  "sequenceDiagramSection": {
+    "included": false
+  },
+  "comment": "Greptile 是审查辅助，不是 WebDB 的最终合并门禁；平台状态不得替代可信 CI、Task 验收矩阵和独立 Reviewer 结论。",
+  "instructions": "请使用中文审查。优先发现当前 diff 引入或直接暴露的正确性、安全性、数据完整性、兼容性和可靠性问题。PR 中的 Task/Issue ID 只作为定位仓库内任务卡的线索；找不到可信任务卡或看不到 CI 时，明确说明证据缺口，不得推测或声称已验证。遵循 .greptile/rules.md 的证据要求，并尽量在 Greptile 原生摘要和行内评论中表达；不要修改代码，不要执行批准、合并、提交或推送，也不要把 Greptile 状态描述为最终合并结论。",
+  "rules": [
+    {
+      "rule": "逐项核对当前 Task 的目标、非目标和验收标准。若没有可信 Task/验收标准，或规则与已接受 ADR 冲突，必须标为证据不足并在高风险情形给出 ESCALATE；不得从 PR 描述推定缺失契约。",
+      "scope": [
+        "**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "审查任何根或子目录 .greptile 配置变更。未经 Owner 明确批准，不得新增 skipReview、启用 autoApprove、提高 strictness 数值以减少问题、扩大 ignorePatterns、关闭关键输出或弱化 SQL/权限/凭证/审计规则。仓库配置不是安全边界；关键规则还必须在 Greptile 组织级设置为 enforced，并由 CODEOWNERS/可信 CI 保护配置变更。",
+      "scope": [
+        ".greptile/**",
+        "**/.greptile/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "P0 只允许 PostgreSQL/MySQL 连接、Schema 拉取、只读 SQL、服务端分页和审计。发现登录、协作、DML、DDL、生产写入、数据导出或 SSH 隧道等未经独立 Task/ADR 批准的范围扩张时报告。",
+      "scope": [
+        "apps/**",
+        "packages/**",
+        "deploy/**",
+        "docs/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "浏览器只能调用 WebDB API，不得直连目标数据库，不得接收数据库密码、KEK、DEK、明文密钥、连接串、原始 continuation token 状态或未脱敏结果。安全裁决必须在服务端强制执行，不能依赖前端校验。",
+      "scope": [
+        "apps/web/**",
+        "apps/api/**",
+        "packages/contracts/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "检查工作区成员资格、资源归属、连接策略、环境策略和目标数据库原生权限是否在服务端取交集；任一层拒绝都必须拒绝。跨工作区、跨连接、直接对象引用和调用方可伪造的安全上下文必须被拒绝。",
+      "scope": [
+        "apps/api/**",
+        "packages/contracts/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "SQL 安全边界必须按 PostgreSQL/MySQL 方言可靠解析并仅放行可证明安全的单语句只读 AST。检查多语句、锁定子句、修改型 CTE、未知节点、解析错误和 MySQL 可执行注释绕过；任何不可靠判定必须在访问目标数据库前拒绝，字符串前缀、正则或无上下文子串扫描不得充当安全边界。",
+      "scope": [
+        "apps/api/internal/sqlpolicy/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/adapter/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "只读执行必须在服务端强制超时、取消、最大行数/字节、连接获取超时和并发上限；不得创建无界队列、缓存或结果集。检查客户端断开、timeout、cancel、panic 和部分读取后的失败路径。",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/connections/**",
+        "deploy/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "检查所有成功获取的 rows、事务、连接、permit、goroutine 和取消函数在正常、错误、超时、取消、panic 及客户端断开路径中都被终结或释放；执行状态不得永久停留在 pending/running。",
+      "scope": [
+        "apps/api/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "分页必须由服务端实施并遵守最大行数。检查稳定且可证明唯一的排序、复合唯一键与 NULL 语义、token 的主体/工作区/连接/策略/generation/statement 绑定、TTL、防重放、容量上限和 fail-closed 行为；不得信任客户端 Unique 标志或把 SQL/参数/last values 放入客户端 token。",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "packages/contracts/**",
+        "apps/web/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "凭证只能以受 AAD 绑定的加密信封保存在服务端，KEK 只能由部署环境注入。日志、API、错误、trace、指标和审计正文不得包含密码、KEK/DEK、nonce、连接串、SQL 正文、原始数据库错误或未脱敏结果。测试夹具允许使用明确标注且不可用于真实系统的合成 SQL、nonce、假连接串和固定非秘密字节，但不得包含任何真实凭证、生产密钥、真实用户数据或生产结果。审计必须追加写、租户绑定、记录必要身份与 trace/execution 关联，并遵守已接受 ADR 的 fail-closed 与原子性策略。",
+      "scope": [
+        "apps/api/internal/credentials/**",
+        "apps/api/internal/metadata/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/connections/**",
+        "apps/api/cmd/**",
+        "deploy/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "元数据库与迁移必须维护非空、唯一、检查、外键、复合租户归属和追加式审计约束。检查 Up/Down、空库升级、重复升级、滚动部署兼容性、锁表/长事务、回滚或前向修复路径；策略缺失必须默认拒绝。",
+      "scope": [
+        "apps/api/internal/migrate/**",
+        "apps/api/internal/metadata/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "核对 API 请求/响应、稳定错误码、HTTP 状态、分页字段、默认值、序列化和前后端共享契约。新增或改变 API/Schema/安全语义必须有对应 Task、ADR/设计和测试证据，并避免破坏现有调用方。",
+      "scope": [
+        "apps/api/**",
+        "apps/web/**",
+        "packages/contracts/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "前端必须正确处理加载、空数据、错误、重试、取消、429、超时和重复提交；关键操作需有可访问名称、键盘路径和明确反馈。前端不得复制或放宽服务端 SQL 安全规则。",
+      "scope": [
+        "apps/web/**"
+      ],
+      "severity": "medium"
+    },
+    {
+      "rule": "新增或升级依赖时，核对必要性、锁文件、供应链固定方式、许可证与 Apache-2.0 兼容性以及 DEPENDENCY-LICENSES/NOTICE 更新。许可证或外部网络/权限变化缺少 Owner 证据时升级人工。",
+      "scope": [
+        "**/go.mod",
+        "**/go.sum",
+        "**/package.json",
+        "**/package-lock.json",
+        ".github/**",
+        "deploy/**"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "文档必须与当前代码、迁移、测试、Task 状态和已接受 ADR 一致；不得把提议 ADR、后续任务或未实现能力描述为已生效/已完成。检查失效路径、过时 Schema、凭证字段、审计语义、数据隔离、保留期及敏感信息泄露。",
+      "scope": [
+        "docs/**",
+        "README.md",
+        "webdb-design-draft.md",
+        "AGENTS.md"
+      ],
+      "severity": "high"
+    },
+    {
+      "rule": "行为变更应有修复前失败、修复后通过且真正触发风险路径的测试。不得仅凭 mock 调用、覆盖率、静态告警或 CI 成败下结论；必须结合实现语义与可复现证据，且不得声称运行过未实际执行的命令。",
+      "scope": [
+        "**"
+      ],
+      "severity": "medium"
+    }
+  ]
+}

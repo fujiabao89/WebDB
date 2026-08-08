@@ -1,0 +1,206 @@
+{
+  "files": [
+    {
+      "path": "AGENTS.md",
+      "description": "仓库最高优先级的 Agent 工作协议、P0 安全边界、审查证据格式与合并结论规则"
+    },
+    {
+      "path": "webdb-design-draft.md",
+      "description": "WebDB 产品范围、架构、SQL 执行、数据模型、安全基线与 P0 验收策略；具体实施状态以任务卡和已接受 ADR 为准",
+      "scope": [
+        "apps/**",
+        "packages/**",
+        "deploy/**",
+        "docs/**",
+        "README.md"
+      ]
+    },
+    {
+      "path": "docs/tasks/README.md",
+      "description": "P0 Task 索引、状态与依赖；审查时仍须定位并读取 PR 对应的具体 Task"
+    },
+    {
+      "path": "docs/adr/README.md",
+      "description": "ADR 状态索引；用于区分已接受、后续评估和提议决策"
+    },
+    {
+      "path": "docs/adr/ADR-001-browser-no-direct-db.md",
+      "description": "浏览器不得直连目标数据库的信任边界",
+      "scope": [
+        "apps/web/**",
+        "apps/api/**",
+        "packages/contracts/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-002-postgres-and-mysql-only.md",
+      "description": "P0/v1 仅支持 PostgreSQL 14+ 与 MySQL 8.0+",
+      "scope": [
+        "apps/**",
+        "packages/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-003-crdt-documents-only.md",
+      "description": "CRDT 仅用于文档而不用于真实数据库数据",
+      "scope": [
+        "apps/**",
+        "packages/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-004-modular-monolith.md",
+      "description": "P0 Go 模块化单体架构边界",
+      "scope": [
+        "apps/api/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-005-production-read-only-by-default.md",
+      "description": "生产连接默认只读且 P0 不实现写入",
+      "scope": [
+        "apps/api/**",
+        "apps/web/**",
+        "packages/contracts/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-006-kek-in-deployment-environment.md",
+      "description": "KEK 只能由部署环境注入且不得泄露",
+      "scope": [
+        "apps/api/**",
+        "deploy/**",
+        ".github/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-007-dialect-aware-sql-parsing.md",
+      "description": "PostgreSQL/MySQL 方言解析、MySQL 可执行注释与未知即拒绝策略",
+      "scope": [
+        "apps/api/internal/sqlpolicy/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/adapter/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-008-p0-connection-pool-limits.md",
+      "description": "连接池、连接获取超时、并发准入与 429 默认值",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/connections/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-009-ssh-topology-deferred.md",
+      "description": "SSH/跳板机后置且不得用临时隧道绕过",
+      "scope": [
+        "apps/api/**",
+        "apps/web/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-010-query-result-retention.md",
+      "description": "持久化查询结果 7 天保留与过期语义",
+      "scope": [
+        "apps/api/internal/execution/**",
+        "apps/api/internal/metadata/**",
+        "apps/web/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-011-local-auth-then-oidc.md",
+      "description": "认证阶段与身份模型兼容边界",
+      "scope": [
+        "apps/api/**",
+        "apps/web/**",
+        "packages/contracts/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-012-apache-2-license.md",
+      "description": "Apache-2.0 与依赖许可证维护要求",
+      "scope": [
+        "**/go.mod",
+        "**/go.sum",
+        "**/package.json",
+        "**/package-lock.json",
+        "docs/DEPENDENCY-LICENSES.md",
+        "LICENSE",
+        "NOTICE"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-013-p0-metadata-migrations-schema.md",
+      "description": "P0 元数据库物理 Schema、租户复合约束与追加式审计基线",
+      "scope": [
+        "apps/api/internal/migrate/**",
+        "apps/api/internal/metadata/**",
+        "apps/api/internal/connections/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-014-sort-key-uniqueness-proof.md",
+      "description": "VerifiedSortPlan、可信 SchemaSnapshot 与 keyset 唯一性证明目标契约",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/queryplan/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-015-continuation-token-ownership.md",
+      "description": "Continuation token 所有权、绑定、防重放、TTL 与容量模型目标契约",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/queryplan/**",
+        "packages/contracts/**",
+        "apps/web/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-016-admission-reservation-before-execution.md",
+      "description": "准入、connection_busy/rate_limited、execution 终结与审计时序",
+      "scope": [
+        "apps/api/internal/adapter/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/metadata/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-017-p0-credential-envelope-audit-failure.md",
+      "description": "凭证信封、KEK 生命周期、审计 metadata、原子性与 fail-closed 策略",
+      "scope": [
+        "apps/api/internal/credentials/**",
+        "apps/api/internal/connections/**",
+        "apps/api/internal/execution/**",
+        "apps/api/internal/metadata/**",
+        "apps/api/cmd/**",
+        "deploy/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-018-prod-roles-under-compose-exception.md",
+      "description": "生产角色拆分脚本暂驻 compose 的已接受有期限例外",
+      "scope": [
+        "deploy/compose/**"
+      ]
+    },
+    {
+      "path": "docs/adr/ADR-019-opencode-review-bounded-automation.md",
+      "description": "当前已接受的自动审查安全边界；ADR-020 获批前继续生效",
+      "scope": [
+        ".github/**",
+        "docs/adr/ADR-019-opencode-review-bounded-automation.md",
+        "docs/adr/ADR-020-opencode-review-trusted-execution.md"
+      ]
+    }
+  ]
+}
