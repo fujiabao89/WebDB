@@ -1,6 +1,7 @@
 package pagination
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -565,6 +566,41 @@ func TestRevokeNoOpsForClaimedOrMissing(t *testing.T) {
 	r.Revoke("0000000000000000000000000000000000000000000000000000000000000000")
 	if s := r.Stats(); s.ActiveTokens != 0 {
 		t.Fatalf("stats after no-op revoke = %+v, want 0 active", s)
+	}
+}
+
+func TestByteQuotaAccountsForSortPlanSpecs(t *testing.T) {
+	t.Parallel()
+	// 宽计划：大量排序列的 VerifiedSortPlan 必须计入 per-state 字节配额（Codex P2），
+	// 否则调用方可提交数百/数千排序列绕过单状态字节上限。
+	cols := make([]queryplan.Column, 0, 300)
+	for i := 0; i < 300; i++ {
+		cols = append(cols, queryplan.Column{Name: fmt.Sprintf("c%03d", i), Ordinal: i + 1, Nullable: false})
+	}
+	meta := &queryplan.TableMetadata{
+		Schema: "public", Table: "wide",
+		Columns:    cols,
+		PrimaryKey: &queryplan.PrimaryKey{Columns: []string{"c000"}},
+	}
+	snap, err := queryplan.NewSchemaSnapshot("conn-1", queryplan.DialectPostgreSQL, 1, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]queryplan.SortKey, 0, len(cols))
+	for _, c := range cols {
+		keys = append(keys, queryplan.SortKey{Column: c.Name, Direction: queryplan.SortAsc})
+	}
+	plan, err := queryplan.VerifySortPlan(snap,
+		&queryplan.QueryShape{BaseSchema: "public", BaseTable: "wide", SelectStar: true}, keys)
+	if err != nil {
+		t.Fatalf("VerifySortPlan(wide) error = %v", err)
+	}
+	// 小配额：基础状态（SQL/绑定字段）远低于 200，但 300 个 SortSpecs 必然超限。
+	r := newTestRegistry(t, func(c *Config) { c.MaxStateBytes = 200 })
+	st := testState(t, "u1")
+	st.SortPlan = plan
+	if _, err := r.Create(st); err == nil {
+		t.Fatal("wide sort plan must be charged to per-state byte quota")
 	}
 }
 

@@ -38,6 +38,9 @@ func TestAnalyzeShapePG(t *testing.T) {
 		{name: "table stmt", sql: "TABLE users", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
 		{name: "inner order by allowed", sql: "SELECT * FROM users ORDER BY id", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
 		{name: "where allowed", sql: "SELECT * FROM users WHERE id > 10", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
+		{name: "where plain comparison func on const ok", sql: "SELECT * FROM users WHERE name = 'x'", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
+		{name: "where volatile func rejected", sql: "SELECT * FROM users WHERE random() < 0.5", wantErr: true},
+		{name: "where volatile now rejected", sql: "SELECT * FROM users WHERE created_at > now() - interval '1 day'", wantErr: true},
 
 		{name: "computed expression", sql: "SELECT id+1 AS x FROM users", wantErr: true},
 		{name: "aggregate", sql: "SELECT count(*) FROM users", wantErr: true},
@@ -105,6 +108,8 @@ func TestAnalyzeShapeMySQL(t *testing.T) {
 		{name: "limit", sql: "SELECT * FROM users LIMIT 10", wantErr: true},
 		{name: "duplicate exposed", sql: "SELECT id, id FROM users", wantErr: true},
 		{name: "no from", sql: "SELECT 1", wantErr: true},
+		{name: "where allowed", sql: "SELECT * FROM users WHERE id > 10", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
+		{name: "where volatile RAND rejected", sql: "SELECT * FROM users WHERE RAND() < 0.5", wantErr: true},
 	}
 
 	for _, tt := range tests {

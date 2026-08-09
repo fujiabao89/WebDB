@@ -132,6 +132,7 @@
 3. **续页 D11 审计**：`ExecuteNextPage` 提供重新授权+状态机，但不持久化每页 Execution/AuditEvent（D11 归 WEB-35）。
 4. **race 本机未跑**：Windows 无 gcc；依赖 CI。
 5. **MySQL 唯一键经 STATISTICS**：按整个 INDEX_NAME 剔除含 SUB_PART/EXPRESSION（前缀/函数/表达式索引）的唯一索引（避免残留列被误认为完整唯一约束）；经 `hasMySQLExpressionColumn` capability 探测选择带/不带 EXPRESSION 列的查询，8.0.0–8.0.12 用 `NULL AS EXPRESSION` 占位正常支持（Codex 二轮 P1 修复）。
+6. **volatile 谓词拒绝**：分页查询 WHERE 含任何函数调用（PG random()/now()、MySQL RAND() 等）一律拒绝，续页重放 volatile 谓词会使集合变化导致漏行（Codex 三轮 P1 修复）；`SortPlan` 的 retained SortSpecs 计入 per-state 字节配额（Codex 三轮 P2 修复）。
 
 ## 8. 回滚/前向修复
 

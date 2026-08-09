@@ -28,6 +28,33 @@ func AnalyzeShape(dialect Dialect, sql string) (*queryplan.QueryShape, error) {
 	}
 }
 
+// containsFuncCallPG 遍历 PG WHERE 表达式，发现任何函数调用即返回 true。
+// 分页续页会重放原 SQL：volatile 谓词（random()/now() 等）使结果集合随执行变化，
+// 无法证明确定性时必须 fail-closed（Codex P1）。
+func containsFuncCallPG(n pgast.Node) bool {
+	found := false
+	pgast.Inspect(n, func(node pgast.Node) bool {
+		if _, ok := node.(*pgast.FuncCall); ok {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
+// containsFuncCallMySQL 遍历 MySQL WHERE 表达式，发现任何函数调用即返回 true
+// （RAND()/NOW() 等 volatile 谓词；保守拒绝，Codex P1）。
+func containsFuncCallMySQL(e mysqlast.ExprNode) bool {
+	found := false
+	mysqlast.Inspect(e, func(node mysqlast.Node) bool {
+		if _, ok := node.(*mysqlast.FuncCallExpr); ok {
+			found = true
+		}
+		return true
+	})
+	return found
+}
+
 func analyzePGShape(sql string) (*queryplan.QueryShape, error) {
 	stmts, err := pg.Parse(sql)
 	if err != nil {
@@ -42,6 +69,9 @@ func analyzePGShape(sql string) (*queryplan.QueryShape, error) {
 	}
 	if err := rejectPGShape(sel); err != nil {
 		return nil, err
+	}
+	if sel.WhereClause != nil && containsFuncCallPG(sel.WhereClause) {
+		return nil, fmt.Errorf("analyze shape: volatile predicate (function call in WHERE) not allowed")
 	}
 	shape := &queryplan.QueryShape{Columns: map[string]string{}}
 	if sel.FromClause == nil || sel.FromClause.Len() != 1 {
@@ -157,6 +187,9 @@ func analyzeMySQLShape(sql string) (*queryplan.QueryShape, error) {
 	}
 	if err := rejectMySQLShape(sel); err != nil {
 		return nil, err
+	}
+	if sel.Where != nil && containsFuncCallMySQL(sel.Where) {
+		return nil, fmt.Errorf("analyze shape: volatile predicate (function call in WHERE) not allowed")
 	}
 	shape := &queryplan.QueryShape{Columns: map[string]string{}}
 	if len(sel.From) != 1 {

@@ -123,7 +123,9 @@ func retainedBytes(v any) int64 {
 }
 
 // stateBytes 计算 ContinuationState 深拷贝后的 retained bytes。
-// SortPlan 不重复计费（不可变、由共享计划承担）；SQL/Args/LastSortValues 计入。
+// SortPlan 的 retained SortSpecs 计入字节配额（Codex P2）：每个 continuation 保留
+// 自己的 VerifiedSortPlan，调用方可提交大量排序列绕过 per-state 字节配额；
+// SQL/Args/LastSortValues 计入。
 func stateBytes(s *ContinuationState) int64 {
 	if s == nil {
 		return 0
@@ -137,6 +139,11 @@ func stateBytes(s *ContinuationState) int64 {
 	}
 	for _, l := range s.LastSortValues {
 		n += retainedBytes(l)
+	}
+	if s.SortPlan != nil {
+		for _, spec := range s.SortPlan.SortSpecs() {
+			n += int64(len(spec.Column)) + int64(len(spec.BaseColumn)) + 2 // 2 个 bool 字段
+		}
 	}
 	return n
 }
