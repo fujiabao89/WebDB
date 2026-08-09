@@ -22,6 +22,14 @@ const (
 	connAcquireTimeout = 5 * time.Second
 	maxConnLTMin       = 27 * time.Minute
 	maxConnLTMax       = 30 * time.Minute
+
+	// resolveQualifiedTablePG 沿完整 search_path 解析未限定表名到实际 schema：
+	// to_regclass 使用与 PG 系统一致的名字解析（表位于后置 search_path 条目时也能
+	// 解析到正确 schema，而非 current_schema() 返回的首项）。表不可见时返回空行。
+	resolveQualifiedTablePG = `SELECT n.nspname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = to_regclass($1)`
 )
 
 type poolEntry struct {
@@ -351,10 +359,12 @@ func (h *PoolHandle) PoolGeneration() int64 {
 	return h.gen
 }
 
-// CurrentSchema 返回未限定表名时的可信默认 schema。
-// PostgreSQL：current_schema()（search_path 首项）；MySQL：连接数据库。
+// ResolveQualifiedTable 返回未限定表名实际解析到的可信 schema。
+// PostgreSQL：经 to_regclass 沿完整 search_path 解析实际 relation 的命名空间。
+// 仅用 current_schema() 会返回 search_path 首项存在的 schema，而 PG 对未限定表名
+// 沿整个 search_path 解析（表可能在后置条目中，Codex P1）；MySQL：连接数据库。
 // 带 connAcquireTimeout 超时；查询失败/空由调用方 fail-closed。
-func (h *PoolHandle) CurrentSchema(ctx context.Context) (string, error) {
+func (h *PoolHandle) ResolveQualifiedTable(ctx context.Context, table string) (string, error) {
 	if err := h.check(); err != nil {
 		return "", err
 	}
@@ -365,7 +375,7 @@ func (h *PoolHandle) CurrentSchema(ctx context.Context) (string, error) {
 		var s string
 		qctx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
-		if err := h.entry.pgPool.QueryRow(qctx, "SELECT current_schema()").Scan(&s); err != nil {
+		if err := h.entry.pgPool.QueryRow(qctx, resolveQualifiedTablePG, table).Scan(&s); err != nil {
 			return "", mapAcquireError(err)
 		}
 		return s, nil

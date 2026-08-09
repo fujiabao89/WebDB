@@ -139,6 +139,13 @@ func TestVerifySortPlanRejects(t *testing.T) {
 			wantSubstr: "base column",
 		},
 		{
+			name:       "PG case-sensitive uppercase column rejected",
+			snapshot:   snapshotWithPK("id"),
+			shape:      starShape("users"),
+			keys:       []SortKey{key("ID", SortAsc, false)},
+			wantSubstr: "base column",
+		},
+		{
 			name:       "sort column not exposed in result",
 			snapshot:   snapshotWithPK("id"),
 			shape:      &QueryShape{BaseSchema: "public", BaseTable: "users", Columns: map[string]string{"name": "name"}},
@@ -282,6 +289,60 @@ func TestVerifySortPlanAcceptsAnyOneOfMultipleUniqueProofs(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("VerifySortPlan(sort by a,b) error = %v", err)
+	}
+	if !p.Valid() {
+		t.Fatal("plan invalid")
+	}
+}
+
+func TestVerifySortPlanMySQLCaseInsensitiveIdentifier(t *testing.T) {
+	t.Parallel()
+	// MySQL 列标识符大小写不敏感：表主键声明为 id，查询/排序键用 ID（大写）
+	// 必须通过列存在性与唯一性证明匹配（Codex P1）。
+	meta := &TableMetadata{
+		Schema: "db",
+		Table:  "users",
+		Columns: []Column{
+			{Name: "id", Ordinal: 1, Nullable: false},
+		},
+		PrimaryKey: &PrimaryKey{Columns: []string{"id"}},
+	}
+	s, err := NewSchemaSnapshot("conn-1", DialectMySQL, 1, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := &QueryShape{BaseSchema: "db", BaseTable: "users", SelectStar: true}
+	p, err := VerifySortPlan(s, shape, []SortKey{key("ID", SortAsc, false)})
+	if err != nil {
+		t.Fatalf("VerifySortPlan(MySQL sort by uppercase ID) error = %v", err)
+	}
+	if !p.Valid() {
+		t.Fatal("plan invalid")
+	}
+}
+
+func TestVerifySortPlanMySQLCaseInsensitiveUniqueProof(t *testing.T) {
+	t.Parallel()
+	// MySQL 复合唯一约束列与排序键大小写不同也需匹配（EqualFold）。
+	meta := &TableMetadata{
+		Schema: "db",
+		Table:  "users",
+		Columns: []Column{
+			{Name: "tenant_id", Ordinal: 1, Nullable: false},
+			{Name: "name", Ordinal: 2, Nullable: false},
+		},
+		UniqueConstraints: []UniqueConstraint{{Name: "uq", Columns: []string{"tenant_id", "name"}}},
+	}
+	s, err := NewSchemaSnapshot("conn-1", DialectMySQL, 1, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shape := &QueryShape{BaseSchema: "db", BaseTable: "users", SelectStar: true}
+	p, err := VerifySortPlan(s, shape, []SortKey{
+		key("TENANT_ID", SortAsc, false), key("NAME", SortAsc, false),
+	})
+	if err != nil {
+		t.Fatalf("VerifySortPlan(MySQL sort by uppercase unique cols) error = %v", err)
 	}
 	if !p.Valid() {
 		t.Fatal("plan invalid")

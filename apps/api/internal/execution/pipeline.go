@@ -64,9 +64,10 @@ type AdapterHandle interface {
 	Query(ctx context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error)
 	NextPage(ctx context.Context, scope adapter.UserWorkspaceScope, plan queryplan.VerifiedNextPagePlan) (*adapter.QueryResult, error)
 	LoadTableMetadata(ctx context.Context, schema, table string) (*queryplan.TableMetadata, error)
-	// CurrentSchema 返回未限定表名时的可信默认 schema（PG=current_schema()，
-	// MySQL=连接数据库）；查询失败或空时调用方 fail-closed。
-	CurrentSchema(ctx context.Context) (string, error)
+	// ResolveQualifiedTable 返回未限定表名实际解析到的可信 schema
+	// （PG 沿完整 search_path 解析 relation，MySQL=连接数据库）；
+	// 查询失败或空时调用方 fail-closed。
+	ResolveQualifiedTable(ctx context.Context, table string) (string, error)
 	PoolGeneration() int64
 	Release()
 }
@@ -570,12 +571,12 @@ func (p *Pipeline) verifySortPlan(
 		return nil, "", "", "", err
 	}
 	if shape.BaseSchema == "" {
-		// 未限定表名：PG 经 current_schema() 解析可信默认 schema（search_path 首项），
-		// 不硬编码 "public"（避免 lineage 取自错误表导致唯一性证明无效）；
-		// MySQL 经连接数据库。查询失败或返回空 → fail-closed。
-		s, err := handle.CurrentSchema(execCtx)
+		// 未限定表名：经方言 relation 解析（PG 沿完整 search_path 而非 current_schema()
+		// 只返回首项存在的 schema——表可能位于后置 search_path 条目，Codex P1；
+		// MySQL 经连接数据库）。查询失败或返回空 → fail-closed。
+		s, err := handle.ResolveQualifiedTable(execCtx, shape.BaseTable)
 		if err != nil || s == "" {
-			return nil, "", "", "", fmt.Errorf("resolve current schema: %w", err)
+			return nil, "", "", "", fmt.Errorf("resolve table schema: %w", err)
 		}
 		shape.BaseSchema = s
 	}

@@ -85,6 +85,15 @@ FROM information_schema.STATISTICS s
 WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0
   AND s.INDEX_NAME <> 'PRIMARY'
 ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX`
+
+	// metaMySQLUniqueSQLLegacy 兼容 MySQL 8.0.0–8.0.12：STATISTICS 无 EXPRESSION 列
+	// （8.0.13 才引入，此前无函数索引），以 NULL AS EXPRESSION 占位，使同一
+	// scanMySQLUniquePairs 直接可用（expr 恒为无效 NullString，仅 SUB_PART 判定危险）。
+	metaMySQLUniqueSQLLegacy = `SELECT s.INDEX_NAME, s.COLUMN_NAME, s.SUB_PART, NULL AS EXPRESSION
+FROM information_schema.STATISTICS s
+WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0
+  AND s.INDEX_NAME <> 'PRIMARY'
+ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX`
 )
 
 func scanColumns(rows rowIter) ([]queryplan.Column, error) {
@@ -295,6 +304,21 @@ func loadPGTableMeta(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 	return assembleTableMetadata(schema, table, cols, pk, umap)
 }
 
+// hasMySQLExpressionColumn 探测 MySQL 8.0.13+ 的 STATISTICS.EXPRESSION 列。
+// 8.0.0–8.0.12 无此列（无函数索引），直接引用会报错导致所有分页元数据失败（Codex P1）。
+func hasMySQLExpressionColumn(ctx context.Context, db *sql.DB) (bool, error) {
+	qctx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
+	var n int
+	if err := db.QueryRowContext(qctx,
+		`SELECT COUNT(*) FROM information_schema.COLUMNS
+		 WHERE TABLE_SCHEMA = 'information_schema' AND TABLE_NAME = 'STATISTICS' AND COLUMN_NAME = 'EXPRESSION'`,
+	).Scan(&n); err != nil {
+		return false, mapAcquireError(err)
+	}
+	return n > 0, nil
+}
+
 func loadMySQLTableMeta(ctx context.Context, db *sql.DB, schema, table string) (*queryplan.TableMetadata, error) {
 	args := []any{schema, table}
 	cols, err := runQuery(ctx, myQuery(db), metaColumnsSQL, args, scanColumns)
@@ -305,7 +329,17 @@ func loadMySQLTableMeta(ctx context.Context, db *sql.DB, schema, table string) (
 	if err != nil {
 		return nil, err
 	}
-	uqs, err := runQuery(ctx, myQuery(db), metaMySQLUniqueSQL, args, scanMySQLUniquePairs)
+	// 按服务器能力选择唯一键查询：8.0.13+ 读 EXPRESSION 列；8.0.0–8.0.12
+	// 用 NULL AS EXPRESSION 占位（同一 scanMySQLUniquePairs，仅 SUB_PART 判定危险）。
+	hasExpr, err := hasMySQLExpressionColumn(ctx, db)
+	if err != nil {
+		return nil, err
+	}
+	query := metaMySQLUniqueSQL
+	if !hasExpr {
+		query = metaMySQLUniqueSQLLegacy
+	}
+	uqs, err := runQuery(ctx, myQuery(db), query, args, scanMySQLUniquePairs)
 	if err != nil {
 		return nil, err
 	}

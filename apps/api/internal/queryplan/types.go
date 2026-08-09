@@ -8,6 +8,7 @@ package queryplan
 
 import (
 	"fmt"
+	"strings"
 )
 
 // Dialect 方言标识 —— 仅从服务端 Connection.Engine 派生，不接受客户端输入。
@@ -133,20 +134,30 @@ func (m *TableMetadata) Validate() error {
 	return nil
 }
 
-// isNotNullColumn 返回列是否 NOT NULL。
-func isNotNullColumn(cols []Column, name string) bool {
+// identifiersEqual 按方言比较 SQL 标识符是否等价。
+// MySQL 列标识符大小写不敏感（Codex P1，见计划.go 大小写回归测试）；
+// PostgreSQL 标识符大小写语义由解析侧归一（未加引号折叠小写），此处保持精确。
+func identifiersEqual(dialect Dialect, a, b string) bool {
+	if dialect == DialectMySQL {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+// isNotNullColumn 返回列是否 NOT NULL（标识符按方言比较）。
+func isNotNullColumn(dialect Dialect, cols []Column, name string) bool {
 	for _, c := range cols {
-		if c.Name == name {
+		if identifiersEqual(dialect, c.Name, name) {
 			return !c.Nullable
 		}
 	}
 	return false
 }
 
-// constraintColumnsNotNull 返回唯一约束的所有列是否均 NOT NULL。
-func constraintColumnsNotNull(meta *TableMetadata, cols []string) bool {
+// constraintColumnsNotNull 返回唯一约束的所有列是否均 NOT NULL（按方言比较标识符）。
+func constraintColumnsNotNull(dialect Dialect, meta *TableMetadata, cols []string) bool {
 	for _, name := range cols {
-		if !isNotNullColumn(meta.Columns, name) {
+		if !isNotNullColumn(dialect, meta.Columns, name) {
 			return false
 		}
 	}
@@ -160,10 +171,10 @@ type uniqueProof struct {
 }
 
 // findUniqueProofs 在可信元数据中返回所有能作为全局唯一顺序证明的键：
-// 完整主键，以及所有列均 NOT NULL 的完整唯一约束。
+// 完整主键，以及所有列均 NOT NULL 的完整唯一约束（标识符按方言比较）。
 // 返回全部而非只取第一个：表可能同时有 PRIMARY KEY(id) 与 UNIQUE(email)，
 // 排序键只需完整覆盖其中任意一个证明（ADR-014：完整主键或完整唯一约束任一覆盖即可）。
-func findUniqueProofs(meta *TableMetadata) []uniqueProof {
+func findUniqueProofs(dialect Dialect, meta *TableMetadata) []uniqueProof {
 	if meta == nil {
 		return nil
 	}
@@ -171,7 +182,7 @@ func findUniqueProofs(meta *TableMetadata) []uniqueProof {
 	if meta.PrimaryKey != nil {
 		ok := true
 		for _, name := range meta.PrimaryKey.Columns {
-			if !isNotNullColumn(meta.Columns, name) {
+			if !isNotNullColumn(dialect, meta.Columns, name) {
 				ok = false
 				break
 			}
@@ -181,7 +192,7 @@ func findUniqueProofs(meta *TableMetadata) []uniqueProof {
 		}
 	}
 	for _, uq := range meta.UniqueConstraints {
-		if constraintColumnsNotNull(meta, uq.Columns) {
+		if constraintColumnsNotNull(dialect, meta, uq.Columns) {
 			out = append(out, uniqueProof{columns: append([]string(nil), uq.Columns...), kind: "unique_constraint"})
 		}
 	}

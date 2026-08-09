@@ -209,6 +209,25 @@ func TestScanMySQLUniquePairsKeepsCleanCompositeIndex(t *testing.T) {
 	}
 }
 
+func TestScanMySQLUniquePairsNullExpressionColumn(t *testing.T) {
+	t.Parallel()
+	// MySQL 8.0.0-8.0.12 无 STATISTICS.EXPRESSION 列：兼容查询以 NULL AS EXPRESSION
+	// 替代，expr 读为无效 NullString。前缀索引仍因 SUB_PART 整索引剔除（Codex P1）。
+	rows := &fakeRows{data: [][]any{
+		{"uq_pref", "name", sql.NullInt64{Int64: 10, Valid: true}, nil},
+		{"uq_pref", "tenant_id", sql.NullInt64{}, nil},
+		{"uq_clean", "email", sql.NullInt64{}, nil},
+	}}
+	uqs, err := scanMySQLUniquePairs(rows)
+	if err != nil {
+		t.Fatalf("scanMySQLUniquePairs() error = %v", err)
+	}
+	if len(uqs) != 1 || uqs[0].Name != "uq_clean" || len(uqs[0].Columns) != 1 ||
+		uqs[0].Columns[0] != "email" {
+		t.Fatalf("scanMySQLUniquePairs() = %+v, want only uq_clean=[email] with NULL expression", uqs)
+	}
+}
+
 func TestScanMySQLUniquePairsMixedIndexes(t *testing.T) {
 	t.Parallel()
 	// 危险索引与干净索引并存：只保留干净索引，危险索引整组剔除。

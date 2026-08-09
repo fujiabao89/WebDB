@@ -204,33 +204,85 @@ func TestNextPage_MySQL_FullPagination(t *testing.T) {
 	t.Logf("MySQL no duplicates across pages, total=%d", r2.TotalReturned)
 }
 
-func TestCurrentSchema_PG(t *testing.T) {
+func TestHasMySQLExpressionColumn(t *testing.T) {
+	// 在真实 MySQL 上探测 EXPRESSION 能力并确认元数据加载走探测路径（Codex P1）。
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	defer h.Release()
+	if h.entry.sqlDB == nil {
+		t.Skip("not a MySQL handle")
+	}
+	has, err := hasMySQLExpressionColumn(context.Background(), h.entry.sqlDB)
+	if err != nil {
+		t.Skipf("capability probe unavailable: %v", err)
+	}
+	t.Logf("MySQL STATISTICS.EXPRESSION present: %v", has)
+	// 无论 true/false，LoadTableMetadata 都必须成功（两条查询分支都可用）。
+	schema := h.entry.cfg.Database
+	if _, err := h.LoadTableMetadata(context.Background(), schema, "employees"); err != nil {
+		t.Fatalf("LoadTableMetadata with capability-gated query failed: %v", err)
+	}
+}
+
+func TestResolveQualifiedTable_PG(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	s, err := h.CurrentSchema(context.Background())
+	s, err := h.ResolveQualifiedTable(context.Background(), "employees")
 	if err != nil {
-		t.Skipf("current_schema unavailable: %v", err)
+		t.Skipf("resolve qualified table unavailable: %v", err)
 	}
 	if s == "" {
-		t.Fatal("current_schema returned empty")
+		t.Fatal("ResolveQualifiedTable returned empty schema")
 	}
-	t.Logf("PG current_schema: %s", s)
+	t.Logf("PG resolve employees -> %s", s)
 }
 
-func TestCurrentSchema_MySQL(t *testing.T) {
+func TestResolveQualifiedTable_MySQL(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
 	defer h.Release()
-	s, err := h.CurrentSchema(context.Background())
+	s, err := h.ResolveQualifiedTable(context.Background(), "employees")
 	if err != nil {
-		t.Skipf("current schema unavailable: %v", err)
+		t.Skipf("resolve qualified table unavailable: %v", err)
 	}
 	if s != h.entry.cfg.Database {
-		t.Fatalf("MySQL current schema = %q, want %q", s, h.entry.cfg.Database)
+		t.Fatalf("MySQL resolve schema = %q, want %q", s, h.entry.cfg.Database)
+	}
+}
+
+// TestResolveQualifiedTable_PG_SearchPathLaterEntry 验证表位于 search_path 后置条目时
+// 仍能解析到正确 schema：search_path = tenant, public，tenant 存在但无该表，
+// public 有表；current_schema() 返回 tenant，但未限定表名实际解析到 public（Codex P1）。
+func TestResolveQualifiedTable_PG_SearchPathLaterEntry(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	// 在单一连接上设置 search_path，避免连接池换连接导致 SET 丢失。
+	conn, err := h.entry.pgPool.Acquire(context.Background())
+	if err != nil {
+		t.Skipf("acquire pool conn: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(context.Background(), "CREATE SCHEMA IF NOT EXISTS tenant"); err != nil {
+		t.Skipf("skip: PG demo account lacks DDL privilege: %v", err)
+	}
+	if _, err := conn.Exec(context.Background(), "SET search_path = tenant, public"); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	var schema string
+	if err := conn.QueryRow(context.Background(), resolveQualifiedTablePG, "employees").Scan(&schema); err != nil {
+		t.Fatalf("resolve employees under search_path=tenant,public: %v", err)
+	}
+	if schema != "public" {
+		t.Fatalf("resolved schema = %q, want %q (must use full search path, not current_schema()=tenant)", schema, "public")
 	}
 }
 

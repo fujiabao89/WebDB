@@ -131,7 +131,7 @@ func (f *fakeAdapterHandle) LoadTableMetadata(_ context.Context, schema, table s
 	return f.meta, f.metaErr
 }
 
-func (f *fakeAdapterHandle) CurrentSchema(_ context.Context) (string, error) {
+func (f *fakeAdapterHandle) ResolveQualifiedTable(_ context.Context, _ string) (string, error) {
 	return f.currentSchema, f.currentSchemaErr
 }
 

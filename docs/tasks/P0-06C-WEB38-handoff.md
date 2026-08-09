@@ -131,7 +131,7 @@
 2. **单页 overflow 语义**：`requiresPagination=false` 时仍沿用既有"截断至 effectiveMaxRows"行为；P0-04 §4.2 #9 的"读到 sentinel 返回 result_too_large"契约归 WEB-35 收口。
 3. **续页 D11 审计**：`ExecuteNextPage` 提供重新授权+状态机，但不持久化每页 Execution/AuditEvent（D11 归 WEB-35）。
 4. **race 本机未跑**：Windows 无 gcc；依赖 CI。
-5. **MySQL 唯一键经 STATISTICS**：按整个 INDEX_NAME 剔除含 SUB_PART/EXPRESSION（前缀/函数/表达式索引）的唯一索引（Codex P1-A 修复，避免残留列被误认为完整唯一约束），需 MySQL 8.0.13+（EXPRESSION 列）；低于此版本查询报错 → fail-closed。
+5. **MySQL 唯一键经 STATISTICS**：按整个 INDEX_NAME 剔除含 SUB_PART/EXPRESSION（前缀/函数/表达式索引）的唯一索引（避免残留列被误认为完整唯一约束）；经 `hasMySQLExpressionColumn` capability 探测选择带/不带 EXPRESSION 列的查询，8.0.0–8.0.12 用 `NULL AS EXPRESSION` 占位正常支持（Codex 二轮 P1 修复）。
 
 ## 8. 回滚/前向修复
 

@@ -155,13 +155,13 @@ func VerifySortPlan(snapshot *SchemaSnapshot, shape *QueryShape, sortKeys []Sort
 	// 遍历所有合格证明（完整主键 + 全 NOT NULL 唯一约束），任意一个被排序键
 	// 完整覆盖即接受。表同时有 PRIMARY KEY(id) 与 UNIQUE(email) 时按 email 排序
 	// 合法（ADR-014：任一证明覆盖即可），不得只检查第一个证明（通常为主键）。
-	proofs := findUniqueProofs(snapshot.TableMetadataCopy())
+	proofs := findUniqueProofs(snapshot.Dialect, snapshot.TableMetadataCopy())
 	if len(proofs) == 0 {
 		return nil, fmt.Errorf("verified sort plan: no unique key (complete primary key or all-NOT-NULL unique constraint) available")
 	}
 	covered := false
 	for _, proof := range proofs {
-		if sortColumnsCoverProof(baseCols, proof.columns) {
+		if sortColumnsCoverProof(snapshot.Dialect, baseCols, proof.columns) {
 			covered = true
 			break
 		}
@@ -185,19 +185,19 @@ func VerifySortPlan(snapshot *SchemaSnapshot, shape *QueryShape, sortKeys []Sort
 
 func columnExists(snapshot *SchemaSnapshot, name string) bool {
 	for _, c := range snapshot.Columns() {
-		if c.Name == name {
+		if identifiersEqual(snapshot.Dialect, c.Name, name) {
 			return true
 		}
 	}
 	return false
 }
 
-// sortColumnsCoverProof 判断基础排序列集合是否完整覆盖证明键的全部列。
-func sortColumnsCoverProof(baseCols, proofCols []string) bool {
+// sortColumnsCoverProof 判断基础排序列集合是否完整覆盖证明键的全部列（按方言比较标识符）。
+func sortColumnsCoverProof(dialect Dialect, baseCols, proofCols []string) bool {
 	for _, pc := range proofCols {
 		found := false
 		for _, bc := range baseCols {
-			if bc == pc {
+			if identifiersEqual(dialect, bc, pc) {
 				found = true
 				break
 			}
