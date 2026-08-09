@@ -499,6 +499,11 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	// ADR-015：Service 是 token/registry 唯一 Owner；深拷贝 SQL/Args/last values
 	// 后创建 continuation，客户端仅持有 opaque handle。
+	// 注意：token 创建后先不发布；须待 recordPostExecution（execution 终态 + 审计）
+	// 成功后才写入 result.NextPageToken。审计失败时原子撤销 registry token（Codex P1-B），
+	// 否则调用方会在第一页审计未成功的情况下继续读取后续页。
+	var contToken string
+	continuationCreated := false
 	if requiresPagination && queryResult.HasMore && queryResult.TotalReturned < effectiveMaxRows {
 		token, tokErr := p.createContinuation(req, conn, handle, sortPlan, schemaGen, tableSchema, tableName,
 			policy, statementHash, queryResult, effectivePageSize, effectiveMaxRows)
@@ -511,7 +516,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 			}
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}
-		result.NextPageToken = &token
+		contToken = token
+		continuationCreated = true
 	}
 
 	// 单页查询完成、结果已完整填充且无活动游标：立即释放 handle，
@@ -521,7 +527,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	result.Result = queryResult
 	if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+		if continuationCreated {
+			p.registry.Revoke(contToken)
+		}
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+	}
+	if continuationCreated {
+		result.NextPageToken = &contToken
 	}
 	return result, nil
 }
@@ -653,6 +665,11 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		result.ErrorCode = mapPaginationError(err)
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	// panic 兜底：claim 后任何路径（成员/策略/凭证/元数据/adapter 调用 panic）都要
+	// 归还 in-flight token 并释放配额，避免占用 registry 配额直到 TTL（Greptile P2）。
+	// Abort 幂等：正常 Rotate/Complete 或显式 Abort 后，经 claim ownership/version
+	// 校验成为安全 no-op，且不会删除已旋转出的新 token。
+	defer func() { _ = claim.Abort() }()
 	state := claim.State()
 
 	// 重新授权：token 绑定 principal（ADR-015 §4）。同工作区其他用户不得横向
@@ -880,8 +897,10 @@ func (p *Pipeline) auditFailed(
 		OccurredAt:  p.clock(),
 	})
 	result.ErrorCode = ErrAuditFailed
-	// ADR-017 §6：审计失败不向调用方返回查询结果。
+	// ADR-017 §6：审计失败不向调用方返回查询结果；也不得泄露未成功审计的续页 token
+	// （Codex P1-B）。registry 中的对应 token 由调用方在审计失败路径撤销。
 	result.Result = nil
+	result.NextPageToken = nil
 	return result, fmt.Errorf("%w (original error: %s)", result.ErrorCode, originalCode)
 }
 

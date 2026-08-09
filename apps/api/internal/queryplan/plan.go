@@ -152,21 +152,22 @@ func VerifySortPlan(snapshot *SchemaSnapshot, shape *QueryShape, sortKeys []Sort
 		baseCols = append(baseCols, base)
 	}
 
-	proof := findUniqueProof(snapshot.TableMetadataCopy())
-	if proof == nil {
+	// 遍历所有合格证明（完整主键 + 全 NOT NULL 唯一约束），任意一个被排序键
+	// 完整覆盖即接受。表同时有 PRIMARY KEY(id) 与 UNIQUE(email) 时按 email 排序
+	// 合法（ADR-014：任一证明覆盖即可），不得只检查第一个证明（通常为主键）。
+	proofs := findUniqueProofs(snapshot.TableMetadataCopy())
+	if len(proofs) == 0 {
 		return nil, fmt.Errorf("verified sort plan: no unique key (complete primary key or all-NOT-NULL unique constraint) available")
 	}
-	for _, pc := range proof.columns {
-		found := false
-		for _, bc := range baseCols {
-			if bc == pc {
-				found = true
-				break
-			}
+	covered := false
+	for _, proof := range proofs {
+		if sortColumnsCoverProof(baseCols, proof.columns) {
+			covered = true
+			break
 		}
-		if !found {
-			return nil, fmt.Errorf("verified sort plan: sort columns do not fully cover unique key (%s)", stringify(proof.columns))
-		}
+	}
+	if !covered {
+		return nil, fmt.Errorf("verified sort plan: sort columns do not fully cover any unique key")
 	}
 
 	return &verifiedSortPlan{
@@ -189,4 +190,21 @@ func columnExists(snapshot *SchemaSnapshot, name string) bool {
 		}
 	}
 	return false
+}
+
+// sortColumnsCoverProof 判断基础排序列集合是否完整覆盖证明键的全部列。
+func sortColumnsCoverProof(baseCols, proofCols []string) bool {
+	for _, pc := range proofCols {
+		found := false
+		for _, bc := range baseCols {
+			if bc == pc {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
 }

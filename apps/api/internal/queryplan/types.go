@@ -8,7 +8,6 @@ package queryplan
 
 import (
 	"fmt"
-	"strings"
 )
 
 // Dialect 方言标识 —— 仅从服务端 Connection.Engine 派生，不接受客户端输入。
@@ -160,12 +159,15 @@ type uniqueProof struct {
 	kind    string // "primary_key" 或 "unique_constraint"
 }
 
-// findUniqueProof 在可信元数据中寻找能作为全局唯一顺序证明的键：
-// 完整主键，或所有列均 NOT NULL 的完整唯一约束。找不到返回 nil。
-func findUniqueProof(meta *TableMetadata) *uniqueProof {
+// findUniqueProofs 在可信元数据中返回所有能作为全局唯一顺序证明的键：
+// 完整主键，以及所有列均 NOT NULL 的完整唯一约束。
+// 返回全部而非只取第一个：表可能同时有 PRIMARY KEY(id) 与 UNIQUE(email)，
+// 排序键只需完整覆盖其中任意一个证明（ADR-014：完整主键或完整唯一约束任一覆盖即可）。
+func findUniqueProofs(meta *TableMetadata) []uniqueProof {
 	if meta == nil {
 		return nil
 	}
+	var out []uniqueProof
 	if meta.PrimaryKey != nil {
 		ok := true
 		for _, name := range meta.PrimaryKey.Columns {
@@ -175,16 +177,13 @@ func findUniqueProof(meta *TableMetadata) *uniqueProof {
 			}
 		}
 		if ok {
-			return &uniqueProof{columns: append([]string(nil), meta.PrimaryKey.Columns...), kind: "primary_key"}
+			out = append(out, uniqueProof{columns: append([]string(nil), meta.PrimaryKey.Columns...), kind: "primary_key"})
 		}
 	}
 	for _, uq := range meta.UniqueConstraints {
 		if constraintColumnsNotNull(meta, uq.Columns) {
-			return &uniqueProof{columns: append([]string(nil), uq.Columns...), kind: "unique_constraint"}
+			out = append(out, uniqueProof{columns: append([]string(nil), uq.Columns...), kind: "unique_constraint"})
 		}
 	}
-	return nil
+	return out
 }
-
-// stringify 仅用于错误信息，不暴露给外部。
-func stringify(parts []string) string { return strings.Join(parts, ",") }

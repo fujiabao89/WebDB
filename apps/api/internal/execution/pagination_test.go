@@ -326,6 +326,32 @@ func TestNextPagePoolGenerationChangeInvalidatesToken(t *testing.T) {
 	}
 }
 
+func TestNextPageClaimAbortedOnPanic(t *testing.T) {
+	// claim 后 adapter 调用 panic 时，幂等 deferred claim.Abort() 必须释放 in-flight
+	// token（容量/计数归零），否则 token 一直保持 in-flight 直到 TTL（Greptile P2）。
+	pipeline, principal, conn, _, client, _ := paginationSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	client.handle.panicNextPage = true
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("expected panic from adapter NextPage")
+			}
+		}()
+		_, _ = pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	}()
+
+	s := pipeline.registry.Stats()
+	if s.ActiveTokens != 0 || s.InFlightTokens != 0 || s.GlobalBytes != 0 {
+		t.Fatalf("registry not cleaned after panic: active=%d in_flight=%d bytes=%d",
+			s.ActiveTokens, s.InFlightTokens, s.GlobalBytes)
+	}
+}
+
 func TestNextPageAdapterErrorAbortsToken(t *testing.T) {
 	t.Parallel()
 	pipeline, principal, conn, _, client, _ := paginationSetup(t)

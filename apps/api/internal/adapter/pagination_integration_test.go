@@ -267,6 +267,88 @@ func TestKeyset_SQL_Debug(t *testing.T) {
 	t.Logf("MySQL Args: %v", args2)
 }
 
+// TestLoadTableMetadata_MySQL_RejectsWholePrefixUniqueIndex 验证 MySQL 复合前缀唯一索引
+// UNIQUE(name(10), tenant_id) 被整体拒绝：不得残留 tenant_id 并被误认为完整唯一约束
+// （Codex P1-A）。
+func TestLoadTableMetadata_MySQL_RejectsWholePrefixUniqueIndex(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	defer h.Release()
+	if h.entry.sqlDB == nil {
+		t.Skip("not a MySQL handle")
+	}
+	schema := h.entry.cfg.Database
+	table := "web38_uniq_pref"
+	_, err := h.entry.sqlDB.ExecContext(context.Background(),
+		"DROP TABLE IF EXISTS "+table)
+	if err != nil {
+		t.Skipf("skip: MySQL demo account lacks DDL privilege: %v", err)
+	}
+	defer func() { _, _ = h.entry.sqlDB.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+table) }()
+	_, err = h.entry.sqlDB.ExecContext(context.Background(),
+		"CREATE TABLE "+table+" (name VARCHAR(255) NOT NULL, tenant_id INT NOT NULL, "+
+			"UNIQUE KEY uq_name_pref (name(10), tenant_id))")
+	if err != nil {
+		t.Skipf("skip: cannot create prefix unique index table (MySQL %v): %v", schema, err)
+	}
+
+	meta, err := h.LoadTableMetadata(context.Background(), schema, table)
+	if err != nil {
+		t.Fatalf("LoadTableMetadata: %v", err)
+	}
+	for _, uq := range meta.UniqueConstraints {
+		if uq.Name == "uq_name_pref" {
+			t.Fatalf("prefix composite unique index must be rejected wholesale, got %+v", uq)
+		}
+		if uq.Columns[0] == "tenant_id" {
+			t.Fatalf("tenant_id must not survive as a complete unique constraint: %+v", uq)
+		}
+	}
+	if len(meta.UniqueConstraints) != 0 {
+		t.Fatalf("expected no unique constraints (whole prefix index rejected), got %+v", meta.UniqueConstraints)
+	}
+}
+
+// TestLoadTableMetadata_MySQL_RejectsWholeFunctionalIndex 验证 MySQL 复合函数/表达式唯一索引
+// UNIQUE(tenant_id, (LOWER(name))) 被整体拒绝（MySQL 8.0.13+ EXPRESSION 列）。
+func TestLoadTableMetadata_MySQL_RejectsWholeFunctionalIndex(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	defer h.Release()
+	if h.entry.sqlDB == nil {
+		t.Skip("not a MySQL handle")
+	}
+	schema := h.entry.cfg.Database
+	table := "web38_uniq_func"
+	_, err := h.entry.sqlDB.ExecContext(context.Background(),
+		"DROP TABLE IF EXISTS "+table)
+	if err != nil {
+		t.Skipf("skip: MySQL demo account lacks DDL privilege: %v", err)
+	}
+	defer func() { _, _ = h.entry.sqlDB.ExecContext(context.Background(), "DROP TABLE IF EXISTS "+table) }()
+	_, err = h.entry.sqlDB.ExecContext(context.Background(),
+		"CREATE TABLE "+table+" (name VARCHAR(255) NOT NULL, tenant_id INT NOT NULL, "+
+			"UNIQUE KEY uq_expr (tenant_id, (LOWER(name))))")
+	if err != nil {
+		t.Skipf("skip: cannot create functional unique index table (MySQL %v, need 8.0.13+): %v", schema, err)
+	}
+
+	meta, err := h.LoadTableMetadata(context.Background(), schema, table)
+	if err != nil {
+		t.Fatalf("LoadTableMetadata: %v", err)
+	}
+	for _, uq := range meta.UniqueConstraints {
+		if uq.Name == "uq_expr" {
+			t.Fatalf("functional unique index must be rejected wholesale, got %+v", uq)
+		}
+	}
+	if len(meta.UniqueConstraints) != 0 {
+		t.Fatalf("expected no unique constraints (whole functional index rejected), got %+v", meta.UniqueConstraints)
+	}
+}
+
 func TestTimeout_PG_SinglePage(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())

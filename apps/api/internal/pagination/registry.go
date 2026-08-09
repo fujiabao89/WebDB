@@ -262,6 +262,23 @@ func (r *Registry) Claim(handle string) (*Claim, error) {
 	return &Claim{reg: r, digest: d, version: e.version, state: e.state}, nil
 }
 
+// Revoke 原子删除一个尚未被 claim 的 ready token（如审计持久化失败后的撤销），
+// 释放计数与字节配额。token 不存在、已过期或已被 claim（in-flight）时 no-op；
+// in-flight token 只能通过其 Claim 句柄 Complete/Abort 结束，避免误删并发持有者。
+func (r *Registry) Revoke(handle string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.closed {
+		return
+	}
+	d := digestOf(handle)
+	e, ok := r.entries[d]
+	if !ok || e.status != statusReady {
+		return
+	}
+	r.deleteEntry(d)
+}
+
 // CleanupExpired 删除所有过期条目（ready 与 in-flight），并释放配额。
 func (r *Registry) CleanupExpired() {
 	r.mu.Lock()
@@ -450,7 +467,10 @@ func (c *Claim) Rotate(newState *ContinuationState) (string, error) {
 		return "", newRegistryError(ErrInvalidPageToken, "invalid new state")
 	}
 	cp := newState.deepCopy()
-	cp.ExpiresAt = r.now().Add(r.cfg.TTL)
+	// TTL 为绝对过期时间，自 token 创建起算（ADR-015 §6），旋转不得重新计算
+	// now+TTL：否则客户端在过期前持续请求下一页可无限延长服务端保存的
+	// SQL/参数/游标生命周期。旋转后继承被 claim 条目的原始 expiresAt。
+	cp.ExpiresAt = e.expiresAt
 	n := stateBytes(cp)
 	if n > r.cfg.MaxStateBytes {
 		r.deleteEntry(c.digest)

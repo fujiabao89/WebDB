@@ -225,6 +225,69 @@ func TestVerifySortPlanRejects(t *testing.T) {
 	}
 }
 
+func TestVerifySortPlanAcceptsAlternativeUniqueProof(t *testing.T) {
+	t.Parallel()
+	// 表同时有 PRIMARY KEY(id) 与 UNIQUE(email NOT NULL)：按 email 排序应接受，
+	// 因为任意一个合格证明（完整主键或全 NOT NULL 唯一约束）被排序键完整覆盖即满足
+	// ADR-014；findUniqueProofs 必须遍历全部证明，而非只检查第一个（通常是主键）。
+	meta := &TableMetadata{
+		Schema: "public",
+		Table:  "users",
+		Columns: []Column{
+			{Name: "id", Ordinal: 1, Nullable: false},
+			{Name: "email", Ordinal: 2, Nullable: false},
+		},
+		PrimaryKey:        &PrimaryKey{Columns: []string{"id"}},
+		UniqueConstraints: []UniqueConstraint{{Name: "uq_email", Columns: []string{"email"}}},
+	}
+	s, err := NewSchemaSnapshot("conn-1", DialectPostgreSQL, 1, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := VerifySortPlan(s, starShape("users"), []SortKey{key("email", SortAsc, false)})
+	if err != nil {
+		t.Fatalf("VerifySortPlan(sort by email with PK(id)+UNIQUE(email)) error = %v", err)
+	}
+	if !p.Valid() {
+		t.Fatal("plan invalid")
+	}
+}
+
+func TestVerifySortPlanAcceptsAnyOneOfMultipleUniqueProofs(t *testing.T) {
+	t.Parallel()
+	// PRIMARY KEY(id) + UNIQUE(a,b) + UNIQUE(email)，全部 NOT NULL：
+	// 排序键只需完整覆盖其中任意一个证明。
+	meta := &TableMetadata{
+		Schema: "public",
+		Table:  "users",
+		Columns: []Column{
+			{Name: "id", Ordinal: 1, Nullable: false},
+			{Name: "a", Ordinal: 2, Nullable: false},
+			{Name: "b", Ordinal: 3, Nullable: false},
+			{Name: "email", Ordinal: 4, Nullable: false},
+		},
+		PrimaryKey: &PrimaryKey{Columns: []string{"id"}},
+		UniqueConstraints: []UniqueConstraint{
+			{Name: "uq_ab", Columns: []string{"a", "b"}},
+			{Name: "uq_email", Columns: []string{"email"}},
+		},
+	}
+	s, err := NewSchemaSnapshot("conn-1", DialectPostgreSQL, 1, meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 按 (a, b) 排序：覆盖 uq_ab 而非主键，必须接受。
+	p, err := VerifySortPlan(s, starShape("users"), []SortKey{
+		key("a", SortAsc, false), key("b", SortAsc, false),
+	})
+	if err != nil {
+		t.Fatalf("VerifySortPlan(sort by a,b) error = %v", err)
+	}
+	if !p.Valid() {
+		t.Fatal("plan invalid")
+	}
+}
+
 func TestVerifySortPlanClientUniqueFlagHasNoEffect(t *testing.T) {
 	t.Parallel()
 	// 客户端排序键不含 Unique 字段；这里验证无任何唯一声明也能通过唯一性证明。

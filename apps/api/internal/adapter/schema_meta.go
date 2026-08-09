@@ -76,14 +76,14 @@ WHERE con.conrelid = (SELECT c.oid FROM pg_class c
   AND con.contype = 'u'
 ORDER BY con.conname, k.ordinality`
 
-	// MySQL 唯一键经 STATISTICS 取 NON_UNIQUE=0，并排除 PRIMARY 与
-	// 前缀索引（SUB_PART）和表达式/函数索引（EXPRESSION），只信任完整列唯一键。
-	metaMySQLUniqueSQL = `SELECT s.INDEX_NAME, s.COLUMN_NAME
+	// MySQL 唯一键经 STATISTICS 取 NON_UNIQUE=0，并排除 PRIMARY。SUB_PART/EXPRESSION
+	// 的危险判定在 scanMySQLUniquePairs 中按整个 INDEX_NAME 剔除：若任意 key part 是
+	// 前缀（SUB_PART）或表达式/函数（EXPRESSION），整个索引都不作为完整唯一约束，
+	// 不得只过滤危险行而把剩余列误当“完整唯一键”（Codex P1-A）。
+	metaMySQLUniqueSQL = `SELECT s.INDEX_NAME, s.COLUMN_NAME, s.SUB_PART, s.EXPRESSION
 FROM information_schema.STATISTICS s
 WHERE s.TABLE_SCHEMA = ? AND s.TABLE_NAME = ? AND s.NON_UNIQUE = 0
   AND s.INDEX_NAME <> 'PRIMARY'
-  AND s.SUB_PART IS NULL
-  AND s.EXPRESSION IS NULL
 ORDER BY s.INDEX_NAME, s.SEQ_IN_INDEX`
 )
 
@@ -149,6 +149,67 @@ func scanUniquePairs(rows rowIter) ([]queryplan.UniqueConstraint, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, wrapError(ErrDatabaseError, err)
+	}
+	return out, nil
+}
+
+// scanMySQLUniquePairs 读取 MySQL 唯一索引 (name, column, sub_part, expression) 行并按
+// INDEX_NAME 分组。若某个 key part 带 SUB_PART（前缀索引）或 EXPRESSION（函数/表达式
+// 索引），整个索引必须排除——不能把剩余列重建成“完整唯一约束”（例如 UNIQUE(name(10),
+// tenant_id) 若只过滤 name 行会留下 tenant_id 并错误签发 VerifiedSortPlan，导致跨页
+// 重复/漏行）。去重同一 (name, column)（防分区表重复行），保持每约束内列顺序。
+func scanMySQLUniquePairs(rows rowIter) ([]queryplan.UniqueConstraint, error) {
+	type group struct {
+		columns   []string
+		dangerous bool
+	}
+	var order []string
+	groups := make(map[string]*group)
+	for rows.Next() {
+		var name string
+		var col sql.NullString
+		var subPart sql.NullInt64
+		var expr sql.NullString
+		if err := rows.Scan(&name, &col, &subPart, &expr); err != nil {
+			return nil, wrapError(ErrDatabaseError, err)
+		}
+		g, ok := groups[name]
+		if !ok {
+			g = &group{}
+			groups[name] = g
+			order = append(order, name)
+		}
+		// 前缀（SUB_PART）/表达式/函数（EXPRESSION）key part，或 COLUMN_NAME 为
+		// NULL（MySQL 函数索引的隐藏 key part）：整个索引不得作为完整唯一约束。
+		if subPart.Valid || expr.Valid || !col.Valid {
+			g.dangerous = true
+		}
+		if g.dangerous {
+			continue
+		}
+		c := col.String
+		dup := false
+		for _, existing := range g.columns {
+			if existing == c {
+				dup = true
+				break
+			}
+		}
+		if dup {
+			continue
+		}
+		g.columns = append(g.columns, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrapError(ErrDatabaseError, err)
+	}
+	out := make([]queryplan.UniqueConstraint, 0, len(order))
+	for _, name := range order {
+		g := groups[name]
+		if g.dangerous {
+			continue
+		}
+		out = append(out, queryplan.UniqueConstraint{Name: name, Columns: g.columns})
 	}
 	return out, nil
 }
@@ -244,7 +305,7 @@ func loadMySQLTableMeta(ctx context.Context, db *sql.DB, schema, table string) (
 	if err != nil {
 		return nil, err
 	}
-	uqs, err := runQuery(ctx, myQuery(db), metaMySQLUniqueSQL, args, scanUniquePairs)
+	uqs, err := runQuery(ctx, myQuery(db), metaMySQLUniqueSQL, args, scanMySQLUniquePairs)
 	if err != nil {
 		return nil, err
 	}

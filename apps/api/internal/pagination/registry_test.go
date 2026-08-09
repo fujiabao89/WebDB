@@ -466,6 +466,108 @@ func TestClaimStateReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestRotateKeepsAbsoluteExpiry(t *testing.T) {
+	t.Parallel()
+	// 旋转不得重新计算 now+TTL：TTL 为绝对过期时间，自 token 创建起算（ADR-015 §6），
+	// 客户端不能通过持续请求下一页无限延长服务端保存的 SQL/参数/游标生命周期。
+	now := time.Now().UTC()
+	r := newTestRegistry(t, func(c *Config) {
+		c.Clock = func() time.Time { return now }
+		c.TTL = time.Minute
+	})
+	h, err := r.Create(testState(t, "u1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := r.Claim(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 30s 后旋转（仍在一个 TTL 内）。
+	r.mu.Lock()
+	r.cfg.Clock = func() time.Time { return now.Add(30 * time.Second) }
+	r.mu.Unlock()
+	st := testState(t, "u1")
+	st.CumulativeCount = 101
+	h2, err := c.Rotate(st)
+	if err != nil {
+		t.Fatalf("Rotate() error = %v", err)
+	}
+	r.mu.Lock()
+	e2 := r.entries[digestOf(h2)]
+	r.mu.Unlock()
+	want := now.Add(time.Minute) // 原始绝对过期时间
+	if !e2.expiresAt.Equal(want) {
+		t.Fatalf("rotated expiry = %v, want %v (must inherit original absolute expiry, not now+TTL)", e2.expiresAt, want)
+	}
+}
+
+func TestRotatedTokenRejectedAfterOriginalAbsoluteTTL(t *testing.T) {
+	t.Parallel()
+	// 旋转后的新 token 在原始绝对 TTL 之后必须拒绝，即使客户端持续旋转。
+	now := time.Now().UTC()
+	r := newTestRegistry(t, func(c *Config) {
+		c.Clock = func() time.Time { return now }
+		c.TTL = time.Minute
+	})
+	h, _ := r.Create(testState(t, "u1"))
+	c, err := r.Claim(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := testState(t, "u1")
+	st.CumulativeCount = 101
+	h2, err := c.Rotate(st)
+	if err != nil {
+		t.Fatalf("Rotate() error = %v", err)
+	}
+	// 推进到原始 TTL 之后。
+	r.mu.Lock()
+	r.cfg.Clock = func() time.Time { return now.Add(2 * time.Minute) }
+	r.mu.Unlock()
+	if _, err := r.Claim(h2); err == nil {
+		t.Fatal("rotated token claim succeeded after original absolute TTL")
+	}
+}
+
+func TestRevokeRemovesReadyToken(t *testing.T) {
+	t.Parallel()
+	// 审计持久化失败后撤销尚未发布的 ready token：不可再 Claim，配额释放。
+	r := newTestRegistry(t, nil)
+	h, err := r.Create(testState(t, "u1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Revoke(h)
+	if _, err := r.Claim(h); err == nil {
+		t.Fatal("revoked token still claimable")
+	}
+	s := r.Stats()
+	if s.ActiveTokens != 0 || s.InFlightTokens != 0 || s.GlobalBytes != 0 {
+		t.Fatalf("quota not released after revoke: %+v", s)
+	}
+}
+
+func TestRevokeNoOpsForClaimedOrMissing(t *testing.T) {
+	t.Parallel()
+	r := newTestRegistry(t, nil)
+	h, _ := r.Create(testState(t, "u1"))
+	c, err := r.Claim(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// in-flight token 由 Claim 句柄控制：Revoke 应 no-op，不误删并发持有者。
+	r.Revoke(h)
+	if err := c.Complete(); err != nil {
+		t.Fatalf("Complete() after revoke no-op error = %v", err)
+	}
+	// 不存在的 token：no-op，不 panic。
+	r.Revoke("0000000000000000000000000000000000000000000000000000000000000000")
+	if s := r.Stats(); s.ActiveTokens != 0 {
+		t.Fatalf("stats after no-op revoke = %+v, want 0 active", s)
+	}
+}
+
 func TestInvalidStateRejected(t *testing.T) {
 	t.Parallel()
 	r := newTestRegistry(t, nil)

@@ -101,6 +101,7 @@ type fakeAdapterHandle struct {
 	currentSchema    string
 	currentSchemaErr error
 	poolGeneration   int64
+	panicNextPage    bool // 注入 NextPage panic，验证 claim 的 panic 兜底
 }
 
 func (f *fakeAdapterHandle) Query(_ context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error) {
@@ -112,6 +113,9 @@ func (f *fakeAdapterHandle) Query(_ context.Context, req adapter.FirstPageReques
 func (f *fakeAdapterHandle) NextPage(_ context.Context, _ adapter.UserWorkspaceScope, plan queryplan.VerifiedNextPagePlan) (*adapter.QueryResult, error) {
 	f.nextCalls++
 	f.nextPlans = append(f.nextPlans, plan)
+	if f.panicNextPage {
+		panic("injected panic in adapter NextPage")
+	}
 	return f.nextResult, f.err
 }
 
