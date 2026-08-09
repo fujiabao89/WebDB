@@ -680,6 +680,18 @@ func TestNewServer_NilServicePanics(t *testing.T) {
 	})
 }
 
+// TestNewServer_NilPrincipalProviderPanics 验证缺失可信 Principal 配置时构造期拒绝
+// （D01b/CT-18：启动失败而非每请求 401）。
+func TestNewServer_NilPrincipalProviderPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for nil PrincipalProvider")
+		}
+	}()
+	svc := browse.NewService(nil, nil, nil, nil, nil, browse.DefaultLimits())
+	NewServer(svc, nil)
+}
+
 // TestWriteData_TooLarge 验证 browsehttp 成功 envelope 的字节预算（F2 方案 A）：
 // 序列化后超过 8 MiB 返回 422 result_too_large，而非写出 200。
 func TestWriteData_TooLarge(t *testing.T) {

@@ -30,10 +30,15 @@ type Server struct {
 	browseTimeout time.Duration
 }
 
-// NewServer 创建浏览 handler server。装配错误 fail-fast（F3）：nil browse.Service 立即 panic。
+// NewServer 创建浏览 handler server。装配错误 fail-fast（F3）：nil browse.Service 或
+// nil PrincipalProvider 立即 panic。D01b/CT-18：缺失可信 Principal 配置必须拒绝启动，
+// 而非每请求静默返回 401；仅运行时解析失败才返回 unauthorized。
 func NewServer(svc *browse.Service, pp PrincipalProvider) *Server {
 	if svc == nil {
 		panic("browsehttp: nil browse.Service")
+	}
+	if pp == nil {
+		panic("browsehttp: nil PrincipalProvider")
 	}
 	return &Server{
 		svc:           svc,

@@ -4,6 +4,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -298,6 +299,92 @@ func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
 	}
 	if len(allCols) <= 1 {
 		t.Fatalf("Columns(limit=100) returned %d rows, want >1 (prove LIMIT caps limit=1)", len(allCols))
+	}
+}
+
+// assertAdapterCode 断言错误是带指定稳定码的 AdapterError。
+func assertAdapterCode(t *testing.T, err error, want ErrorCode) {
+	t.Helper()
+	var ae *AdapterError
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected AdapterError, got %v", err)
+	}
+	if ae.Code != want {
+		t.Fatalf("code=%s, want %s", ae.Code, want)
+	}
+}
+
+// TestMetadataTimeoutBeforeFirstRow_PG 验证元数据查询在首行返回前超时映射为
+// query_timeout（而非 connection_busy）：Query 错误分支用 mapExecError 识别执行
+// 截止时间；取消映射为 query_cancelled（WEB-36 P1，Codex 审查）。
+func TestMetadataTimeoutBeforeFirstRow_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	// 截止时间已在过去 → 查询在返回任何行前即超时
+	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := h.Schemas(deadline, 10); err == nil {
+		t.Fatal("Schemas: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Tables(deadline, "public", 10); err == nil {
+		t.Fatal("Tables: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Columns(deadline, "public", "employees", 10); err == nil {
+		t.Fatal("Columns: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+
+	// 取消传播 → query_cancelled
+	cancelled, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if _, err := h.Schemas(cancelled, 10); err == nil {
+		t.Fatal("Schemas: expected cancel error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryCanceled)
+	}
+}
+
+// TestMetadataTimeoutBeforeFirstRow_MySQL 同 PG，验证 MySQL 元数据查询执行超时/取消映射。
+func TestMetadataTimeoutBeforeFirstRow_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := h.Schemas(deadline, 10); err == nil {
+		t.Fatal("Schemas: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Tables(deadline, "webdb_demo", 10); err == nil {
+		t.Fatal("Tables: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Columns(deadline, "webdb_demo", "employees", 10); err == nil {
+		t.Fatal("Columns: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+
+	cancelled, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if _, err := h.Schemas(cancelled, 10); err == nil {
+		t.Fatal("Schemas: expected cancel error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryCanceled)
 	}
 }
 

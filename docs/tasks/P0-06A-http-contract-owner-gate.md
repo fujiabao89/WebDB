@@ -2,7 +2,7 @@
 
 > **状态：未接受提案（Owner 决策已记录；契约未实施）｜日期：2026-08-08｜决策记录：fujiabao89**
 >
-> Owner 已对 D01–D18 全部决策逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 为专项决定，其余按推荐选项），**记录于本文件 §17**。**本契约仍是未接受提案**：未注册任何路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；实施与契约测试由并发任务 WEB-35/36/37/38/39 承接（§19 矩阵）。续页路由仍须在 ADR-014/015 目标态迁移完成后才可注册（§9.1）；本文档不自行关闭 WEB-34，Linear 状态由 Owner 更新。
+> Owner 已对 D01–D18 全部决策逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 为专项决定，其余按推荐选项），**记录于本文件 §17**。**本契约仍是未接受提案**：WEB-34 本身未注册任何路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；实施与契约测试由并发任务 WEB-35/36/37/38/39 承接（§19 矩阵）。截至 2026-08-09，WEB-36 已实现连接列表与 Schema 浏览组件（安全 DTO、授权列表服务、浏览 handler，§15 已标注实现证据）；契约验收仍以各实施任务交付为准。续页路由仍须在 ADR-014/015 目标态迁移完成后才可注册（§9.1）；本文档不自行关闭 WEB-34，Linear 状态由 Owner 更新。
 >
 > 日期：2026-08-08｜作者：Claude Code｜任务：[WEB-34](https://linear.app/webdb/issue/WEB-34/p0-06a最小-http-契约高保真范围映射与-owner-gate)（父任务 [WEB-12](https://linear.app/webdb/issue/WEB-12/p0-06最小-web-工作台)）
 >
@@ -16,7 +16,7 @@
 
 - **Owner 决策已记录（2026-08-08，fujiabao89）**：D01–D18 全部决策已由 Owner 逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 见对应章节，其余按推荐选项），记录于 §17。
 - **独立可核验审批证据**：Linear [WEB-34](https://linear.app/webdb/issue/WEB-34/p0-06a最小-http-契约高保真范围映射与-owner-gate) 任务及其审批评论（决策者 fujiabao89、时间 2026-08-08、D01-D18 对应关系）。证据可用前保持 `未接受提案`，且不注册任何路由。
-- **本契约状态为 `未接受提案`**：未注册路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；是并发实施任务（WEB-35/36/37/38/39）的共同设计基线，实施与 §19 契约测试由这些任务承接。
+- **本契约状态为 `未接受提案`**：WEB-34 本身未注册路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；是并发实施任务（WEB-35/36/37/38/39）的共同设计基线，实施与 §19 契约测试由这些任务承接。截至 2026-08-09，WEB-36 已实现连接列表与 Schema 浏览组件（安全 DTO、授权列表服务、浏览 handler 与测试，§15 已标注实现证据），其余实施任务（WEB-35/37/38/39）仍待交付。
 - 本文件不自行关闭 WEB-34；Linear WEB-34 状态由 Owner 更新。续页路由仍需 ADR-014/015 迁移完成后方可注册。
 
 ### 1.2 任务与验收（Linear WEB-34）
@@ -532,9 +532,9 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 
 | 契约元素 | 现有 Go 类型/API | 差异 |
 |---|---|---|
-| 连接安全 DTO | `metadata.Connection`（含 host/port/secret_ref/secret_version/created_by） | 需新增专用 DTO，不直接序列化 `Connection` |
-| 连接列表 | 仓储 `ListConnections(wsID)`（`repo.go:47`）；Service 无列表方法 | 需 Service 层新增授权列表编排（WEB-36） |
-| Schema 浏览 | `PoolHandle.Schemas/Tables/Columns`（`manager.go:368/384/403`） | 需 Service 编排：授权→凭证→Adapter 元数据浏览（WEB-36） |
+| 连接安全 DTO | `metadata.Connection`（含 host/port/secret_ref/secret_version/created_by） | **已实现（WEB-36，2026-08-09）**：`internal/browse/dto.go` `ConnectionDTO/SchemaDTO/TableDTO/ColumnDTO`，不直接序列化 `Connection` |
+| 连接列表 | 仓储 `ListConnections(wsID)`（`repo.go:47`）；Service 无列表方法 | **已实现（WEB-36）**：`browse.Service.ListConnections` + `metadata.ListConnectionsAllowed`（JOIN connection_policies WHERE allow_read=true + 参数化 LIMIT） |
+| Schema 浏览 | `PoolHandle.Schemas/Tables/Columns`（`manager.go:368/384/403`） | **已实现（WEB-36）**：`browse.Service.ListSchemas/Tables/Columns` + `browsehttp` handler（授权→凭证→元数据浏览；条目上限经参数化 LIMIT 在查询层强制） |
 | 主键/唯一约束 | `PrimaryKey/ForeignKey/Index/TableMetadata` 无加载入口（`metadata.go:29-62`） | 需新增可信 SchemaSnapshot 加载入口（WEB-38，ADR-014） |
 | 执行请求 DTO | `execution.ExecuteRequest{Principal,ConnectionID,SQL,Args,Engine}` | 公共 DTO 剥离 Engine/Principal，约束 Args（D07） |
 | 第一页执行 | `Pipeline.Execute`（`pipeline.go:161`） | 可复用；新增 HTTP handler + audit receipt 透传 |
