@@ -305,7 +305,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 超时 | 服务端 `StatementTimeoutMs` 生效；响应超时见 §12 |
 | 取消 | transport abort（D13 已批准）：HTTP 断开取消数据库查询；Execution/审计在独立有界 context 终结；浏览器用本地取消状态 |
 | 结果脱敏边界 | P0-06 **不提供结果列值脱敏**；控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007，§14）。演示库账号不得有读取密钥承载表权限 |
-| 数据库只读保护 | 阶段 D 为目标查询启用只读事务/会话（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），**WEB-35 交付**；启用前 SELECT 副作用不作为无条件接受项（§14 R5） |
+| 数据库只读保护 | 阶段 D 为目标查询启用只读事务/会话（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），**WEB-35 交付**。**fail-closed**：只读设置失败、当前已有事务且无法确认只读状态、或连接池复用连接未确认只读状态时，**拒绝请求、不执行目标查询**（`connection_unavailable`）；启用前 SELECT 副作用不作为无条件接受项（§14 R5） |
 
 ---
 
@@ -521,7 +521,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 - **审计完整**：append-only；审计失败扣留结果；`$SECURITY_ALERT` 告警；D11 原子提交延续。
 - **资源有界**：连接池上限（ADR-008）、准入（ADR-016）、分页容量（ADR-015）、无无界队列/缓存；列表/浏览超限 `result_too_large` 不静默截断（§6/§7）。
 - **查询结果脱敏边界**：P0-06 **不提供结果列值脱敏**。安全控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007）：演示/测试库账号不得授予读取凭据/KEK/密钥承载表或危险函数（SECURITY DEFINER）的权限。服务端结果列脱敏不在 P0-06 范围，如需须新 ADR 并经 Owner 批准。响应 canary 只断言不含 WebDB 自身凭据/KEK/连接串（CT-11 扩展覆盖 API 响应）。
-- **只读边界（R5 改为实施要求，不再无条件接受）**：P0-06 **要求执行层为目标查询启用数据库只读事务/会话**（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），由 WEB-35 交付（§8.3）。只读会话启用前，SELECT 函数副作用（含 SECURITY DEFINER）**不作为无条件接受的残余风险**——需 Owner 另行批准或新 ADR。演示/测试库账号仍不得授予危险函数 EXECUTE 权限；补充合成副作用函数负向测试（CT-20）。
+- **只读边界（R5 改为实施要求，不再无条件接受）**：P0-06 **要求执行层为目标查询启用数据库只读事务/会话**（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），由 WEB-35 交付（§8.3）。**fail-closed**：只读设置失败、当前已有事务且无法确认只读状态、或连接池复用连接未确认只读状态时，**拒绝执行目标查询**（`connection_unavailable`），不得继续。只读会话启用前，SELECT 函数副作用（含 SECURITY DEFINER）**不作为无条件接受的残余风险**——需 Owner 另行批准或新 ADR。演示/测试库账号仍不得授予危险函数 EXECUTE 权限；补充合成副作用函数负向测试（CT-20）及只读设置失败/连接复用未确认测试（CT-21/CT-22）。
 - **残余风险（接受后继续有效）**：Go 无法保证内存清零（R1）；服务重启 token 失效（R7）。
 
 ---
@@ -641,6 +641,8 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | CT-18 | 演示 Principal 缺失/非法/角色无效 | 启动 fatal 或请求 `unauthorized`；无零值/默认/客户端回退 |
 | CT-19 | 元数据浏览超时/取消后连接归还 | 超时/取消触发，连接归还，无遗留 |
 | CT-20 | 合成副作用函数（nextval/setval 等）在启用只读会话后执行 | 目标库拒绝写入副作用；结果只读 |
+| CT-21 | 只读事务/会话设置失败（驱动不支持/连接拒绝） | fail-closed：拒绝执行，Adapter 不执行目标查询 |
+| CT-22 | 连接池复用连接未确认只读状态 / 事务已开启且无法确认只读 | fail-closed：拒绝请求，不继续目标查询 |
 
 ### 19.2 E2E（Compose）
 
@@ -698,3 +700,4 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | 2026-08-08 | 响应 Greptile（1 条）与 CodeRabbit（13 条）PR 审查：§3 区分"绝不接收/可接收不得控制"（Engine/Environment 可见性）；D01b fail-closed（启动 fatal/unauthorized）；`meta` 必需性；连接/Schema 列表超限 `result_too_large` 不静默截断；元数据超时边界（5s/10s/15s）；标识符处理澄清为 information_schema 值参数绑定（非 quoteIdent 拼接）；`TABLE / VIEW`；查询结果脱敏边界明确（P0 不提供列值脱敏，需新 ADR）；请求示例去占位符并禁止内联参数；响应示例去 token 且加 `wire_type`；date/time/timestamp 无时区与 timestamptz 分开定义；超大值拒绝不截断；CT-11 覆盖响应、新增 CT-15..19。 |
 | 2026-08-09 | 响应"Tests, Docs And Handoff Evidence"检查：本 PR 仅记录设计与 Owner 决策，未实施 API/测试；按检查要求将契约状态改为**未接受提案**（保留 D01-D18 决策记录；明确未注册路由、未改运行时代码、无测试，不作为"已接受契约"；实施与 §19 契约测试由 WEB-35/36/37/38/39 承接）。 |
 | 2026-08-09 | 响应第二轮审查（CodeRabbit 4 + Greptile 1）：①§1.1 补充独立可核验审批证据（Linear WEB-34）；②workspace 不一致统一映射 `forbidden`(403)，不返回 404；③§6/§7 错误码表补 `result_too_large`(422)；④R5 只读边界改为实施要求（PG `default_transaction_read_only=on`/MySQL `SET SESSION TRANSACTION READ ONLY`，WEB-35 交付），不再无条件接受，新增 CT-20；⑤占位符拒绝统一为 `statement_not_allowed`(422) 单一确定性码。 |
+| 2026-08-09 | 只读保护 fail-closed 收紧（§8.3/§14 R5）：只读设置失败、事务已开启且无法确认只读、连接池复用未确认只读时**拒绝执行目标查询**（`connection_unavailable`）；新增 CT-21（只读设置失败）、CT-22（连接复用未确认/事务未确认只读）。 |
