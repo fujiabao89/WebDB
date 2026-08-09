@@ -677,7 +677,7 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 
 - 本文件是**纯文档**，无生产行为；回滚即 `git revert`（如已提交）或直接删除，不影响任何运行时代码。
 - 前向修复：Owner 审批后，任一决策调整只需更新本文件对应决策行并重新标注日期/批准人；并发任务以最新批准结论为准。
-- 不引入 migration、不新增依赖，无 Schema/依赖/安全策略变更。
+- 不引入 migration、不新增依赖，无 Schema/依赖/安全策略变更。**例外（WEB-36 已声明）**：`apps/api/internal/migrate/migrations/00003_add_connections_ws_created_at_idx.sql` 为 `connections (workspace_id, created_at DESC)` 建复合索引（支撑 ListConnections 过滤+排序走同一索引，避免大工作区额外排序）；Up/Down 均用 `CREATE/DROP INDEX CONCURRENTLY` + Goose `NO TRANSACTION` 指令（不阻塞 DML、事务外执行），up→down→up 已在 demo PostgreSQL 运行时验证；索引名/列不变、幂等可安全重放。回滚：`goose down`（00003 Down 并发删索引）。
 
 ---
 
