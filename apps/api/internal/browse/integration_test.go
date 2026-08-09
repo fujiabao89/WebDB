@@ -7,6 +7,7 @@ package browse
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -255,7 +256,7 @@ func TestBrowseIntegration_ReauthorizeOnEachLevel(t *testing.T) {
 	// schemas 成功不能使后续 tables 越过授权：此处用不存在连接 ID 断言仍返回连接不存在。
 	if _, err := svc.ListTables(ctx, p, uuid.New(), "public"); err == nil {
 		t.Fatal("expected error for unknown connection")
-	} else if err.Error() != "connection_not_found" {
+	} else if !errors.Is(err, ErrConnectionNotFound) {
 		t.Fatalf("want connection_not_found, got %v", err)
 	}
 }

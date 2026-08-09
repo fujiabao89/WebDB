@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -665,7 +666,7 @@ func TestListColumns_Success(t *testing.T) {
 }
 
 func urlQueryEscape(s string) string {
-	return strings.ReplaceAll(s, " ", "%20")
+	return url.QueryEscape(s)
 }
 
 // TestNewServer_NilServicePanics 验证装配错误 fail-fast（F3）：nil browse.Service 必须 panic。

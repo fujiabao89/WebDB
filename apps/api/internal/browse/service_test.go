@@ -999,6 +999,31 @@ func TestBoundedSentinel(t *testing.T) {
 	}
 }
 
+// TestValidIdent 表驱动验证标识符白名单（CT-16，P0-06A §7）：空值、空白、分号、
+// 注释、引号、点号、连字符、Unicode 及超长均拒绝；合法标识符与恰好 MaxIdentLen
+// 的边界值接受。
+func TestValidIdent(t *testing.T) {
+	long := strings.Repeat("a", MaxIdentLen)
+	rejected := []string{
+		"", " ", " a", "a ", "a;b", "--", "/*x*/", "'foo'", `"foo"`,
+		"a.b", "a-b", "a+b", `a\b`, "表", "名前", "\x00",
+		strings.Repeat("a", MaxIdentLen+1),
+	}
+	for _, tc := range rejected {
+		if ValidIdent(tc) {
+			t.Errorf("ValidIdent(%q)=true, want false", tc)
+		}
+	}
+	accepted := []string{
+		"users", "a", "a_$b", "A1_B2", long,
+	}
+	for _, tc := range accepted {
+		if !ValidIdent(tc) {
+			t.Errorf("ValidIdent(%q)=false, want true", tc)
+		}
+	}
+}
+
 // ---- 连接列表 ---------------------------------------------------------------
 
 func TestListConnections_FiltersPolicy(t *testing.T) {

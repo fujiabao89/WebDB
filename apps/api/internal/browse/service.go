@@ -56,16 +56,16 @@ func DefaultLimits() Limits {
 	return Limits{MaxConnections: 200, MaxEntries: 1000}
 }
 
-// boundedSentinel 返回 max+1 作为 sentinel，使查询层能区分"恰好等于上限"
-// 与"超过上限"：LIMIT max+1 在恰好 max 条时返回 max 条（正常），在多于
-// max 条时返回 max+1 条（超限）。防御整型溢出：max<0 或已为 int 最大值时
-// 原样返回，避免 +1 回绕成负值传入 LIMIT。MaxEntries 在 NewService 已归一
+// boundedSentinel 返回 n+1 作为 sentinel，使查询层能区分"恰好等于上限"
+// 与"超过上限"：LIMIT n+1 在恰好 n 条时返回 n 条（正常），在多于
+// n 条时返回 n+1 条（超限）。防御整型溢出：n<0 或已为 int 最大值时
+// 原样返回，避免 +1 回绕成负值传入 LIMIT。上限在 NewService 已归一
 // 化为正配置，此处为纵深防御。
-func boundedSentinel(max int) int {
-	if max < 0 || max == int(^uint(0)>>1) {
-		return max
+func boundedSentinel(n int) int {
+	if n < 0 || n == int(^uint(0)>>1) {
+		return n
 	}
-	return max + 1
+	return n + 1
 }
 
 // MaxResponseBytes 响应体字节上限（P0-06A §6/§7，D06b 已批准）。
@@ -135,11 +135,11 @@ func (s *Service) ListConnections(ctx context.Context, p Principal) ([]Connectio
 	if s.conns == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	conns, err := s.conns.ListConnectionsAllowed(ctx, p.WorkspaceID, s.limits.MaxConnections+1)
+	conns, err := s.conns.ListConnectionsAllowed(ctx, p.WorkspaceID, boundedSentinel(s.limits.MaxConnections))
 	if err != nil {
 		code := mapStoreError(err)
-		s.logStorageFailure("list_connections", p.WorkspaceID, uuid.Nil, err)
-		return nil, fmt.Errorf("%w: list connections failed", code)
+		s.logStorageFailure("list_connections failed", p.WorkspaceID, uuid.Nil, err)
+		return nil, fmt.Errorf("%w", code)
 	}
 	if len(conns) > s.limits.MaxConnections {
 		return nil, fmt.Errorf("%w", ErrResultTooLarge)

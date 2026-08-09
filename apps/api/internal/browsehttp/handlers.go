@@ -8,11 +8,13 @@ import (
 	"time"
 
 	"github.com/fujiabao89/webdb/internal/browse"
+	"github.com/fujiabao89/webdb/internal/metadata"
 	"github.com/google/uuid"
 )
 
-// 超时默认与上限（P0-06A §6 元数据库列表默认 5s、上限 10s；
-// §7 Schema 浏览目标库默认 5s、上限 15s）。
+// 超时默认与上限。连接列表（P0-06A §6）：元数据库查询默认 5s、上限 10s。
+// Schema 浏览（P0-06A §7）：HTTP 请求默认与上限均为 15s；契约中"连接获取默认
+// 5s"由 adapter 层 connAcquireTimeout 承担，非本 HTTP 默认。
 const (
 	defaultListTimeout   = 5 * time.Second
 	maxListTimeout       = 10 * time.Second
@@ -113,7 +115,9 @@ func (s *Server) boundCtx(r *http.Request, configured, def, max time.Duration) (
 }
 
 // respond 统一成功/错误输出：错误折叠为稳定安全摘要，原始错误不进入响应。
-func (s *Server) respond(w http.ResponseWriter, data any, err error) {
+// 内部错误日志记录 workspace_id、请求方法/路径与脱敏且有界的错误摘要
+// （浏览路由无 execution ID，D14 不适用）。
+func (s *Server) respond(w http.ResponseWriter, r *http.Request, data any, err error) {
 	if err == nil {
 		writeData(w, data)
 		return
@@ -123,8 +127,23 @@ func (s *Server) respond(w http.ResponseWriter, data any, err error) {
 		writeError(w, code)
 		return
 	}
-	s.logger.Error("browse handler internal error", "error", err.Error())
+	s.logger.Error("browse handler internal error",
+		"workspace_id", r.PathValue("workspace_id"),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"code", string(browse.ErrInternalError),
+		"error", boundedRedact(err.Error()))
 	writeError(w, browse.ErrInternalError)
+}
+
+// boundedRedact 返回脱敏且有界的错误摘要（上限 512 字节），避免敏感信息进入日志。
+func boundedRedact(msg string) string {
+	const maxLogErr = 512
+	s := metadata.RedactSensitive(msg)
+	if len(s) > maxLogErr {
+		s = s[:maxLogErr]
+	}
+	return s
 }
 
 // handleListConnections GET /api/v1/workspaces/{workspace_id}/connections
@@ -139,7 +158,7 @@ func (s *Server) handleListConnections(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.boundListCtx(r)
 	defer cancel()
 	out, err := s.svc.ListConnections(ctx, p)
-	s.respond(w, out, err)
+	s.respond(w, r, out, err)
 }
 
 // handleListSchemas GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}/schemas
@@ -159,7 +178,7 @@ func (s *Server) handleListSchemas(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.boundBrowseCtx(r)
 	defer cancel()
 	out, err := s.svc.ListSchemas(ctx, p, connID)
-	s.respond(w, out, err)
+	s.respond(w, r, out, err)
 }
 
 // handleListTables GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}/tables?schema=<ident>
@@ -184,7 +203,7 @@ func (s *Server) handleListTables(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.boundBrowseCtx(r)
 	defer cancel()
 	out, err := s.svc.ListTables(ctx, p, connID, schema)
-	s.respond(w, out, err)
+	s.respond(w, r, out, err)
 }
 
 // handleListColumns GET /api/v1/workspaces/{workspace_id}/connections/{connection_id}/columns?schema=<ident>&table=<ident>
@@ -210,5 +229,5 @@ func (s *Server) handleListColumns(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := s.boundBrowseCtx(r)
 	defer cancel()
 	out, err := s.svc.ListColumns(ctx, p, connID, schema, table)
-	s.respond(w, out, err)
+	s.respond(w, r, out, err)
 }

@@ -386,17 +386,14 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string, limit int) ([]Ta
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	var cancel context.CancelFunc
+	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
+	defer cancel()
 	limit = clampLimit(limit)
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-		defer cancel()
 		return pgTables(ctx, h.entry.pgPool, schema, limit)
 	case EngineMySQL:
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
-		defer cancel()
 		return mysqlTables(ctx, h.entry.sqlDB, schema, limit)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
