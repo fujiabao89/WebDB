@@ -259,15 +259,17 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 字段 | 公开？ | 说明 |
 |---|---|---|
 | `connection_id` | 是 | 必填，UUID；不存在/跨工作区统一 `connection_not_found` |
-| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**请求 SQL 不得包含未绑定参数占位符（`$N`/`?`/具名参数，字符串字面量除外）**，**禁止客户端自行内联用户输入**；含未绑定占位符的 SQL 统一返回 **`statement_not_allowed`**（422，确定性单一码）；原始 SQL 不进入日志/错误/审计 |
+| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**禁止客户端自行内联用户输入**。**占位符检测为方言感知的 token 级判定（禁止裸子串扫描）**：仅识别各自原生的**位置占位符**——PostgreSQL `$N`（`$`+数字）、MySQL `?`（可执行位置）——命中即统一返回 `statement_not_allowed`(422)。**放行（非占位符）**：PG JSONB 操作符 `?`/`?|`/`?&`、`::` 类型转换、`@>`/`<@`；字符串字面量、标识符、注释内的 `$`/`?`/`:`/`@`。**具名参数不在 P0-06 定义范围**（PG/MySQL 原生驱动无语义一致形态），不作拒绝依据。原始 SQL 不进入日志/错误/审计 |
 | `page_size` | 是 | 可选；0 用默认；**服务端钳制** ≤ 500 且 ≤ effectiveMaxRows（客户端不可提高上限） |
 | `order_by` | 是（意图字段） | 可选；**只是请求意图，不是唯一性证明**；唯一性只由 `VerifySortPlan` 产生（ADR-014） |
-| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含 `$N`/`?`/具名参数占位符的 SQL 无绑定值来源，**服务端一律拒绝**（**统一返回 `statement_not_allowed`，422，单一确定性码**），不允许客户端内联值绕过参数化边界 |
+| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含原生位置占位符（PG `$N`/MySQL `?`，可执行位置）的 SQL 无绑定值来源，**服务端一律拒绝**（**统一返回 `statement_not_allowed`，422，单一确定性码**），不允许客户端内联值绕过参数化边界 |
 | `engine` | 否 | 服务端从 `Connection.Engine` 派生（`pipeline.go:196-200`） |
 | `workspace_id`/`user`/`actor`/`trace` | 否 | 服务端 Principal/路由派生；客户端提交覆盖一律忽略 |
 | `policy max_rows`/`timeout` | 否 | 服务端策略上限；客户端 `page_size` 只可缩小不可放大 |
 | `mysql mode` | 否 | 服务端可信连接配置（`sqlpolicy.MySQLLexerMode`） |
 | `unique=true` | 否 | 客户端不得提交 `SortKey.Unique` 或任何唯一性证明（ADR-014） |
+
+> **占位符判定示例**：`SELECT payload::jsonb ? 'key' FROM t`、`SELECT a ?| ARRAY['x','y'] FROM t`、`SELECT a ?& ARRAY['x','y'] FROM t` 为 PG **合法只读查询**——`?`/`?|`/`?&` 按 token 判定为 JSONB 操作符而非占位符，**放行**；`SELECT * FROM t WHERE id = $1` 的 `$1` 为未绑定位置占位符，**拒绝**（`statement_not_allowed`）。
 
 ### 8.2 响应（第一页 + 审计 receipt）
 
@@ -635,7 +637,9 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | CT-12 | 错误响应不含内部码/原始错误/trace_id；receipt 的 trace_id 仅服务端生成 | 固定安全摘要 |
 | CT-13 | 结果 wire 类型与列 `wire_type` 一致（decimal 字符串、bool、浮点 number、时间字符串、binary Base64、NULL null；date/time/timestamp 无时区不 UTC 归一化） | 解码与 D08 一致 |
 | CT-14 | 连接列表/Schema 浏览不产生 AuditEvent（D05a/D05b） | 审计表无对应事件；脱敏指标/日志保留 |
-| CT-15 | 请求 SQL 含 `$N`/`?`/具名占位符（无 args 绑定） | 统一返回 `statement_not_allowed`(422)，Adapter 0 次 |
+| CT-15 | 请求 SQL 含 PG `$N` 或 MySQL `?` 位置占位符（可执行位置） | 统一 `statement_not_allowed`(422)，Adapter 0 次 |
+| CT-15a | PG JSONB `?`/`?|`/`?&`、`::`、`@>` 合法只读查询 | 放行（非占位符），允许执行 |
+| CT-15b | 字符串/注释/标识符内的 `$`/`?`/`:`/`@` | 放行（非占位符） |
 | CT-16 | schema/table 标识符注入（`;`/`--`/引号/超长） | 长度/字符校验拒绝，Adapter 0 次 |
 | CT-17 | 连接列表/Schema 列表超限（>200/>1000） | `result_too_large`(422)，不静默截断 |
 | CT-18 | 演示 Principal 缺失/非法/角色无效 | 启动 fatal 或请求 `unauthorized`；无零值/默认/客户端回退 |
@@ -701,3 +705,4 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | 2026-08-09 | 响应"Tests, Docs And Handoff Evidence"检查：本 PR 仅记录设计与 Owner 决策，未实施 API/测试；按检查要求将契约状态改为**未接受提案**（保留 D01-D18 决策记录；明确未注册路由、未改运行时代码、无测试，不作为"已接受契约"；实施与 §19 契约测试由 WEB-35/36/37/38/39 承接）。 |
 | 2026-08-09 | 响应第二轮审查（CodeRabbit 4 + Greptile 1）：①§1.1 补充独立可核验审批证据（Linear WEB-34）；②workspace 不一致统一映射 `forbidden`(403)，不返回 404；③§6/§7 错误码表补 `result_too_large`(422)；④R5 只读边界改为实施要求（PG `default_transaction_read_only=on`/MySQL `SET SESSION TRANSACTION READ ONLY`，WEB-35 交付），不再无条件接受，新增 CT-20；⑤占位符拒绝统一为 `statement_not_allowed`(422) 单一确定性码。 |
 | 2026-08-09 | 只读保护 fail-closed 收紧（§8.3/§14 R5）：只读设置失败、事务已开启且无法确认只读、连接池复用未确认只读时**拒绝执行目标查询**（`connection_unavailable`）；新增 CT-21（只读设置失败）、CT-22（连接复用未确认/事务未确认只读）。 |
+| 2026-08-09 | 占位符规则收敛为方言感知 token 级判定（§8.1）：仅拒绝 PG `$N`/MySQL `?` 原生位置占位符；**放行 PG JSONB `?`/`?|`/`?&`/`::`/`@>`**；字符串/注释/标识符内符号放行；**具名参数移出 P0-06 范围**（方言无一致语义）；新增 CT-15a/CT-15b。 |
