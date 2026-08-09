@@ -2,7 +2,7 @@
 
 > **状态：未接受提案（Owner 决策已记录；契约未实施）｜日期：2026-08-08｜决策记录：fujiabao89**
 >
-> Owner 已对 D01–D18 全部决策逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 为专项决定，其余按推荐选项），**记录于本文件 §17**。**本契约仍是未接受提案**：未注册任何路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；实施与契约测试由并发任务 WEB-35/36/37/38/39 承接（§19 矩阵）。续页路由仍须在 ADR-014/015 目标态迁移完成后才可注册（§9.1）；本文档不自行关闭 WEB-34，Linear 状态由 Owner 更新。
+> Owner 已对 D01–D18 全部决策逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 为专项决定，其余按推荐选项），**记录于本文件 §17**。**本契约仍是未接受提案**：WEB-34 本身未注册任何路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；实施与契约测试由并发任务 WEB-35/36/37/38/39 承接（§19 矩阵）。截至 2026-08-09，WEB-36 已实现连接列表与 Schema 浏览组件（安全 DTO、授权列表服务、浏览 handler，§15 已标注实现证据）；契约验收仍以各实施任务交付为准。续页路由仍须在 ADR-014/015 目标态迁移完成后才可注册（§9.1）；本文档不自行关闭 WEB-34，Linear 状态由 Owner 更新。
 >
 > 日期：2026-08-08｜作者：Claude Code｜任务：[WEB-34](https://linear.app/webdb/issue/WEB-34/p0-06a最小-http-契约高保真范围映射与-owner-gate)（父任务 [WEB-12](https://linear.app/webdb/issue/WEB-12/p0-06最小-web-工作台)）
 >
@@ -16,7 +16,7 @@
 
 - **Owner 决策已记录（2026-08-08，fujiabao89）**：D01–D18 全部决策已由 Owner 逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 见对应章节，其余按推荐选项），记录于 §17。
 - **独立可核验审批证据**：Linear [WEB-34](https://linear.app/webdb/issue/WEB-34/p0-06a最小-http-契约高保真范围映射与-owner-gate) 任务及其审批评论（决策者 fujiabao89、时间 2026-08-08、D01-D18 对应关系）。证据可用前保持 `未接受提案`，且不注册任何路由。
-- **本契约状态为 `未接受提案`**：未注册路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；是并发实施任务（WEB-35/36/37/38/39）的共同设计基线，实施与 §19 契约测试由这些任务承接。
+- **本契约状态为 `未接受提案`**：WEB-34 本身未注册路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；是并发实施任务（WEB-35/36/37/38/39）的共同设计基线，实施与 §19 契约测试由这些任务承接。截至 2026-08-09，WEB-36 已实现连接列表与 Schema 浏览组件（安全 DTO、授权列表服务、浏览 handler 与测试，§15 已标注实现证据），其余实施任务（WEB-35/37/38/39）仍待交付。
 - 本文件不自行关闭 WEB-34；Linear WEB-34 状态由 Owner 更新。续页路由仍需 ADR-014/015 迁移完成后方可注册。
 
 ### 1.2 任务与验收（Linear WEB-34）
@@ -186,7 +186,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 
 | 项 | 定义 |
 |---|---|
-| 授权条件 | 服务端 Principal 解析 → 成员资格（任意可读角色）→ 目标 workspace 与 Principal 一致。所有可读角色（owner/admin/editor/viewer）可见连接列表；**列表本身不要求 AllowRead**（AllowRead 是执行/浏览级授权，见 §7/§8） |
+| 授权条件 | 服务端 Principal 解析 → 成员资格（任意可读角色）→ 目标 workspace 与 Principal 一致。所有可读角色（owner/admin/editor/viewer）可访问连接列表接口；**列表仅展示 AllowRead=true 的连接，缺失或拒绝策略的连接不出现**（WEB-36 任务卡口径，防枚举；AllowRead 同时是执行/浏览级授权，见 §7/§8） |
 | 请求字段 | 路径：`workspace_id`（仅与 Principal.WorkspaceID 比对）；无 query/body |
 | 禁止字段 | 客户端不得提交 `user_id`、`actor_id`、`role`、`workspace_id` 覆盖、`engine` 过滤（如要按引擎过滤列为 D03 附属决策） |
 | 成功状态码 | `200 OK` |
@@ -230,7 +230,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 空数据语义 | `200` + 空数组；不返回 404 |
 | 错误码 | `invalid_scope`、`unauthorized`、`forbidden`、`connection_not_found`、`policy_not_configured`(404)、`read_not_allowed`(403)、`result_too_large`(422)、`connection_busy`、`database_error`、`internal_error` |
 | 超时/取消 | 每次浏览操作**有界超时**：目标库连接获取默认 5s、上限 15s（复用 `connAcquireTimeout` 语义）；配置缺失/非法时 fail-closed 拒绝；HTTP 取消传播到目标库并归还连接 |
-| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断** |
+| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断**。条目上限在**查询层强制执行**：服务端把 `MaxEntries+1` sentinel 下传 `PoolHandle.Schemas/Tables/Columns`，PG/MySQL 用参数化 `LIMIT` 在超限前停止扫描，避免先累积完整 catalog 再拒绝（WEB-36 P1） |
 | 是否访问目标数据库 | **是**（`PoolHandle.Schemas/Tables/Columns`）；每次浏览重新获取连接，不做无界缓存 |
 | 是否创建 Execution | 否（Schema 浏览不是 SQL 执行；不创建 `executions` 行） |
 | 是否追加 AuditEvent | **D05a 已批准**：Schema 树逐节点读取**不**写 AuditEvent；保留脱敏指标与服务端日志。未来若新增显式 Schema 刷新任务，再通过独立事件契约决定审计 |
@@ -532,9 +532,9 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 
 | 契约元素 | 现有 Go 类型/API | 差异 |
 |---|---|---|
-| 连接安全 DTO | `metadata.Connection`（含 host/port/secret_ref/secret_version/created_by） | 需新增专用 DTO，不直接序列化 `Connection` |
-| 连接列表 | 仓储 `ListConnections(wsID)`（`repo.go:47`）；Service 无列表方法 | 需 Service 层新增授权列表编排（WEB-36） |
-| Schema 浏览 | `PoolHandle.Schemas/Tables/Columns`（`manager.go:368/384/403`） | 需 Service 编排：授权→凭证→Adapter 元数据浏览（WEB-36） |
+| 连接安全 DTO | `metadata.Connection`（含 host/port/secret_ref/secret_version/created_by） | **已实现（WEB-36，2026-08-09）**：`internal/browse/dto.go` `ConnectionDTO/SchemaDTO/TableDTO/ColumnDTO`，不直接序列化 `Connection` |
+| 连接列表 | 仓储 `ListConnections(wsID)`（`repo.go:47`）；Service 无列表方法 | **已实现（WEB-36）**：`browse.Service.ListConnections` + `metadata.ListConnectionsAllowed`（JOIN connection_policies WHERE allow_read=true + 参数化 LIMIT） |
+| Schema 浏览 | `PoolHandle.Schemas/Tables/Columns`（`manager.go:368/384/403`） | **已实现（WEB-36）**：`browse.Service.ListSchemas/Tables/Columns` + `browsehttp` handler（授权→凭证→元数据浏览；条目上限经参数化 LIMIT 在查询层强制） |
 | 主键/唯一约束 | `PrimaryKey/ForeignKey/Index/TableMetadata` 无加载入口（`metadata.go:29-62`） | 需新增可信 SchemaSnapshot 加载入口（WEB-38，ADR-014） |
 | 执行请求 DTO | `execution.ExecuteRequest{Principal,ConnectionID,SQL,Args,Engine}` | 公共 DTO 剥离 Engine/Principal，约束 Args（D07） |
 | 第一页执行 | `Pipeline.Execute`（`pipeline.go:161`） | 可复用；新增 HTTP handler + audit receipt 透传 |
@@ -677,7 +677,7 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 
 - 本文件是**纯文档**，无生产行为；回滚即 `git revert`（如已提交）或直接删除，不影响任何运行时代码。
 - 前向修复：Owner 审批后，任一决策调整只需更新本文件对应决策行并重新标注日期/批准人；并发任务以最新批准结论为准。
-- 不引入 migration、不新增依赖，无 Schema/依赖/安全策略变更。
+- 不引入 migration、不新增依赖，无 Schema/依赖/安全策略变更。**例外（WEB-36 已声明）**：`apps/api/internal/migrate/migrations/00003_add_connections_ws_created_at_idx.sql` 为 `connections (workspace_id, created_at DESC)` 建复合索引（支撑 ListConnections 过滤+排序走同一索引，避免大工作区额外排序）；Up/Down 均用 `CREATE/DROP INDEX CONCURRENTLY` + Goose `NO TRANSACTION` 指令（不阻塞 DML、事务外执行），up→down→up 已在 demo PostgreSQL 运行时验证；索引名/列不变、幂等可安全重放。回滚：`goose down`（00003 Down 并发删索引）。
 
 ---
 

@@ -4,6 +4,7 @@ package adapter
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strconv"
 	"testing"
@@ -147,7 +148,7 @@ func TestSchemas_PG(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background())
+	schemas, err := h.Schemas(context.Background(), browseScope(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestSchemas_MySQL(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background())
+	schemas, err := h.Schemas(context.Background(), browseScope(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -181,7 +182,7 @@ func TestTables_PG(t *testing.T) {
 	h := mustGet(t, m, pgCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "public")
+	tables, err := h.Tables(context.Background(), browseScope(), "public", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -199,7 +200,7 @@ func TestTables_MySQL(t *testing.T) {
 	h := mustGet(t, m, myCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "webdb_demo")
+	tables, err := h.Tables(context.Background(), browseScope(), "webdb_demo", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -209,6 +210,374 @@ func TestTables_MySQL(t *testing.T) {
 		}
 	}
 	t.Logf("MySQL tables: %d", len(tables))
+}
+
+// TestMetadataBrowsing_LimitBound_PG 验证元数据浏览查询层参数化 LIMIT 生效（WEB-36 P1）：
+// 当 catalog 多于 limit 时，limit 只返回 limit 行，不会先累积完整 catalog 再拒绝。
+func TestMetadataBrowsing_LimitBound_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	schemas, err := h.Schemas(context.Background(), browseScope(), 1)
+	if err != nil {
+		t.Fatalf("Schemas(limit=1): %v", err)
+	}
+	if len(schemas) > 1 {
+		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
+	}
+
+	tables, err := h.Tables(context.Background(), browseScope(), "public", 1)
+	if err != nil {
+		t.Fatalf("Tables(limit=1): %v", err)
+	}
+	if len(tables) > 1 {
+		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
+	}
+	allTables, err := h.Tables(context.Background(), browseScope(), "public", 1000)
+	if err != nil {
+		t.Fatalf("Tables(limit=1000): %v", err)
+	}
+	if len(allTables) < len(tables) {
+		t.Fatalf("Tables(limit=1000) returned %d rows, want >= limit=1 (%d)", len(allTables), len(tables))
+	}
+
+	// employees 至少 1 列：limit=1 恰返回 1 行、无上限查询返回 >1 行，证明 LIMIT 生效
+	// （列数由 seed 决定，不硬编码，兼容本地/CI 不同定义）。
+	cols, err := h.Columns(context.Background(), browseScope(), "public", "employees", 1)
+	if err != nil {
+		t.Fatalf("Columns(limit=1): %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
+	}
+	allCols, err := h.Columns(context.Background(), browseScope(), "public", "employees", 100)
+	if err != nil {
+		t.Fatalf("Columns(limit=100): %v", err)
+	}
+	if len(allCols) <= 1 {
+		t.Fatalf("Columns(limit=100) returned %d rows, want >1 (prove LIMIT caps limit=1)", len(allCols))
+	}
+}
+
+// TestMetadataBrowsing_LimitBound_MySQL 同 PG，验证 MySQL 元数据查询 LIMIT 生效。
+func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	schemas, err := h.Schemas(context.Background(), browseScope(), 1)
+	if err != nil {
+		t.Fatalf("Schemas(limit=1): %v", err)
+	}
+	if len(schemas) > 1 {
+		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
+	}
+
+	tables, err := h.Tables(context.Background(), browseScope(), "webdb_demo", 1)
+	if err != nil {
+		t.Fatalf("Tables(limit=1): %v", err)
+	}
+	if len(tables) > 1 {
+		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
+	}
+
+	cols, err := h.Columns(context.Background(), browseScope(), "webdb_demo", "employees", 1)
+	if err != nil {
+		t.Fatalf("Columns(limit=1): %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
+	}
+	allCols, err := h.Columns(context.Background(), browseScope(), "webdb_demo", "employees", 100)
+	if err != nil {
+		t.Fatalf("Columns(limit=100): %v", err)
+	}
+	if len(allCols) <= 1 {
+		t.Fatalf("Columns(limit=100) returned %d rows, want >1 (prove LIMIT caps limit=1)", len(allCols))
+	}
+}
+
+// assertAdapterCode 断言错误是带指定稳定码的 AdapterError。
+func assertAdapterCode(t *testing.T, err error, want ErrorCode) {
+	t.Helper()
+	var ae *AdapterError
+	if !errors.As(err, &ae) {
+		t.Fatalf("expected AdapterError, got %v", err)
+	}
+	if ae.Code != want {
+		t.Fatalf("code=%s, want %s", ae.Code, want)
+	}
+}
+
+// TestMetadataTimeoutBeforeFirstRow_PG 验证元数据查询在首行返回前超时映射为
+// query_timeout（而非 connection_busy）：Query 错误分支用 mapExecError 识别执行
+// 截止时间；取消映射为 query_cancelled（WEB-36 P1，Codex 审查）。
+func TestMetadataTimeoutBeforeFirstRow_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	// 截止时间已在过去 → 查询在返回任何行前即超时
+	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := h.Schemas(deadline, browseScope(), 10); err == nil {
+		t.Fatal("Schemas: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Tables(deadline, browseScope(), "public", 10); err == nil {
+		t.Fatal("Tables: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Columns(deadline, browseScope(), "public", "employees", 10); err == nil {
+		t.Fatal("Columns: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+
+	// 取消传播 → query_cancelled
+	cancelled, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if _, err := h.Schemas(cancelled, browseScope(), 10); err == nil {
+		t.Fatal("Schemas: expected cancel error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryCanceled)
+	}
+}
+
+// TestMetadataTimeoutBeforeFirstRow_MySQL 同 PG，验证 MySQL 元数据查询执行超时/取消映射。
+func TestMetadataTimeoutBeforeFirstRow_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	if _, err := h.Schemas(deadline, browseScope(), 10); err == nil {
+		t.Fatal("Schemas: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Tables(deadline, browseScope(), "webdb_demo", 10); err == nil {
+		t.Fatal("Tables: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+	if _, err := h.Columns(deadline, browseScope(), "webdb_demo", "employees", 10); err == nil {
+		t.Fatal("Columns: expected timeout error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryTimeout)
+	}
+
+	cancelled, cancel2 := context.WithCancel(context.Background())
+	cancel2()
+	if _, err := h.Schemas(cancelled, browseScope(), 10); err == nil {
+		t.Fatal("Schemas: expected cancel error")
+	} else {
+		assertAdapterCode(t, err, ErrQueryCanceled)
+	}
+}
+
+// TestMetadataBrowsing_AdmissionLimited 验证元数据浏览受 AdmissionController 用户/
+// 工作区/连接级并发准入约束（ADR-016）：耗尽连接级 permit 后，Schemas/Tables/Columns
+// 返回 rate_limited（与 Query/NextPage 一致），释放后恢复。
+func TestMetadataBrowsing_AdmissionLimited(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	// 连接级 maxConn=5：用 5 个不同用户/工作区共享同一 connectionID 占满连接限流器，
+	// 避免命中用户（maxUser=2）/工作区（maxWorkspace=10）限流器。
+	permits := make([]*Permit, 0, 5)
+	for i := 0; i < 5; i++ {
+		p, err := h.entry.manager.ac.TryAcquire("u"+strconv.Itoa(i+1), "w"+strconv.Itoa(i+1), h.entry.cfg.ConnectionID)
+		if err != nil {
+			t.Fatalf("TryAcquire %d: %v", i, err)
+		}
+		permits = append(permits, p)
+	}
+	release := func() {
+		for _, p := range permits {
+			p.Release()
+		}
+		permits = permits[:0]
+	}
+	defer release()
+
+	ctx := context.Background()
+	for name, fn := range map[string]func() error{
+		"Schemas": func() error { _, err := h.Schemas(ctx, browseScope(), 10); return err },
+		"Tables":  func() error { _, err := h.Tables(ctx, browseScope(), "public", 10); return err },
+		"Columns": func() error { _, err := h.Columns(ctx, browseScope(), "public", "employees", 10); return err },
+	} {
+		err := fn()
+		if err == nil {
+			t.Fatalf("%s: expected rate_limited error", name)
+		}
+		assertAdapterCode(t, err, ErrRateLimited)
+	}
+
+	// 释放全部 permit 后元数据浏览恢复。
+	release()
+	if _, err := h.Schemas(ctx, browseScope(), 10); err != nil {
+		t.Fatalf("Schemas after release: %v", err)
+	}
+}
+
+func TestCancel_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
+	req := FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT pg_sleep(10), id FROM employees", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	}
+	_, err := h.Query(ctx, req)
+	if err == nil {
+		t.Fatal("expected cancel error")
+	}
+	t.Logf("cancel: %v", err)
+	// Verify pool still works
+	r2, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("pool recovery after cancel: %v", err)
+	}
+	t.Logf("recovery: %d rows", r2.ReturnedRows)
+}
+
+func TestTimeout_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := h.Query(ctx, FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT SLEEP(10), id FROM employees", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err == nil {
+		t.Fatal("expected timeout error")
+	}
+	t.Logf("mysql timeout: %v", err)
+	r2, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("mysql pool recovery after timeout: %v", err)
+	}
+	t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+}
+
+func TestCancel_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(500 * time.Millisecond); cancel() }()
+	_, err := h.Query(ctx, FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT SLEEP(10), id FROM employees", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err == nil {
+		t.Fatal("expected cancel error")
+	}
+	t.Logf("mysql cancel: %v", err)
+	r2, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("mysql pool recovery after cancel: %v", err)
+	}
+	t.Logf("mysql recovery: %d rows", r2.ReturnedRows)
+}
+
+func TestLeak_Timeout_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		h.Query(ctx, FirstPageRequest{
+			Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+			SQL:   "SELECT pg_sleep(5), id FROM employees", Args: nil,
+			PageSize: 100, MaxRows: 100,
+		})
+		cancel()
+	}
+	r, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("leak check failed after 5 timeouts: %v", err)
+	}
+	if r.ReturnedRows != 1 {
+		t.Fatalf("expected 1 row, got %d", r.ReturnedRows)
+	}
+	t.Logf("PG leak check passed: %d rows after 5 timeouts", r.ReturnedRows)
+}
+
+func TestLeak_Cancel_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+	for i := 0; i < 5; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(100 * time.Millisecond); cancel() }()
+		h.Query(ctx, FirstPageRequest{
+			Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+			SQL:   "SELECT pg_sleep(5), id FROM employees", Args: nil,
+			PageSize: 100, MaxRows: 100,
+		})
+	}
+	r, err := h.Query(context.Background(), FirstPageRequest{
+		Scope: UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:   "SELECT 1 AS n", Args: nil,
+		PageSize: 100, MaxRows: 100,
+	})
+	if err != nil {
+		t.Fatalf("leak check failed after 5 cancels: %v", err)
+	}
+	if r.ReturnedRows != 1 {
+		t.Fatalf("expected 1 row, got %d", r.ReturnedRows)
+	}
+	t.Logf("PG cancel leak check passed")
 }
 
 func TestAdmission_RateLimit(t *testing.T) {
@@ -252,6 +621,11 @@ func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 		t.Fatalf("Get: %v", err)
 	}
 	return h
+}
+
+// browseScope 元数据浏览测试作用域（合成标识，非真实凭证）。
+func browseScope() UserWorkspaceScope {
+	return UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 }
 
 func ensureEmployees(t *testing.T, h *PoolHandle) {
