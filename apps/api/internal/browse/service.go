@@ -36,11 +36,13 @@ type PolicyReader interface {
 
 // MetadataBrowser 授权通过后访问目标库元数据的最小契约。
 // 生产实现包装 adapter.AdapterManager.Get + PoolHandle.Schemas/Tables/Columns，
-// 并保证 handle.Release 归还连接。
+// 并保证 handle.Release 归还连接。limit 为服务端有界上限（MaxEntries+1 sentinel），
+// 必须下传查询层参数化 LIMIT 或在迭代到 sentinel 行时停止，不能先累积完整结果再拒绝
+// （WEB-36 P1：元数据条目上限不得在无界检索之后才执行）。
 type MetadataBrowser interface {
-	Schemas(ctx context.Context, cfg adapter.ConnectConfig) ([]adapter.Schema, error)
-	Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string) ([]adapter.Table, error)
-	Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string) ([]adapter.Column, error)
+	Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
+	Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
+	Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
 }
 
 // Limits 浏览响应硬上限（P0-06A §6/§7，D06c 已批准：连接 200、浏览层级 1000）。
@@ -52,6 +54,18 @@ type Limits struct {
 // DefaultLimits 返回 Owner 批准的默认上限。
 func DefaultLimits() Limits {
 	return Limits{MaxConnections: 200, MaxEntries: 1000}
+}
+
+// boundedSentinel 返回 max+1 作为 sentinel，使查询层能区分"恰好等于上限"
+// 与"超过上限"：LIMIT max+1 在恰好 max 条时返回 max 条（正常），在多于
+// max 条时返回 max+1 条（超限）。防御整型溢出：max<0 或已为 int 最大值时
+// 原样返回，避免 +1 回绕成负值传入 LIMIT。MaxEntries 在 NewService 已归一
+// 化为正配置，此处为纵深防御。
+func boundedSentinel(max int) int {
+	if max < 0 || max == int(^uint(0)>>1) {
+		return max
+	}
+	return max + 1
 }
 
 // MaxResponseBytes 响应体字节上限（P0-06A §6/§7，D06b 已批准）。
@@ -159,7 +173,7 @@ func (s *Service) ListSchemas(ctx context.Context, p Principal, connID uuid.UUID
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	schemas, err := s.browser.Schemas(ctx, cfg)
+	schemas, err := s.browser.Schemas(ctx, cfg, boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}
@@ -192,7 +206,7 @@ func (s *Service) ListTables(ctx context.Context, p Principal, connID uuid.UUID,
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	tables, err := s.browser.Tables(ctx, cfg, schema)
+	tables, err := s.browser.Tables(ctx, cfg, schema, boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}
@@ -225,7 +239,7 @@ func (s *Service) ListColumns(ctx context.Context, p Principal, connID uuid.UUID
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	cols, err := s.browser.Columns(ctx, cfg, schema, table)
+	cols, err := s.browser.Columns(ctx, cfg, schema, table, boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}
@@ -398,6 +412,16 @@ func mapAdapterError(err error) StableErrorCode {
 			adapter.ErrInvalidConfig, adapter.ErrUnsupportedEngine:
 			return ErrConnectionUnavailable
 		case adapter.ErrDatabaseError:
+			// 目标库 rows.Err()/rows.Scan 会把取消/超时包装进 cause（WrapDatabaseError
+			// 保留 cause 链）。先识别 context 语义，再退化为通用 database_error，
+			// 否则流式读取中的取消会被误报为 500（WEB-36 P1）。connection_busy
+			// 等其余 Adapter 码仍保持先于 context 判定（P2-4）。
+			if errors.Is(err, context.DeadlineExceeded) {
+				return ErrQueryTimeout
+			}
+			if errors.Is(err, context.Canceled) {
+				return ErrQueryCancelled
+			}
 			return ErrDatabaseError
 		}
 	}

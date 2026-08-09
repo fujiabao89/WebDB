@@ -61,21 +61,21 @@ func (r fResolver) ResolveCredential(ctx context.Context, wsID, secretRef uuid.U
 }
 
 type fBrowser struct {
-	schemas func(ctx context.Context, cfg adapter.ConnectConfig) ([]adapter.Schema, error)
-	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string) ([]adapter.Table, error)
-	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string) ([]adapter.Column, error)
+	schemas func(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
+	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
+	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
 }
 
-func (b fBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig) ([]adapter.Schema, error) {
-	return b.schemas(ctx, cfg)
+func (b fBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
+	return b.schemas(ctx, cfg, limit)
 }
 
-func (b fBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string) ([]adapter.Table, error) {
-	return b.tables(ctx, cfg, schema)
+func (b fBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error) {
+	return b.tables(ctx, cfg, schema, limit)
 }
 
-func (b fBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string) ([]adapter.Column, error) {
-	return b.columns(ctx, cfg, schema, table)
+func (b fBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error) {
+	return b.columns(ctx, cfg, schema, table, limit)
 }
 
 func wsID() uuid.UUID { return uuid.MustParse("11111111-1111-1111-1111-111111111111") }
@@ -337,7 +337,7 @@ func TestListSchemas_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "demo_reader", Password: "secret"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				return []adapter.Schema{{Name: "public"}}, nil
 			},
 		},
@@ -403,7 +403,7 @@ func TestListSchemas_DatabaseErrorRedacted(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrDatabaseError, Message: "pq: permission denied for relation secrets"}
 			},
 		},
@@ -436,7 +436,7 @@ func TestListSchemas_TimeoutMapsTo504(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
 				return nil, context.DeadlineExceeded
 			},
 		},
@@ -465,7 +465,7 @@ func TestListSchemas_CancelledMapsTo499(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
 				return nil, context.Canceled
 			},
 		},
@@ -476,6 +476,68 @@ func TestListSchemas_CancelledMapsTo499(t *testing.T) {
 	}
 	if eb := decodeErr(t, rr); eb.Error.Code != string(browse.ErrQueryCancelled) {
 		t.Fatalf("code=%q want query_cancelled", eb.Error.Code)
+	}
+}
+
+// TestListSchemas_DatabaseErrorCancelMapsTo499 验证流式读取中数据库错误包装的取消
+// cause 映射为 499/query_cancelled，而非 500/database_error（WEB-36 P1）。
+func TestListSchemas_DatabaseErrorCancelMapsTo499(t *testing.T) {
+	s := newTestServer(t, browseDeps{
+		members: fMembers{fn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
+			return okMember(), nil
+		}},
+		conns: fConns{byID: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.Connection, error) {
+			return conn(), nil
+		}},
+		policies: fPolicies{byConn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.ConnectionPolicy, error) {
+			return okPolicy(), nil
+		}},
+		resolver: fResolver{fn: func(context.Context, uuid.UUID, uuid.UUID, int) (credentials.CredentialPayload, error) {
+			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
+		}},
+		browser: fBrowser{
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+				return nil, adapter.WrapDatabaseError(context.Canceled)
+			},
+		},
+	})
+	rr := doReq(t, s.Handler(), http.MethodGet, "/api/v1/workspaces/"+wsID().String()+"/connections/"+cid().String()+"/schemas")
+	if rr.Code != 499 {
+		t.Fatalf("status=%d want 499", rr.Code)
+	}
+	if eb := decodeErr(t, rr); eb.Error.Code != string(browse.ErrQueryCancelled) {
+		t.Fatalf("code=%q want query_cancelled", eb.Error.Code)
+	}
+}
+
+// TestListSchemas_DatabaseErrorTimeoutMapsTo504 验证数据库错误包装的超时 cause
+// 映射为 504/query_timeout，而非 500/database_error。
+func TestListSchemas_DatabaseErrorTimeoutMapsTo504(t *testing.T) {
+	s := newTestServer(t, browseDeps{
+		members: fMembers{fn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
+			return okMember(), nil
+		}},
+		conns: fConns{byID: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.Connection, error) {
+			return conn(), nil
+		}},
+		policies: fPolicies{byConn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.ConnectionPolicy, error) {
+			return okPolicy(), nil
+		}},
+		resolver: fResolver{fn: func(context.Context, uuid.UUID, uuid.UUID, int) (credentials.CredentialPayload, error) {
+			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
+		}},
+		browser: fBrowser{
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+				return nil, adapter.WrapDatabaseError(context.DeadlineExceeded)
+			},
+		},
+	})
+	rr := doReq(t, s.Handler(), http.MethodGet, "/api/v1/workspaces/"+wsID().String()+"/connections/"+cid().String()+"/schemas")
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d want 504", rr.Code)
+	}
+	if eb := decodeErr(t, rr); eb.Error.Code != string(browse.ErrQueryTimeout) {
+		t.Fatalf("code=%q want query_timeout", eb.Error.Code)
 	}
 }
 
@@ -505,7 +567,7 @@ func TestListSchemas_429RetryAfter(t *testing.T) {
 					return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 				}},
 				browser: fBrowser{
-					schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+					schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 						return nil, &adapter.AdapterError{Code: tc.code}
 					},
 				},
@@ -586,7 +648,7 @@ func TestListColumns_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			columns: func(context.Context, adapter.ConnectConfig, string, string) ([]adapter.Column, error) {
+			columns: func(context.Context, adapter.ConnectConfig, string, string, int) ([]adapter.Column, error) {
 				return []adapter.Column{{Name: "id", Ordinal: 1, NativeType: "int4", Nullable: false, HasDefault: true}}, nil
 			},
 		},
@@ -648,7 +710,7 @@ func TestListSchemas_ResponseByteTooLarge(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				return []adapter.Schema{{Name: strings.Repeat("a", browse.MaxResponseBytes)}}, nil
 			},
 		},

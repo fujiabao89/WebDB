@@ -365,56 +365,69 @@ func (h *PoolHandle) Ping(ctx context.Context) error {
 	}
 	return newError(ErrPoolClosed, "no connection", nil)
 }
-func (h *PoolHandle) Schemas(ctx context.Context) ([]Schema, error) {
+func (h *PoolHandle) Schemas(ctx context.Context, limit int) ([]Schema, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
+	limit = clampLimit(limit)
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
-		return pgSchemas(ctx, h.entry.pgPool)
+		return pgSchemas(ctx, h.entry.pgPool, limit)
 	case EngineMySQL:
-		return mysqlSchemas(ctx, h.entry.sqlDB)
+		return mysqlSchemas(ctx, h.entry.sqlDB, limit)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
 	}
 }
-func (h *PoolHandle) Tables(ctx context.Context, schema string) ([]Table, error) {
+func (h *PoolHandle) Tables(ctx context.Context, schema string, limit int) ([]Table, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	limit = clampLimit(limit)
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
-		return pgTables(ctx, h.entry.pgPool, schema)
+		return pgTables(ctx, h.entry.pgPool, schema, limit)
 	case EngineMySQL:
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
-		return mysqlTables(ctx, h.entry.sqlDB, schema)
+		return mysqlTables(ctx, h.entry.sqlDB, schema, limit)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
 	}
 }
-func (h *PoolHandle) Columns(ctx context.Context, schema, table string) ([]Column, error) {
+func (h *PoolHandle) Columns(ctx context.Context, schema, table string, limit int) ([]Column, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
+	limit = clampLimit(limit)
 	switch h.entry.cfg.Engine {
 	case EnginePostgreSQL:
-		return pgColumns(ctx, h.entry.pgPool, schema, table)
+		return pgColumns(ctx, h.entry.pgPool, schema, table, limit)
 	case EngineMySQL:
-		return mysqlColumns(ctx, h.entry.sqlDB, schema, table)
+		return mysqlColumns(ctx, h.entry.sqlDB, schema, table, limit)
 	default:
 		return nil, newError(ErrUnsupportedEngine, "", nil)
 	}
+}
+
+// clampLimit 钳制元数据浏览 LIMIT：limit<=0 时强制为 1（F4）。
+// PG 中 LIMIT -1 等价无限制、LIMIT 0 返回空，均会破坏集合有界性；
+// 调用方（browse.Service）传 MaxEntries+1 sentinel，此处为纵深防御。
+func clampLimit(limit int) int {
+	if limit < 1 {
+		return 1
+	}
+	return limit
 }
 func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryResult, error) {
 	if err := h.check(); err != nil {

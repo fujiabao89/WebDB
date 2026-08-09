@@ -64,24 +64,24 @@ func (r *countingResolver) ResolveCredential(ctx context.Context, wsID, secretRe
 
 type countingBrowser struct {
 	calls   int
-	schemas func(ctx context.Context, cfg adapter.ConnectConfig) ([]adapter.Schema, error)
-	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string) ([]adapter.Table, error)
-	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string) ([]adapter.Column, error)
+	schemas func(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
+	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
+	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
 }
 
-func (b *countingBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig) ([]adapter.Schema, error) {
+func (b *countingBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
 	b.calls++
-	return b.schemas(ctx, cfg)
+	return b.schemas(ctx, cfg, limit)
 }
 
-func (b *countingBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string) ([]adapter.Table, error) {
+func (b *countingBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error) {
 	b.calls++
-	return b.tables(ctx, cfg, schema)
+	return b.tables(ctx, cfg, schema, limit)
 }
 
-func (b *countingBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string) ([]adapter.Column, error) {
+func (b *countingBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error) {
 	b.calls++
-	return b.columns(ctx, cfg, schema, table)
+	return b.columns(ctx, cfg, schema, table, limit)
 }
 
 type browseDeps struct {
@@ -138,6 +138,27 @@ func readPolicy(allow bool) *metadata.ConnectionPolicy {
 }
 
 func principal() Principal { return Principal{UserID: uid(), WorkspaceID: wsID()} }
+
+// allowedDeps 构造授权全部通过的依赖（member=viewer、连接存在、policy allow_read=true、
+// 凭证可解析），使测试聚焦于浏览行为而非授权矩阵。
+func allowedDeps(browser MetadataBrowser) browseDeps {
+	return browseDeps{
+		members: stubMembers{fn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
+			m := readRole()
+			return &m, nil
+		}},
+		conns: stubConns{byID: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.Connection, error) {
+			return testConn(), nil
+		}},
+		policies: stubPolicies{byConn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.ConnectionPolicy, error) {
+			return readPolicy(true), nil
+		}},
+		resolver: &countingResolver{fn: func(context.Context, uuid.UUID, uuid.UUID, int) (credentials.CredentialPayload, error) {
+			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
+		}},
+		browser: browser,
+	}
+}
 
 // ---- 授权矩阵：schema 浏览 ---------------------------------------------------
 
@@ -463,7 +484,7 @@ func TestListSchemas_Success(t *testing.T) {
 		},
 	}
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 			return []adapter.Schema{{Name: "public"}, {Name: "app"}}, nil
 		},
 	}
@@ -503,7 +524,7 @@ func TestListSchemas_ResultTooLarge(t *testing.T) {
 		over[i] = adapter.Schema{Name: "s"}
 	}
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) { return over, nil },
+		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) { return over, nil },
 	}
 	s := newService(t, browseDeps{
 		members: stubMembers{fn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
@@ -531,7 +552,7 @@ func TestListSchemas_ResponseTooLarge(t *testing.T) {
 	// F2（方案 A）：DTO 序列化后超过 8 MiB 字节预算 → result_too_large，不静默截断。
 	huge := strings.Repeat("a", MaxResponseBytes+1)
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 			return []adapter.Schema{{Name: huge}}, nil
 		},
 	}
@@ -560,7 +581,7 @@ func TestListSchemas_ResponseTooLarge(t *testing.T) {
 func TestAdapterBrowser_NilManager(t *testing.T) {
 	// F3：AdapterBrowser 未注入 Manager 时不得 nil 解引用，返回 internal_error。
 	b := AdapterBrowser{}
-	_, err := b.Schemas(context.Background(), adapter.ConnectConfig{})
+	_, err := b.Schemas(context.Background(), adapter.ConnectConfig{}, DefaultLimits().MaxEntries+1)
 	if !errors.Is(err, ErrInternalError) {
 		t.Fatalf("expected internal_error, got %v", err)
 	}
@@ -582,7 +603,7 @@ func TestListSchemas_Cancelled(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
 				return nil, context.Canceled
 			},
 		},
@@ -611,7 +632,7 @@ func TestListSchemas_Timeout(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
 				return nil, context.DeadlineExceeded
 			},
 		},
@@ -640,7 +661,7 @@ func TestListSchemas_AdapterDatabaseError(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrDatabaseError}
 			},
 		},
@@ -667,7 +688,7 @@ func TestListSchemas_AdapterConnectionBusy(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				// 模拟真实池耗尽错误链：AdapterError 被外层包装（真实场景 cause 可为
 				// deadline）；mapAdapterError 必须先 errors.As 提取 code，不被 context 掩盖（P2-4）。
 				return nil, fmt.Errorf("outer: %w", &adapter.AdapterError{Code: adapter.ErrConnPoolExhausted, Message: "pool exhausted"})
@@ -696,7 +717,7 @@ func TestListSchemas_AdapterConnectionFailed(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrConnectionFailed}
 			},
 		},
@@ -723,7 +744,7 @@ func TestListTables_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			tables: func(context.Context, adapter.ConnectConfig, string) ([]adapter.Table, error) {
+			tables: func(context.Context, adapter.ConnectConfig, string, int) ([]adapter.Table, error) {
 				return []adapter.Table{{Schema: "public", Name: "users", Type: adapter.TableTypeTable}}, nil
 			},
 		},
@@ -753,7 +774,7 @@ func TestListColumns_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			columns: func(context.Context, adapter.ConnectConfig, string, string) ([]adapter.Column, error) {
+			columns: func(context.Context, adapter.ConnectConfig, string, string, int) ([]adapter.Column, error) {
 				return []adapter.Column{{Name: "id", Ordinal: 1, NativeType: "int4", Nullable: false, HasDefault: true}}, nil
 			},
 		},
@@ -810,6 +831,171 @@ func TestListColumns_EmptyTableRejected(t *testing.T) {
 	_, err := s.ListColumns(context.Background(), principal(), connID(), "public", "")
 	if !errors.Is(err, ErrInvalidScope) {
 		t.Fatalf("expected invalid_scope, got %v", err)
+	}
+}
+
+// ---- 有界 limit 下传（WEB-36 P1）---------------------------------------------
+
+// TestListSchemas_PassesSentinelLimit 验证 Service 向 Browser 传 MaxEntries+1，
+// 使查询层能在超限前停止，而非先累积完整 catalog 再拒绝。
+func TestListSchemas_PassesSentinelLimit(t *testing.T) {
+	var got int
+	browser := &countingBrowser{
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
+			got = limit
+			return nil, nil
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	if _, err := s.ListSchemas(context.Background(), principal(), connID()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != DefaultLimits().MaxEntries+1 {
+		t.Fatalf("Schemas limit=%d, want %d (MaxEntries+1)", got, DefaultLimits().MaxEntries+1)
+	}
+}
+
+func TestListTables_PassesSentinelLimit(t *testing.T) {
+	var got int
+	browser := &countingBrowser{
+		tables: func(_ context.Context, _ adapter.ConnectConfig, _ string, limit int) ([]adapter.Table, error) {
+			got = limit
+			return nil, nil
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	if _, err := s.ListTables(context.Background(), principal(), connID(), "public"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != DefaultLimits().MaxEntries+1 {
+		t.Fatalf("Tables limit=%d, want %d (MaxEntries+1)", got, DefaultLimits().MaxEntries+1)
+	}
+}
+
+func TestListColumns_PassesSentinelLimit(t *testing.T) {
+	var got int
+	browser := &countingBrowser{
+		columns: func(_ context.Context, _ adapter.ConnectConfig, _, _ string, limit int) ([]adapter.Column, error) {
+			got = limit
+			return nil, nil
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	if _, err := s.ListColumns(context.Background(), principal(), connID(), "public", "users"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != DefaultLimits().MaxEntries+1 {
+		t.Fatalf("Columns limit=%d, want %d (MaxEntries+1)", got, DefaultLimits().MaxEntries+1)
+	}
+}
+
+// TestListSchemas_ExactlyAtLimitOK 验证 sentinel 语义：恰好 MaxEntries 条属于正常，
+// 不触发 result_too_large（区别于 MaxEntries+1 的超限）。
+func TestListSchemas_ExactlyAtLimitOK(t *testing.T) {
+	at := make([]adapter.Schema, DefaultLimits().MaxEntries)
+	for i := range at {
+		at[i] = adapter.Schema{Name: "s"}
+	}
+	browser := &countingBrowser{
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) { return at, nil },
+	}
+	s := newService(t, allowedDeps(browser))
+	out, err := s.ListSchemas(context.Background(), principal(), connID())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != DefaultLimits().MaxEntries {
+		t.Fatalf("got %d schemas, want %d", len(out), DefaultLimits().MaxEntries)
+	}
+}
+
+func TestListSchemas_EmptyOK(t *testing.T) {
+	browser := &countingBrowser{
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) { return nil, nil },
+	}
+	s := newService(t, allowedDeps(browser))
+	out, err := s.ListSchemas(context.Background(), principal(), connID())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(out) != 0 {
+		t.Fatalf("got %d schemas, want 0", len(out))
+	}
+}
+
+func TestListTables_ResultTooLarge(t *testing.T) {
+	over := make([]adapter.Table, DefaultLimits().MaxEntries+1)
+	browser := &countingBrowser{
+		tables: func(_ context.Context, _ adapter.ConnectConfig, _ string, _ int) ([]adapter.Table, error) {
+			return over, nil
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	_, err := s.ListTables(context.Background(), principal(), connID(), "public")
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("expected result_too_large, got %v", err)
+	}
+}
+
+func TestListColumns_ResultTooLarge(t *testing.T) {
+	over := make([]adapter.Column, DefaultLimits().MaxEntries+1)
+	browser := &countingBrowser{
+		columns: func(_ context.Context, _ adapter.ConnectConfig, _, _ string, _ int) ([]adapter.Column, error) {
+			return over, nil
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	_, err := s.ListColumns(context.Background(), principal(), connID(), "public", "users")
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("expected result_too_large, got %v", err)
+	}
+}
+
+// ---- 数据库错误映射保留取消语义（WEB-36 P1）----------------------------------
+
+// TestListSchemas_MidStreamCancellationMapped 验证流式读取中 rows.Err() 包装的取消
+// cause 被识别为 query_cancelled（而非 database_error/500）。
+func TestListSchemas_MidStreamCancellationMapped(t *testing.T) {
+	browser := &countingBrowser{
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			return nil, adapter.WrapDatabaseError(context.Canceled)
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	_, err := s.ListSchemas(context.Background(), principal(), connID())
+	if !errors.Is(err, ErrQueryCancelled) {
+		t.Fatalf("expected query_cancelled, got %v", err)
+	}
+}
+
+func TestListSchemas_MidStreamTimeoutMapped(t *testing.T) {
+	browser := &countingBrowser{
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			return nil, adapter.WrapDatabaseError(context.DeadlineExceeded)
+		},
+	}
+	s := newService(t, allowedDeps(browser))
+	_, err := s.ListSchemas(context.Background(), principal(), connID())
+	if !errors.Is(err, ErrQueryTimeout) {
+		t.Fatalf("expected query_timeout, got %v", err)
+	}
+}
+
+// TestBoundedSentinel 验证 MaxEntries+1 sentinel 的溢出防御：非正数或 int 最大值
+// 原样返回，避免 +1 回绕成负值传入 LIMIT。
+func TestBoundedSentinel(t *testing.T) {
+	if got := boundedSentinel(1000); got != 1001 {
+		t.Fatalf("boundedSentinel(1000)=%d, want 1001", got)
+	}
+	if got := boundedSentinel(0); got != 1 {
+		t.Fatalf("boundedSentinel(0)=%d, want 1 (防御性正边界，NewService 会归一化为 1000)", got)
+	}
+	if got := boundedSentinel(-5); got != -5 {
+		t.Fatalf("boundedSentinel(-5)=%d, want -5", got)
+	}
+	maxInt := int(^uint(0) >> 1)
+	if got := boundedSentinel(maxInt); got != maxInt {
+		t.Fatalf("boundedSentinel(MaxInt)=%d, want MaxInt（不溢出）", got)
 	}
 }
 

@@ -147,7 +147,7 @@ func TestSchemas_PG(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background())
+	schemas, err := h.Schemas(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestSchemas_MySQL(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background())
+	schemas, err := h.Schemas(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestTables_PG(t *testing.T) {
 	h := mustGet(t, m, pgCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "public")
+	tables, err := h.Tables(context.Background(), "public", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestTables_MySQL(t *testing.T) {
 	h := mustGet(t, m, myCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "webdb_demo")
+	tables, err := h.Tables(context.Background(), "webdb_demo", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -209,6 +209,96 @@ func TestTables_MySQL(t *testing.T) {
 		}
 	}
 	t.Logf("MySQL tables: %d", len(tables))
+}
+
+// TestMetadataBrowsing_LimitBound_PG 验证元数据浏览查询层参数化 LIMIT 生效（WEB-36 P1）：
+// 当 catalog 多于 limit 时，limit 只返回 limit 行，不会先累积完整 catalog 再拒绝。
+func TestMetadataBrowsing_LimitBound_PG(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	schemas, err := h.Schemas(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Schemas(limit=1): %v", err)
+	}
+	if len(schemas) > 1 {
+		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
+	}
+
+	tables, err := h.Tables(context.Background(), "public", 1)
+	if err != nil {
+		t.Fatalf("Tables(limit=1): %v", err)
+	}
+	if len(tables) > 1 {
+		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
+	}
+	allTables, err := h.Tables(context.Background(), "public", 1000)
+	if err != nil {
+		t.Fatalf("Tables(limit=1000): %v", err)
+	}
+	if len(allTables) < len(tables) {
+		t.Fatalf("Tables(limit=1000) returned %d rows, want >= limit=1 (%d)", len(allTables), len(tables))
+	}
+
+	// employees 至少 1 列：limit=1 恰返回 1 行、无上限查询返回 >1 行，证明 LIMIT 生效
+	// （列数由 seed 决定，不硬编码，兼容本地/CI 不同定义）。
+	cols, err := h.Columns(context.Background(), "public", "employees", 1)
+	if err != nil {
+		t.Fatalf("Columns(limit=1): %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
+	}
+	allCols, err := h.Columns(context.Background(), "public", "employees", 100)
+	if err != nil {
+		t.Fatalf("Columns(limit=100): %v", err)
+	}
+	if len(allCols) <= 1 {
+		t.Fatalf("Columns(limit=100) returned %d rows, want >1 (prove LIMIT caps limit=1)", len(allCols))
+	}
+}
+
+// TestMetadataBrowsing_LimitBound_MySQL 同 PG，验证 MySQL 元数据查询 LIMIT 生效。
+func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	schemas, err := h.Schemas(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("Schemas(limit=1): %v", err)
+	}
+	if len(schemas) > 1 {
+		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
+	}
+
+	tables, err := h.Tables(context.Background(), "webdb_demo", 1)
+	if err != nil {
+		t.Fatalf("Tables(limit=1): %v", err)
+	}
+	if len(tables) > 1 {
+		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
+	}
+
+	cols, err := h.Columns(context.Background(), "webdb_demo", "employees", 1)
+	if err != nil {
+		t.Fatalf("Columns(limit=1): %v", err)
+	}
+	if len(cols) != 1 {
+		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
+	}
+	allCols, err := h.Columns(context.Background(), "webdb_demo", "employees", 100)
+	if err != nil {
+		t.Fatalf("Columns(limit=100): %v", err)
+	}
+	if len(allCols) <= 1 {
+		t.Fatalf("Columns(limit=100) returned %d rows, want >1 (prove LIMIT caps limit=1)", len(allCols))
+	}
 }
 
 func TestQuery_PG(t *testing.T) {

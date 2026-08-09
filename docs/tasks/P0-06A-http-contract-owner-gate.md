@@ -230,7 +230,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 空数据语义 | `200` + 空数组；不返回 404 |
 | 错误码 | `invalid_scope`、`unauthorized`、`forbidden`、`connection_not_found`、`policy_not_configured`(404)、`read_not_allowed`(403)、`result_too_large`(422)、`connection_busy`、`database_error`、`internal_error` |
 | 超时/取消 | 每次浏览操作**有界超时**：目标库连接获取默认 5s、上限 15s（复用 `connAcquireTimeout` 语义）；配置缺失/非法时 fail-closed 拒绝；HTTP 取消传播到目标库并归还连接 |
-| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断** |
+| 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断**。条目上限在**查询层强制执行**：服务端把 `MaxEntries+1` sentinel 下传 `PoolHandle.Schemas/Tables/Columns`，PG/MySQL 用参数化 `LIMIT` 在超限前停止扫描，避免先累积完整 catalog 再拒绝（WEB-36 P1） |
 | 是否访问目标数据库 | **是**（`PoolHandle.Schemas/Tables/Columns`）；每次浏览重新获取连接，不做无界缓存 |
 | 是否创建 Execution | 否（Schema 浏览不是 SQL 执行；不创建 `executions` 行） |
 | 是否追加 AuditEvent | **D05a 已批准**：Schema 树逐节点读取**不**写 AuditEvent；保留脱敏指标与服务端日志。未来若新增显式 Schema 刷新任务，再通过独立事件契约决定审计 |
