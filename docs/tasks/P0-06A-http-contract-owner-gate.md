@@ -259,7 +259,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 字段 | 公开？ | 说明 |
 |---|---|---|
 | `connection_id` | 是 | 必填，UUID；不存在/跨工作区统一 `connection_not_found` |
-| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**禁止客户端自行内联用户输入**。**占位符检测为方言感知的 token 级判定（禁止裸子串扫描）**：仅识别各自原生的**位置占位符**——PostgreSQL `$N`（`$`+数字）、MySQL `?`（可执行位置）——命中即统一返回 `statement_not_allowed`(422)。**放行（非占位符）**：PG JSONB 操作符 `?`/`?|`/`?&`、`::` 类型转换、`@>`/`<@`；字符串字面量、标识符、注释内的 `$`/`?`/`:`/`@`。**具名参数不在 P0-06 定义范围**（PG/MySQL 原生驱动无语义一致形态），不作拒绝依据。原始 SQL 不进入日志/错误/审计 |
+| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**禁止客户端自行内联用户输入**。**占位符检测为方言感知的 token 级判定（禁止裸子串扫描）**：仅识别各自原生的**位置占位符**——PostgreSQL `$N`（`$`+数字）、MySQL `?`（可执行位置）——命中即统一返回 `statement_not_allowed`(422)。**放行（非占位符）**：PG JSONB 操作符 `?`/`?\|`/`?&`、`::` 类型转换、`@>`/`<@`；字符串字面量、标识符、注释内的 `$`/`?`/`:`/`@`。**具名参数不在 P0-06 定义范围**（PG/MySQL 原生驱动无语义一致形态），不作拒绝依据。原始 SQL 不进入日志/错误/审计 |
 | `page_size` | 是 | 可选；0 用默认；**服务端钳制** ≤ 500 且 ≤ effectiveMaxRows（客户端不可提高上限） |
 | `order_by` | 是（意图字段） | 可选；**只是请求意图，不是唯一性证明**；唯一性只由 `VerifySortPlan` 产生（ADR-014） |
 | `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含原生位置占位符（PG `$N`/MySQL `?`，可执行位置）的 SQL 无绑定值来源，**服务端一律拒绝**（**统一返回 `statement_not_allowed`，422，单一确定性码**），不允许客户端内联值绕过参数化边界 |
@@ -307,7 +307,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 超时 | 服务端 `StatementTimeoutMs` 生效；响应超时见 §12 |
 | 取消 | transport abort（D13 已批准）：HTTP 断开取消数据库查询；Execution/审计在独立有界 context 终结；浏览器用本地取消状态 |
 | 结果脱敏边界 | P0-06 **不提供结果列值脱敏**；控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007，§14）。演示库账号不得有读取密钥承载表权限 |
-| 数据库只读保护 | 阶段 D 为目标查询启用只读事务/会话（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），**WEB-35 交付**。**fail-closed**：只读设置失败、当前已有事务且无法确认只读状态、或连接池复用连接未确认只读状态时，**拒绝请求、不执行目标查询**（`connection_unavailable`）；启用前 SELECT 副作用不作为无条件接受项（§14 R5） |
+| 数据库只读保护 | 阶段 D 为每次目标查询**显式创建并验证只读事务/会话**（PG `BEGIN TRANSACTION READ ONLY` 或连接参数 `default_transaction_read_only=on`；MySQL `START TRANSACTION READ ONLY` / `SET SESSION TRANSACTION READ ONLY`），**WEB-35 交付**。**fail-closed**：只读设置失败、连接上存在任何已有事务（含**已开启的可写事务**）未确认只读、或连接池复用连接未确认只读时，**拒绝请求、不执行目标查询**（`connection_unavailable`）；不得在可写事务中执行。启用前 SELECT 副作用不作为无条件接受项（§14 R5） |
 
 ---
 
@@ -522,8 +522,8 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 - **防注入**：schema/table 作为 information_schema 查询的**值参数**绑定（非标识符拼接）；SQL 单语句 AST fail-closed；MySQL ECM lexer 前置。
 - **审计完整**：append-only；审计失败扣留结果；`$SECURITY_ALERT` 告警；D11 原子提交延续。
 - **资源有界**：连接池上限（ADR-008）、准入（ADR-016）、分页容量（ADR-015）、无无界队列/缓存；列表/浏览超限 `result_too_large` 不静默截断（§6/§7）。
-- **查询结果脱敏边界**：P0-06 **不提供结果列值脱敏**。安全控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007）：演示/测试库账号不得授予读取凭据/KEK/密钥承载表或危险函数（SECURITY DEFINER）的权限。服务端结果列脱敏不在 P0-06 范围，如需须新 ADR 并经 Owner 批准。响应 canary 只断言不含 WebDB 自身凭据/KEK/连接串（CT-11 扩展覆盖 API 响应）。
-- **只读边界（R5 改为实施要求，不再无条件接受）**：P0-06 **要求执行层为目标查询启用数据库只读事务/会话**（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），由 WEB-35 交付（§8.3）。**fail-closed**：只读设置失败、当前已有事务且无法确认只读状态、或连接池复用连接未确认只读状态时，**拒绝执行目标查询**（`connection_unavailable`），不得继续。只读会话启用前，SELECT 函数副作用（含 SECURITY DEFINER）**不作为无条件接受的残余风险**——需 Owner 另行批准或新 ADR。演示/测试库账号仍不得授予危险函数 EXECUTE 权限；补充合成副作用函数负向测试（CT-20）及只读设置失败/连接复用未确认测试（CT-21/CT-22）。
+- **查询结果策略（敏感列）**：**WebDB 自身凭据/KEK/连接串/信封材料绝不进入结果**（响应负向 canary，CT-11）。对**任意数据库列值**（含用户授权查询的合成 PII/口令类列）P0-06 **不提供自动脱敏**——该例外**需 Owner 明确批准并配套新 ADR**，批准前不作为已接受能力交付；控制为连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007），演示/测试库账号不得授予读取凭据/KEK/密钥承载表或危险函数（SECURITY DEFINER）EXECUTE 权限。
+- **只读边界（R5 改为实施要求，不再无条件接受）**：P0-06 **要求执行层为每次目标查询显式创建并验证只读事务/会话**（PG `BEGIN TRANSACTION READ ONLY`/`default_transaction_read_only=on`；MySQL `START TRANSACTION READ ONLY`/`SET SESSION TRANSACTION READ ONLY`），由 WEB-35 交付（§8.3）。**fail-closed**：只读设置失败、连接上存在任何已有事务（含**已开启的可写事务**）未确认只读、或连接池复用未确认只读时，**拒绝执行目标查询**（`connection_unavailable`），不得继续。只读会话启用前，SELECT 函数副作用（含 SECURITY DEFINER）**不作为无条件接受的残余风险**——需 Owner 另行批准或新 ADR。**在 D01-D18 获批准且只读会话与测试落地前，本边界不作为"已接受契约"交付**。演示/测试库账号仍不得授予危险函数 EXECUTE 权限；补充合成副作用函数负向测试（CT-20）、只读设置失败（CT-21）、连接复用/已开启可写事务未确认只读（CT-22）。
 - **残余风险（接受后继续有效）**：Go 无法保证内存清零（R1）；服务重启 token 失效（R7）。
 
 ---
@@ -633,12 +633,12 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | CT-08 | 取消/超时/panic 后资源释放 | 连接归还、permit Release、无遗留 pending/running |
 | CT-09 | 429 + Retry-After | `rate_limited`/`connection_busy`/`pagination_capacity_exhausted` |
 | CT-10 | 审计失败扣留结果 | 返回 `audit_failed`，不返回结果，execution 为终态 |
-| CT-11 | SQL/Args/password/token/KEK canary 不进入日志/错误/审计/**API 响应** | 全链路扫描（含响应） |
+| CT-11 | WebDB 自身凭据/KEK/连接串/app token/信封材料 canary 不进入日志/错误/审计/**API 响应**；授权查询的合成 PII/口令列仅作为结果返回，不进日志/审计 | 全链路扫描 + 响应负向断言 |
 | CT-12 | 错误响应不含内部码/原始错误/trace_id；receipt 的 trace_id 仅服务端生成 | 固定安全摘要 |
 | CT-13 | 结果 wire 类型与列 `wire_type` 一致（decimal 字符串、bool、浮点 number、时间字符串、binary Base64、NULL null；date/time/timestamp 无时区不 UTC 归一化） | 解码与 D08 一致 |
 | CT-14 | 连接列表/Schema 浏览不产生 AuditEvent（D05a/D05b） | 审计表无对应事件；脱敏指标/日志保留 |
 | CT-15 | 请求 SQL 含 PG `$N` 或 MySQL `?` 位置占位符（可执行位置） | 统一 `statement_not_allowed`(422)，Adapter 0 次 |
-| CT-15a | PG JSONB `?`/`?|`/`?&`、`::`、`@>` 合法只读查询 | 放行（非占位符），允许执行 |
+| CT-15a | PG JSONB `?`/`?\|`/`?&`、`::`、`@>` 合法只读查询 | 放行（非占位符），允许执行 |
 | CT-15b | 字符串/注释/标识符内的 `$`/`?`/`:`/`@` | 放行（非占位符） |
 | CT-16 | schema/table 标识符注入（`;`/`--`/引号/超长） | 长度/字符校验拒绝，Adapter 0 次 |
 | CT-17 | 连接列表/Schema 列表超限（>200/>1000） | `result_too_large`(422)，不静默截断 |
@@ -646,7 +646,7 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | CT-19 | 元数据浏览超时/取消后连接归还 | 超时/取消触发，连接归还，无遗留 |
 | CT-20 | 合成副作用函数（nextval/setval 等）在启用只读会话后执行 | 目标库拒绝写入副作用；结果只读 |
 | CT-21 | 只读事务/会话设置失败（驱动不支持/连接拒绝） | fail-closed：拒绝执行，Adapter 不执行目标查询 |
-| CT-22 | 连接池复用连接未确认只读状态 / 事务已开启且无法确认只读 | fail-closed：拒绝请求，不继续目标查询 |
+| CT-22 | 连接池复用未确认只读 / **已开启可写事务**（非只读） | fail-closed：拒绝请求，不继续目标查询 |
 
 ### 19.2 E2E（Compose）
 
@@ -705,4 +705,5 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | 2026-08-09 | 响应"Tests, Docs And Handoff Evidence"检查：本 PR 仅记录设计与 Owner 决策，未实施 API/测试；按检查要求将契约状态改为**未接受提案**（保留 D01-D18 决策记录；明确未注册路由、未改运行时代码、无测试，不作为"已接受契约"；实施与 §19 契约测试由 WEB-35/36/37/38/39 承接）。 |
 | 2026-08-09 | 响应第二轮审查（CodeRabbit 4 + Greptile 1）：①§1.1 补充独立可核验审批证据（Linear WEB-34）；②workspace 不一致统一映射 `forbidden`(403)，不返回 404；③§6/§7 错误码表补 `result_too_large`(422)；④R5 只读边界改为实施要求（PG `default_transaction_read_only=on`/MySQL `SET SESSION TRANSACTION READ ONLY`，WEB-35 交付），不再无条件接受，新增 CT-20；⑤占位符拒绝统一为 `statement_not_allowed`(422) 单一确定性码。 |
 | 2026-08-09 | 只读保护 fail-closed 收紧（§8.3/§14 R5）：只读设置失败、事务已开启且无法确认只读、连接池复用未确认只读时**拒绝执行目标查询**（`connection_unavailable`）；新增 CT-21（只读设置失败）、CT-22（连接复用未确认/事务未确认只读）。 |
-| 2026-08-09 | 占位符规则收敛为方言感知 token 级判定（§8.1）：仅拒绝 PG `$N`/MySQL `?` 原生位置占位符；**放行 PG JSONB `?`/`?|`/`?&`/`::`/`@>`**；字符串/注释/标识符内符号放行；**具名参数移出 P0-06 范围**（方言无一致语义）；新增 CT-15a/CT-15b。 |
+| 2026-08-09 | 占位符规则收敛为方言感知 token 级判定（§8.1）：仅拒绝 PG `$N`/MySQL `?` 原生位置占位符；**放行 PG JSONB `?`/`?\|`/`?&`/`::`/`@>`**；字符串/注释/标识符内符号放行；**具名参数移出 P0-06 范围**（方言无一致语义）；新增 CT-15a/CT-15b。 |
+| 2026-08-09 | 第三轮审查修复（CodeRabbit 3）：①表格单元格内 JSONB 操作符 `?\|` 管道符转义，避免被解析为列分隔符（:262/:641/:708）；②结果敏感列策略明确——WebDB 自身凭据/KEK/连接串绝不进结果，列值自动脱敏需 Owner 批准+新 ADR，CT-11 扩展合成 PII/app token 响应负向断言；③只读事务改为"显式创建并验证只读事务"并拒绝**已开启可写事务**（§8.3/§14 R5），CT-22 覆盖，明确批准前不作为已接受契约交付。 |
