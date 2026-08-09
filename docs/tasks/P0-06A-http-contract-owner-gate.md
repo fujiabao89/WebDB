@@ -15,6 +15,7 @@
 ### 1.1 状态
 
 - **Owner 决策已记录（2026-08-08，fujiabao89）**：D01–D18 全部决策已由 Owner 逐项给出明确结论（D05a/D08/D11/D13/D14/D15f 见对应章节，其余按推荐选项），记录于 §17。
+- **独立可核验审批证据**：Linear [WEB-34](https://linear.app/webdb/issue/WEB-34/p0-06a最小-http-契约高保真范围映射与-owner-gate) 任务及其审批评论（决策者 fujiabao89、时间 2026-08-08、D01-D18 对应关系）。证据可用前保持 `未接受提案`，且不注册任何路由。
 - **本契约状态为 `未接受提案`**：未注册路由、未修改运行时代码、未编写测试，**不作为"已接受契约"**；是并发实施任务（WEB-35/36/37/38/39）的共同设计基线，实施与 §19 契约测试由这些任务承接。
 - 本文件不自行关闭 WEB-34；Linear WEB-34 状态由 Owner 更新。续页路由仍需 ADR-014/015 迁移完成后方可注册。
 
@@ -152,7 +153,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
   - A（推荐）：服务端中间件从**部署环境配置**解析固定演示 Principal（workspace_id/user_id/role 由服务端决定），浏览器不带身份；请求级覆盖一律拒绝。
   - B：由可信反向代理注入 `X-*` 头，服务端校验并映射——需要演示层代理，超出 P0 Compose。
   - C：Compose 内置 dev-only 固定 token——仍是未认证的伪凭据，且容易被误用于生产。
-- **D01b 已批准（方案 A）**：`Principal{UserID, WorkspaceID}` 从服务端固定演示配置注入，浏览器不得自报 actor/角色/方言/策略；任何来自客户端的 `workspace_id` 覆盖必须被忽略（路由中的 `{workspace_id}` 仅用于与 Principal.WorkspaceID 比对，不一致即 403/404）。
+- **D01b 已批准（方案 A）**：`Principal{UserID, WorkspaceID}` 从服务端固定演示配置注入，浏览器不得自报 actor/角色/方言/策略；任何来自客户端的 `workspace_id` 覆盖必须被忽略。**路由级统一映射**：路径 `{workspace_id}` 与 Principal.WorkspaceID 不一致 → 一律 `forbidden`（403，**不返回 404**）；§6/§7 连接/Schema 浏览保持一致（CT-02/CT-18 覆盖）。
 - **D01b fail-closed（补强）**：演示 Principal 配置缺失、格式非法、角色无效或指向不存在的 workspace/user 时**拒绝启动（fatal）**；禁止以零值、默认值或任何客户端提供的身份作为回退。运行时无法从可信配置解析出有效 Principal 时，请求返回 `unauthorized`（401）。
 
 ### 5.3 传输约定
@@ -191,7 +192,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 成功状态码 | `200 OK` |
 | 成功响应 DTO（安全连接 DTO，**D02/D03 已批准**） | 公开字段：`id`、`name`、`engine`、`environment`、`database`。`host`、`port`、`secret_ref`、`secret_version`、`created_by`、`workspace_id`、`created_at`、`updated_at` **不公开** |
 | 空数据语义 | `200` + 空数组 `"data": []`；不返回 404（工作区/连接不可见统一为授权拒绝，见错误码） |
-| 错误码 | `invalid_scope`(400)、`unauthorized`(401)、`forbidden`(403)、`internal_error`(500) |
+| 错误码 | `invalid_scope`(400)、`unauthorized`(401)、`forbidden`(403)、`result_too_large`(422)、`internal_error`(500) |
 | 超时/取消 | 元数据库查询**有界超时**（默认 5s、上限 10s；配置缺失/非法时 fail-closed 拒绝，禁止无界）；HTTP 取消传播到元数据库查询；取消/超时后连接归还 |
 | 硬上限 | 响应体上限 8 MiB（D06b 已批准）；列表大小默认 200 行封顶（D06c 已批准）。**超限行为**：行数超过 200 时返回 `result_too_large`（422），**不静默截断**；元数据列表分页留待后续任务 |
 | 是否访问目标数据库 | **否**（仅元数据库） |
@@ -227,7 +228,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 成功状态码 | `200 OK` |
 | 成功响应 DTO | schemas：`[{ "name": "public", "catalog": "db" }]`；tables：`[{ "schema","name","type": "TABLE / VIEW" }]`；columns：`[{ "name","ordinal","native_type","nullable","has_default" }]`（对齐 `adapter` Schema/Table/Column 结构，§15） |
 | 空数据语义 | `200` + 空数组；不返回 404 |
-| 错误码 | `invalid_scope`、`unauthorized`、`forbidden`、`connection_not_found`、`policy_not_configured`(404)、`read_not_allowed`(403)、`connection_busy`、`database_error`、`internal_error` |
+| 错误码 | `invalid_scope`、`unauthorized`、`forbidden`、`connection_not_found`、`policy_not_configured`(404)、`read_not_allowed`(403)、`result_too_large`(422)、`connection_busy`、`database_error`、`internal_error` |
 | 超时/取消 | 每次浏览操作**有界超时**：目标库连接获取默认 5s、上限 15s（复用 `connAcquireTimeout` 语义）；配置缺失/非法时 fail-closed 拒绝；HTTP 取消传播到目标库并归还连接 |
 | 硬上限 | 每层返回条目上限（schemas/tables/columns 各 ≤1000，D06c）；响应体上限（D06b）。**超限行为**：超过上限返回 `result_too_large`（422），**不静默截断** |
 | 是否访问目标数据库 | **是**（`PoolHandle.Schemas/Tables/Columns`）；每次浏览重新获取连接，不做无界缓存 |
@@ -258,10 +259,10 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 字段 | 公开？ | 说明 |
 |---|---|---|
 | `connection_id` | 是 | 必填，UUID；不存在/跨工作区统一 `connection_not_found` |
-| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**请求 SQL 不得包含未绑定参数占位符（`$N`/`?`/具名参数）**，**禁止客户端自行内联用户输入**；原始 SQL 不进入日志/错误/审计 |
+| `sql` | 是 | 必填；服务端单语句/只读/AST 校验；P0-06 不公开 `args`，**请求 SQL 不得包含未绑定参数占位符（`$N`/`?`/具名参数，字符串字面量除外）**，**禁止客户端自行内联用户输入**；含未绑定占位符的 SQL 统一返回 **`statement_not_allowed`**（422，确定性单一码）；原始 SQL 不进入日志/错误/审计 |
 | `page_size` | 是 | 可选；0 用默认；**服务端钳制** ≤ 500 且 ≤ effectiveMaxRows（客户端不可提高上限） |
 | `order_by` | 是（意图字段） | 可选；**只是请求意图，不是唯一性证明**；唯一性只由 `VerifySortPlan` 产生（ADR-014） |
-| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含 `$N`/`?`/具名参数占位符的 SQL 无绑定值来源，**服务端一律拒绝**（`sql_parse_error`/`statement_not_allowed`），不允许客户端内联值绕过参数化边界 |
+| `args` | **D07 已批准**：不公开 | P0-06 **不公开 `args`**（避免冻结参数类型/深度/字节限制）。含 `$N`/`?`/具名参数占位符的 SQL 无绑定值来源，**服务端一律拒绝**（**统一返回 `statement_not_allowed`，422，单一确定性码**），不允许客户端内联值绕过参数化边界 |
 | `engine` | 否 | 服务端从 `Connection.Engine` 派生（`pipeline.go:196-200`） |
 | `workspace_id`/`user`/`actor`/`trace` | 否 | 服务端 Principal/路由派生；客户端提交覆盖一律忽略 |
 | `policy max_rows`/`timeout` | 否 | 服务端策略上限；客户端 `page_size` 只可缩小不可放大 |
@@ -304,6 +305,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 | 超时 | 服务端 `StatementTimeoutMs` 生效；响应超时见 §12 |
 | 取消 | transport abort（D13 已批准）：HTTP 断开取消数据库查询；Execution/审计在独立有界 context 终结；浏览器用本地取消状态 |
 | 结果脱敏边界 | P0-06 **不提供结果列值脱敏**；控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007，§14）。演示库账号不得有读取密钥承载表权限 |
+| 数据库只读保护 | 阶段 D 为目标查询启用只读事务/会话（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），**WEB-35 交付**；启用前 SELECT 副作用不作为无条件接受项（§14 R5） |
 
 ---
 
@@ -519,7 +521,8 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 - **审计完整**：append-only；审计失败扣留结果；`$SECURITY_ALERT` 告警；D11 原子提交延续。
 - **资源有界**：连接池上限（ADR-008）、准入（ADR-016）、分页容量（ADR-015）、无无界队列/缓存；列表/浏览超限 `result_too_large` 不静默截断（§6/§7）。
 - **查询结果脱敏边界**：P0-06 **不提供结果列值脱敏**。安全控制 = 连接级授权 ∩ 目标库原生可见性 ∩ 最小权限账号（ADR-001/005/007）：演示/测试库账号不得授予读取凭据/KEK/密钥承载表或危险函数（SECURITY DEFINER）的权限。服务端结果列脱敏不在 P0-06 范围，如需须新 ADR 并经 Owner 批准。响应 canary 只断言不含 WebDB 自身凭据/KEK/连接串（CT-11 扩展覆盖 API 响应）。
-- **残余风险（接受后继续有效）**：SELECT 函数副作用无 session 级只读事务保护（R5）；Go 无法保证内存清零（R1）；服务重启 token 失效（R7）。
+- **只读边界（R5 改为实施要求，不再无条件接受）**：P0-06 **要求执行层为目标查询启用数据库只读事务/会话**（PG `default_transaction_read_only=on`；MySQL `SET SESSION TRANSACTION READ ONLY`），由 WEB-35 交付（§8.3）。只读会话启用前，SELECT 函数副作用（含 SECURITY DEFINER）**不作为无条件接受的残余风险**——需 Owner 另行批准或新 ADR。演示/测试库账号仍不得授予危险函数 EXECUTE 权限；补充合成副作用函数负向测试（CT-20）。
+- **残余风险（接受后继续有效）**：Go 无法保证内存清零（R1）；服务重启 token 失效（R7）。
 
 ---
 
@@ -632,11 +635,12 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | CT-12 | 错误响应不含内部码/原始错误/trace_id；receipt 的 trace_id 仅服务端生成 | 固定安全摘要 |
 | CT-13 | 结果 wire 类型与列 `wire_type` 一致（decimal 字符串、bool、浮点 number、时间字符串、binary Base64、NULL null；date/time/timestamp 无时区不 UTC 归一化） | 解码与 D08 一致 |
 | CT-14 | 连接列表/Schema 浏览不产生 AuditEvent（D05a/D05b） | 审计表无对应事件；脱敏指标/日志保留 |
-| CT-15 | 请求 SQL 含 `$N`/`?`/具名占位符（无 args 绑定） | 拒绝（`sql_parse_error`/`statement_not_allowed`），Adapter 0 次 |
+| CT-15 | 请求 SQL 含 `$N`/`?`/具名占位符（无 args 绑定） | 统一返回 `statement_not_allowed`(422)，Adapter 0 次 |
 | CT-16 | schema/table 标识符注入（`;`/`--`/引号/超长） | 长度/字符校验拒绝，Adapter 0 次 |
 | CT-17 | 连接列表/Schema 列表超限（>200/>1000） | `result_too_large`(422)，不静默截断 |
 | CT-18 | 演示 Principal 缺失/非法/角色无效 | 启动 fatal 或请求 `unauthorized`；无零值/默认/客户端回退 |
 | CT-19 | 元数据浏览超时/取消后连接归还 | 超时/取消触发，连接归还，无遗留 |
+| CT-20 | 合成副作用函数（nextval/setval 等）在启用只读会话后执行 | 目标库拒绝写入副作用；结果只读 |
 
 ### 19.2 E2E（Compose）
 
@@ -693,3 +697,4 @@ Owner（fujiabao89）已于 **2026-08-08** 对 D01–D18 逐项给出决策，�
 | 2026-08-08 | **Owner Gate 通过（fujiabao89）**：D01–D18 全部批准。D05a（连接/Schema 浏览不写 AuditEvent）、D08（wire 类型：decimal/整数十进制字符串、bool、浮点 number、时间规范字符串、binary Base64、JSON 有界 json_text、NULL null、列 wire_type）、D11（每物理页独立 Execution + 返回页面前持久化 AuditEvent）、D13（仅 transport abort）、D14（receipt 含服务端 trace_id，不作为授权凭证）、D15f（公共 API 仅 query_timeout/query_cancelled，历史兼容读取）专项决定；状态由 Draft 更新为已批准。 |
 | 2026-08-08 | 响应 Greptile（1 条）与 CodeRabbit（13 条）PR 审查：§3 区分"绝不接收/可接收不得控制"（Engine/Environment 可见性）；D01b fail-closed（启动 fatal/unauthorized）；`meta` 必需性；连接/Schema 列表超限 `result_too_large` 不静默截断；元数据超时边界（5s/10s/15s）；标识符处理澄清为 information_schema 值参数绑定（非 quoteIdent 拼接）；`TABLE / VIEW`；查询结果脱敏边界明确（P0 不提供列值脱敏，需新 ADR）；请求示例去占位符并禁止内联参数；响应示例去 token 且加 `wire_type`；date/time/timestamp 无时区与 timestamptz 分开定义；超大值拒绝不截断；CT-11 覆盖响应、新增 CT-15..19。 |
 | 2026-08-09 | 响应"Tests, Docs And Handoff Evidence"检查：本 PR 仅记录设计与 Owner 决策，未实施 API/测试；按检查要求将契约状态改为**未接受提案**（保留 D01-D18 决策记录；明确未注册路由、未改运行时代码、无测试，不作为"已接受契约"；实施与 §19 契约测试由 WEB-35/36/37/38/39 承接）。 |
+| 2026-08-09 | 响应第二轮审查（CodeRabbit 4 + Greptile 1）：①§1.1 补充独立可核验审批证据（Linear WEB-34）；②workspace 不一致统一映射 `forbidden`(403)，不返回 404；③§6/§7 错误码表补 `result_too_large`(422)；④R5 只读边界改为实施要求（PG `default_transaction_read_only=on`/MySQL `SET SESSION TRANSACTION READ ONLY`，WEB-35 交付），不再无条件接受，新增 CT-20；⑤占位符拒绝统一为 `statement_not_allowed`(422) 单一确定性码。 |
