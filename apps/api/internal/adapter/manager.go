@@ -685,12 +685,16 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	}
 	cts, _ := rows.ColumnTypes()
 	colInfos := make([]ColumnInfo, len(cn))
+	// textCols 依据驱动列元数据 DatabaseTypeName() 判定文本列，
+	// 不使用运行时值是否为 []byte 猜测文本/二进制。
+	textCols := make([]bool, len(cn))
 	for i, n := range cn {
 		dt := ""
 		if i < len(cts) {
 			dt = cts[i].DatabaseTypeName()
 		}
 		colInfos[i] = ColumnInfo{Name: n, DataType: dt}
+		textCols[i] = isMySQLTextColumn(dt)
 	}
 	var data [][]any
 	rc := 0
@@ -704,21 +708,22 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, mapExecError(err)
 		}
-		// 预读行：只计数不拷贝，finalizeResult 会丢弃该行
-		if rc >= effPage {
-			rc++
-			break
-		}
-		dd, cb, err := copyAndMeasure(vals, maxCell)
+		// stepRow 先判定预读行（rc >= effPage）再做文本规范化：
+		// 预读哨兵行只计数不复制，finalizeResult 会丢弃该行，
+		// 避免超大文本在丢弃前被完整复制；仅对进入 data 的行规范化。
+		step, err := stepRow(vals, textCols, rc, effPage, maxCell)
 		if err != nil {
 			return nil, err
 		}
-		pb += cb
+		rc = step.nextRC
+		if step.readAhead {
+			break
+		}
+		pb += step.added
 		if pb > maxPage {
 			return nil, newError(ErrResultTooLarge, "page byte limit exceeded", nil)
 		}
-		data = append(data, dd)
-		rc++
+		data = append(data, step.dataRow)
 		if rc >= maxFetch {
 			break
 		}
@@ -821,6 +826,49 @@ func copyAndMeasure(vals []any, maxCell int) ([]any, int, error) {
 		}
 	}
 	return dst, total, nil
+}
+
+// rowStep 描述 execMySQL 中单行扫描值的处理结果。
+type rowStep struct {
+	readAhead bool  // 预读哨兵行：只计数、不加入 data
+	added     int   // 该行加入 data 的字节数（readAhead 时为 0）
+	nextRC    int   // 处理后的行计数
+	dataRow   []any // 规范化+防御性复制后的行（readAhead 时为 nil）
+}
+
+// stepRow 对单行扫描值执行“预读判定 → 文本规范化 → 字节计数”。
+// 预读判定必须先于文本规范化：页面已达 effPage 时，当前行只是探测“还有下一行”
+// 的哨兵行，finalizeResult 会丢弃它；若先规范化文本列，超大文本会在丢弃前被
+// 完整复制成 string，造成不必要的峰值内存。仅对实际进入 data 的行做
+// []byte→string 转换与超限检查。
+func stepRow(vals []any, textCols []bool, rc, effPage, maxCell int) (rowStep, error) {
+	if rc >= effPage {
+		return rowStep{readAhead: true, nextRC: rc + 1}, nil
+	}
+	if err := normalizeTextCols(vals, textCols, maxCell); err != nil {
+		return rowStep{}, err
+	}
+	dd, cb, err := copyAndMeasure(vals, maxCell)
+	if err != nil {
+		return rowStep{}, err
+	}
+	return rowStep{dataRow: dd, added: cb, nextRC: rc + 1}, nil
+}
+
+// normalizeTextCols 仅对元数据判定的文本列把 []byte 转 string；
+// 二进制/未知列保持 []byte，防御性复制由 copyAndMeasure 完成。
+// 转换前先按 maxCell 拒绝超限单元格，避免超大文本先被完整复制、
+// 再由 copyAndMeasure 拒绝；MaxCellBytes 语义不变（ErrResultTooLarge）。
+func normalizeTextCols(vals []any, textCols []bool, maxCell int) error {
+	for i, v := range vals {
+		if b, ok := v.([]byte); ok && textCols[i] {
+			if maxCell > 0 && len(b) > maxCell {
+				return newError(ErrResultTooLarge, "cell byte limit exceeded", nil)
+			}
+			vals[i] = string(b)
+		}
+	}
+	return nil
 }
 
 // ExtractLastValues 从结果末行提取 last sort values（[isNull0, val0, isNull1, val1, ...]）。
