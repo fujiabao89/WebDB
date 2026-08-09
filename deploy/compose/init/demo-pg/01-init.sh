@@ -72,6 +72,46 @@ INSERT INTO employees (first_name, last_name, email, department_id, hire_date, s
     ('Iris',   'Xu',      'iris.xu@example.local',       3, '2024-09-01', 72000.00),
     ('Jack',   'Huang',   'jack.huang@example.local',    4, '2024-10-01', 68000.00);
 
+-- 类型矩阵合成表（WEB-10 查询结果类型规范化集成测试；demo_reader 仅 SELECT）
+CREATE TABLE IF NOT EXISTS webdb_type_matrix (
+    id             INTEGER PRIMARY KEY,
+    c_text         TEXT,
+    c_varchar      VARCHAR(64),
+    c_char         CHAR(2),
+    c_bytea        BYTEA,
+    c_jsonb        JSONB,
+    c_null_col     TEXT,
+    c_smallint     SMALLINT,
+    c_int          INTEGER,
+    c_bigint       BIGINT,
+    c_numeric      NUMERIC(20,4),
+    c_float4       REAL,
+    c_float8       DOUBLE PRECISION,
+    c_bool         BOOLEAN,
+    c_date         DATE,
+    c_time         TIME,
+    c_timestamp    TIMESTAMP,
+    c_timestamptz  TIMESTAMPTZ,
+    c_uuid         UUID,
+    c_empty_text   TEXT,
+    c_empty_bytea  BYTEA,
+    c_invalid_utf8 BYTEA
+);
+
+TRUNCATE webdb_type_matrix;
+INSERT INTO webdb_type_matrix (id, c_text, c_varchar, c_char, c_bytea, c_jsonb, c_null_col,
+    c_smallint, c_int, c_bigint, c_numeric, c_float4, c_float8, c_bool,
+    c_date, c_time, c_timestamp, c_timestamptz, c_uuid,
+    c_empty_text, c_empty_bytea, c_invalid_utf8) VALUES
+    (1, 'text body', 'hello', 'ch', '\xdeadbeef', '{"a":1}'::jsonb, NULL,
+        -42, 123456789, 9223372036854775807, 12345.6789, 1.5, 2.25, TRUE,
+        '2026-08-09', '12:34:56', '2026-08-09 12:34:56', '2026-08-09 12:34:56+00', '550e8400-e29b-41d4-a716-446655440000',
+        '', '', '\xfffe00'),
+    (2, 'second text', 'world', 'zz', '\x11223344', '{"b":2}'::jsonb, NULL,
+        7, 1, -9223372036854775808, 0.0001, 0.5, 1.5, FALSE,
+        '2025-01-02', '03:04:05', '2025-01-02 03:04:05', '2025-01-02 03:04:05+00', '123e4567-e89b-12d3-a456-426614174000',
+        '', '', '\x0102ff');
+
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO demo_reader;
 EOSQL

@@ -11,6 +11,21 @@ import (
 	"database/sql"
 )
 
+// isMySQLTextColumn 依据驱动 DatabaseTypeName()（基于 MySQL 协议字段类型 + 字符集
+// binaryCollationID=63 区分 TEXT/BLOB、CHAR/BINARY、VARCHAR/VARBINARY）判定文本列。
+// 仅文本语义列允许把扫描出的 []byte 规范化为 string；二进制（BINARY/VARBINARY/BLOB
+// 家族）、位域 BIT、空间/向量类型及未知类型一律返回 false，保持 []byte 防御性复制，
+// 避免"无法可靠判断时静默把任意二进制转成 UTF-8 string"。
+func isMySQLTextColumn(dt string) bool {
+	switch dt {
+	case "CHAR", "VARCHAR", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+		"ENUM", "SET", "JSON":
+		return true
+	default:
+		return false
+	}
+}
+
 func mysqlSchemas(ctx context.Context, db *sql.DB, limit int) ([]Schema, error) {
 	q := `SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY schema_name LIMIT ?`
 	rows, err := db.QueryContext(ctx, q, limit)
