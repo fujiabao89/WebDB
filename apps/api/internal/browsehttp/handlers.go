@@ -11,10 +11,13 @@ import (
 	"github.com/google/uuid"
 )
 
-// 超时上限（P0-06A §6 元数据库列表 10s / §7 Schema 浏览目标库 15s）。
+// 超时默认与上限（P0-06A §6 元数据库列表默认 5s、上限 10s；
+// §7 Schema 浏览目标库默认 5s、上限 15s）。
 const (
-	defaultListTimeout   = 10 * time.Second
+	defaultListTimeout   = 5 * time.Second
+	maxListTimeout       = 10 * time.Second
 	defaultBrowseTimeout = 15 * time.Second
+	maxBrowseTimeout     = 15 * time.Second
 )
 
 // PrincipalProvider 从请求解析可信 Principal（D01b，WEB-35 中间件 seam）。
@@ -86,20 +89,25 @@ func parseConnectionID(r *http.Request) (uuid.UUID, bool) {
 	return id, true
 }
 
-// boundListCtx 连接列表请求超时（元数据库，上限 10s）。
+// boundListCtx 连接列表请求超时（P0-06A §6：默认 5s、上限 10s）。
 func (s *Server) boundListCtx(r *http.Request) (context.Context, context.CancelFunc) {
-	return s.boundCtx(r, s.listTimeout, defaultListTimeout)
+	return s.boundCtx(r, s.listTimeout, defaultListTimeout, maxListTimeout)
 }
 
-// boundBrowseCtx Schema 浏览请求超时（目标库，上限 15s）。
+// boundBrowseCtx Schema 浏览请求超时（P0-06A §7：HTTP 上限 15s；
+// 连接获取默认 5s 由 adapter connAcquireTimeout 承担）。
 func (s *Server) boundBrowseCtx(r *http.Request) (context.Context, context.CancelFunc) {
-	return s.boundCtx(r, s.browseTimeout, defaultBrowseTimeout)
+	return s.boundCtx(r, s.browseTimeout, defaultBrowseTimeout, maxBrowseTimeout)
 }
 
 // boundCtx 为请求派生带兜底超时的 context；取消传播到元数据库/目标库。
-func (s *Server) boundCtx(r *http.Request, configured, def time.Duration) (context.Context, context.CancelFunc) {
+// configured<=0 时用 default；结果不超过 max（上限防御配置漂移，契约默认≠上限）。
+func (s *Server) boundCtx(r *http.Request, configured, def, max time.Duration) (context.Context, context.CancelFunc) {
 	if configured <= 0 {
 		configured = def
+	}
+	if max > 0 && configured > max {
+		configured = max
 	}
 	return context.WithTimeout(r.Context(), configured)
 }

@@ -692,6 +692,40 @@ func TestNewServer_NilPrincipalProviderPanics(t *testing.T) {
 	NewServer(svc, nil)
 }
 
+// TestBoundListCtx_DefaultFiveSeconds 验证连接列表元数据库查询默认超时为 5s
+// （P0-06A §6：默认 5s、上限 10s），而非把 10s 上限当作默认。
+func TestBoundListCtx_DefaultFiveSeconds(t *testing.T) {
+	s := &Server{listTimeout: 0} // 未配置 → 兜底默认 5s
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx, cancel := s.boundListCtx(req)
+	defer cancel()
+	d, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on list ctx")
+	}
+	remaining := time.Until(d)
+	if remaining <= 4*time.Second || remaining > defaultListTimeout {
+		t.Fatalf("default list deadline want ≈%v, got %v", defaultListTimeout, remaining)
+	}
+}
+
+// TestBoundListCtx_CappedAtTenSeconds 验证配置超上限时被钳制到 10s（契约上限，
+// 上限与默认分离）。
+func TestBoundListCtx_CappedAtTenSeconds(t *testing.T) {
+	s := &Server{listTimeout: 30 * time.Second} // 配置漂移超上限 → 钳到 10s
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	ctx, cancel := s.boundListCtx(req)
+	defer cancel()
+	d, ok := ctx.Deadline()
+	if !ok {
+		t.Fatal("expected deadline on list ctx")
+	}
+	remaining := time.Until(d)
+	if remaining <= 9*time.Second || remaining > maxListTimeout {
+		t.Fatalf("capped list deadline want ≈%v, got %v", maxListTimeout, remaining)
+	}
+}
+
 // TestWriteData_TooLarge 验证 browsehttp 成功 envelope 的字节预算（F2 方案 A）：
 // 序列化后超过 8 MiB 返回 422 result_too_large，而非写出 200。
 func TestWriteData_TooLarge(t *testing.T) {
