@@ -271,30 +271,29 @@ func TestNextPage_MySQL_TextSortKey(t *testing.T) {
 }
 
 // requireTypeMatrixTable 是集成环境预检：检查类型矩阵种子表 webdb_type_matrix
-// 是否存在。表不存在表示环境未预置（未起 Compose 或未运行 init），这是唯一允许
-// 的 Skip 场景；表存在后，查询阶段的任何错误必须由 queryMustSucceed 作为真实
-// 失败处理（t.Fatalf），不得标记为 Skip——缺表、权限错误或规范化回归都会让
-// 测试失败而非产生绿色 CI。
+// 是否存在。仅“表不存在”表示环境未预置（未起 Compose 或未运行 init），是唯一
+// 允许的 Skip 场景；预检查询本身失败（连接、权限、超时或元数据错误）是真实
+// 失败，必须 t.Fatalf 暴露，不得隐藏为绿色 CI。表存在后，查询阶段错误由
+// queryMustSucceed 以 t.Fatalf 处理。
 func requireTypeMatrixTable(t *testing.T, h *PoolHandle, engine Engine) {
 	t.Helper()
 	var n int64
+	var err error
 	switch engine {
 	case EngineMySQL:
-		err := h.entry.sqlDB.QueryRowContext(context.Background(),
+		err = h.entry.sqlDB.QueryRowContext(context.Background(),
 			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'webdb_type_matrix'").Scan(&n)
-		if err != nil {
-			t.Skipf("skip: type matrix preflight failed: %v", err)
-		}
 	case EnginePostgreSQL:
-		err := h.entry.pgPool.QueryRow(context.Background(),
+		err = h.entry.pgPool.QueryRow(context.Background(),
 			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'webdb_type_matrix'").Scan(&n)
-		if err != nil {
-			t.Skipf("skip: type matrix preflight failed: %v", err)
-		}
 	default:
 		t.Skipf("skip: unsupported engine %v", engine)
+		return
 	}
-	if n == 0 {
+	switch preflightOutcome(err, n) {
+	case preflightFail:
+		t.Fatalf("type matrix preflight failed: %v", err)
+	case preflightSkipEnvMissing:
 		t.Skipf("skip: webdb_type_matrix seed table missing（集成环境未预置）")
 	}
 }
