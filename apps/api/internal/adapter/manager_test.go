@@ -148,7 +148,7 @@ func TestSchemas_PG(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background(), 100)
+	schemas, err := h.Schemas(context.Background(), browseScope(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -166,7 +166,7 @@ func TestSchemas_MySQL(t *testing.T) {
 		t.Fatalf("Get: %v", err)
 	}
 	defer h.Release()
-	schemas, err := h.Schemas(context.Background(), 100)
+	schemas, err := h.Schemas(context.Background(), browseScope(), 100)
 	if err != nil {
 		t.Fatalf("Schemas: %v", err)
 	}
@@ -182,7 +182,7 @@ func TestTables_PG(t *testing.T) {
 	h := mustGet(t, m, pgCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "public", 100)
+	tables, err := h.Tables(context.Background(), browseScope(), "public", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestTables_MySQL(t *testing.T) {
 	h := mustGet(t, m, myCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
-	tables, err := h.Tables(context.Background(), "webdb_demo", 100)
+	tables, err := h.Tables(context.Background(), browseScope(), "webdb_demo", 100)
 	if err != nil {
 		t.Fatalf("Tables: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMetadataBrowsing_LimitBound_PG(t *testing.T) {
 	ensureEmployees(t, h)
 	defer h.Release()
 
-	schemas, err := h.Schemas(context.Background(), 1)
+	schemas, err := h.Schemas(context.Background(), browseScope(), 1)
 	if err != nil {
 		t.Fatalf("Schemas(limit=1): %v", err)
 	}
@@ -229,14 +229,14 @@ func TestMetadataBrowsing_LimitBound_PG(t *testing.T) {
 		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
 	}
 
-	tables, err := h.Tables(context.Background(), "public", 1)
+	tables, err := h.Tables(context.Background(), browseScope(), "public", 1)
 	if err != nil {
 		t.Fatalf("Tables(limit=1): %v", err)
 	}
 	if len(tables) > 1 {
 		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
 	}
-	allTables, err := h.Tables(context.Background(), "public", 1000)
+	allTables, err := h.Tables(context.Background(), browseScope(), "public", 1000)
 	if err != nil {
 		t.Fatalf("Tables(limit=1000): %v", err)
 	}
@@ -246,14 +246,14 @@ func TestMetadataBrowsing_LimitBound_PG(t *testing.T) {
 
 	// employees 至少 1 列：limit=1 恰返回 1 行、无上限查询返回 >1 行，证明 LIMIT 生效
 	// （列数由 seed 决定，不硬编码，兼容本地/CI 不同定义）。
-	cols, err := h.Columns(context.Background(), "public", "employees", 1)
+	cols, err := h.Columns(context.Background(), browseScope(), "public", "employees", 1)
 	if err != nil {
 		t.Fatalf("Columns(limit=1): %v", err)
 	}
 	if len(cols) != 1 {
 		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
 	}
-	allCols, err := h.Columns(context.Background(), "public", "employees", 100)
+	allCols, err := h.Columns(context.Background(), browseScope(), "public", "employees", 100)
 	if err != nil {
 		t.Fatalf("Columns(limit=100): %v", err)
 	}
@@ -270,7 +270,7 @@ func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
 	ensureEmployees(t, h)
 	defer h.Release()
 
-	schemas, err := h.Schemas(context.Background(), 1)
+	schemas, err := h.Schemas(context.Background(), browseScope(), 1)
 	if err != nil {
 		t.Fatalf("Schemas(limit=1): %v", err)
 	}
@@ -278,7 +278,7 @@ func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
 		t.Fatalf("Schemas(limit=1) returned %d rows, want <=1", len(schemas))
 	}
 
-	tables, err := h.Tables(context.Background(), "webdb_demo", 1)
+	tables, err := h.Tables(context.Background(), browseScope(), "webdb_demo", 1)
 	if err != nil {
 		t.Fatalf("Tables(limit=1): %v", err)
 	}
@@ -286,14 +286,14 @@ func TestMetadataBrowsing_LimitBound_MySQL(t *testing.T) {
 		t.Fatalf("Tables(limit=1) returned %d rows, want <=1", len(tables))
 	}
 
-	cols, err := h.Columns(context.Background(), "webdb_demo", "employees", 1)
+	cols, err := h.Columns(context.Background(), browseScope(), "webdb_demo", "employees", 1)
 	if err != nil {
 		t.Fatalf("Columns(limit=1): %v", err)
 	}
 	if len(cols) != 1 {
 		t.Fatalf("Columns(limit=1) returned %d rows, want exactly 1", len(cols))
 	}
-	allCols, err := h.Columns(context.Background(), "webdb_demo", "employees", 100)
+	allCols, err := h.Columns(context.Background(), browseScope(), "webdb_demo", "employees", 100)
 	if err != nil {
 		t.Fatalf("Columns(limit=100): %v", err)
 	}
@@ -327,17 +327,17 @@ func TestMetadataTimeoutBeforeFirstRow_PG(t *testing.T) {
 	// 截止时间已在过去 → 查询在返回任何行前即超时
 	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	if _, err := h.Schemas(deadline, 10); err == nil {
+	if _, err := h.Schemas(deadline, browseScope(), 10); err == nil {
 		t.Fatal("Schemas: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
 	}
-	if _, err := h.Tables(deadline, "public", 10); err == nil {
+	if _, err := h.Tables(deadline, browseScope(), "public", 10); err == nil {
 		t.Fatal("Tables: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
 	}
-	if _, err := h.Columns(deadline, "public", "employees", 10); err == nil {
+	if _, err := h.Columns(deadline, browseScope(), "public", "employees", 10); err == nil {
 		t.Fatal("Columns: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
@@ -346,7 +346,7 @@ func TestMetadataTimeoutBeforeFirstRow_PG(t *testing.T) {
 	// 取消传播 → query_cancelled
 	cancelled, cancel2 := context.WithCancel(context.Background())
 	cancel2()
-	if _, err := h.Schemas(cancelled, 10); err == nil {
+	if _, err := h.Schemas(cancelled, browseScope(), 10); err == nil {
 		t.Fatal("Schemas: expected cancel error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryCanceled)
@@ -363,17 +363,17 @@ func TestMetadataTimeoutBeforeFirstRow_MySQL(t *testing.T) {
 
 	deadline, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	if _, err := h.Schemas(deadline, 10); err == nil {
+	if _, err := h.Schemas(deadline, browseScope(), 10); err == nil {
 		t.Fatal("Schemas: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
 	}
-	if _, err := h.Tables(deadline, "webdb_demo", 10); err == nil {
+	if _, err := h.Tables(deadline, browseScope(), "webdb_demo", 10); err == nil {
 		t.Fatal("Tables: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
 	}
-	if _, err := h.Columns(deadline, "webdb_demo", "employees", 10); err == nil {
+	if _, err := h.Columns(deadline, browseScope(), "webdb_demo", "employees", 10); err == nil {
 		t.Fatal("Columns: expected timeout error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryTimeout)
@@ -381,10 +381,58 @@ func TestMetadataTimeoutBeforeFirstRow_MySQL(t *testing.T) {
 
 	cancelled, cancel2 := context.WithCancel(context.Background())
 	cancel2()
-	if _, err := h.Schemas(cancelled, 10); err == nil {
+	if _, err := h.Schemas(cancelled, browseScope(), 10); err == nil {
 		t.Fatal("Schemas: expected cancel error")
 	} else {
 		assertAdapterCode(t, err, ErrQueryCanceled)
+	}
+}
+
+// TestMetadataBrowsing_AdmissionLimited 验证元数据浏览受 AdmissionController 用户/
+// 工作区/连接级并发准入约束（ADR-016）：耗尽连接级 permit 后，Schemas/Tables/Columns
+// 返回 rate_limited（与 Query/NextPage 一致），释放后恢复。
+func TestMetadataBrowsing_AdmissionLimited(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	ensureEmployees(t, h)
+	defer h.Release()
+
+	// 连接级 maxConn=5：用 5 个不同用户/工作区共享同一 connectionID 占满连接限流器，
+	// 避免命中用户（maxUser=2）/工作区（maxWorkspace=10）限流器。
+	permits := make([]*Permit, 0, 5)
+	for i := 0; i < 5; i++ {
+		p, err := h.entry.manager.ac.TryAcquire("u"+strconv.Itoa(i+1), "w"+strconv.Itoa(i+1), h.entry.cfg.ConnectionID)
+		if err != nil {
+			t.Fatalf("TryAcquire %d: %v", i, err)
+		}
+		permits = append(permits, p)
+	}
+	release := func() {
+		for _, p := range permits {
+			p.Release()
+		}
+		permits = permits[:0]
+	}
+	defer release()
+
+	ctx := context.Background()
+	for name, fn := range map[string]func() error{
+		"Schemas": func() error { _, err := h.Schemas(ctx, browseScope(), 10); return err },
+		"Tables":  func() error { _, err := h.Tables(ctx, browseScope(), "public", 10); return err },
+		"Columns": func() error { _, err := h.Columns(ctx, browseScope(), "public", "employees", 10); return err },
+	} {
+		err := fn()
+		if err == nil {
+			t.Fatalf("%s: expected rate_limited error", name)
+		}
+		assertAdapterCode(t, err, ErrRateLimited)
+	}
+
+	// 释放全部 permit 后元数据浏览恢复。
+	release()
+	if _, err := h.Schemas(ctx, browseScope(), 10); err != nil {
+		t.Fatalf("Schemas after release: %v", err)
 	}
 }
 
@@ -913,6 +961,11 @@ func mustGet(t *testing.T, m *AdapterManager, cfg ConnectConfig) *PoolHandle {
 		t.Fatalf("Get: %v", err)
 	}
 	return h
+}
+
+// browseScope 元数据浏览测试作用域（合成标识，非真实凭证）。
+func browseScope() UserWorkspaceScope {
+	return UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
 }
 
 func ensureEmployees(t *testing.T, h *PoolHandle) {

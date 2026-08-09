@@ -62,21 +62,21 @@ func (r fResolver) ResolveCredential(ctx context.Context, wsID, secretRef uuid.U
 }
 
 type fBrowser struct {
-	schemas func(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
-	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
-	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
+	schemas func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error)
+	tables  func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema string, limit int) ([]adapter.Table, error)
+	columns func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema, table string, limit int) ([]adapter.Column, error)
 }
 
-func (b fBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
-	return b.schemas(ctx, cfg, limit)
+func (b fBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error) {
+	return b.schemas(ctx, cfg, scope, limit)
 }
 
-func (b fBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error) {
-	return b.tables(ctx, cfg, schema, limit)
+func (b fBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema string, limit int) ([]adapter.Table, error) {
+	return b.tables(ctx, cfg, scope, schema, limit)
 }
 
-func (b fBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error) {
-	return b.columns(ctx, cfg, schema, table, limit)
+func (b fBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema, table string, limit int) ([]adapter.Column, error) {
+	return b.columns(ctx, cfg, scope, schema, table, limit)
 }
 
 func wsID() uuid.UUID { return uuid.MustParse("11111111-1111-1111-1111-111111111111") }
@@ -338,7 +338,7 @@ func TestListSchemas_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "demo_reader", Password: "secret"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return []adapter.Schema{{Name: "public"}}, nil
 			},
 		},
@@ -404,7 +404,7 @@ func TestListSchemas_DatabaseErrorRedacted(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrDatabaseError, Message: "pq: permission denied for relation secrets"}
 			},
 		},
@@ -437,7 +437,7 @@ func TestListSchemas_TimeoutMapsTo504(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 				return nil, context.DeadlineExceeded
 			},
 		},
@@ -466,7 +466,7 @@ func TestListSchemas_CancelledMapsTo499(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 				return nil, context.Canceled
 			},
 		},
@@ -497,7 +497,7 @@ func TestListSchemas_DatabaseErrorCancelMapsTo499(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return nil, adapter.WrapDatabaseError(context.Canceled)
 			},
 		},
@@ -528,7 +528,7 @@ func TestListSchemas_DatabaseErrorTimeoutMapsTo504(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return nil, adapter.WrapDatabaseError(context.DeadlineExceeded)
 			},
 		},
@@ -568,7 +568,7 @@ func TestListSchemas_429RetryAfter(t *testing.T) {
 					return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 				}},
 				browser: fBrowser{
-					schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+					schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 						return nil, &adapter.AdapterError{Code: tc.code}
 					},
 				},
@@ -649,7 +649,7 @@ func TestListColumns_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			columns: func(context.Context, adapter.ConnectConfig, string, string, int) ([]adapter.Column, error) {
+			columns: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, string, string, int) ([]adapter.Column, error) {
 				return []adapter.Column{{Name: "id", Ordinal: 1, NativeType: "int4", Nullable: false, HasDefault: true}}, nil
 			},
 		},
@@ -757,7 +757,7 @@ func TestListSchemas_ResponseByteTooLarge(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: fBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return []adapter.Schema{{Name: strings.Repeat("a", browse.MaxResponseBytes)}}, nil
 			},
 		},

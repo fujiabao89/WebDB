@@ -38,11 +38,13 @@ type PolicyReader interface {
 // 生产实现包装 adapter.AdapterManager.Get + PoolHandle.Schemas/Tables/Columns，
 // 并保证 handle.Release 归还连接。limit 为服务端有界上限（MaxEntries+1 sentinel），
 // 必须下传查询层参数化 LIMIT 或在迭代到 sentinel 行时停止，不能先累积完整结果再拒绝
-// （WEB-36 P1：元数据条目上限不得在无界检索之后才执行）。
+// （WEB-36 P1：元数据条目上限不得在无界检索之后才执行）。scope 为服务端派生的
+// 准入作用域（用户/工作区），下传 PoolHandle 获取 AdmissionController permit
+// （ADR-016：元数据浏览与查询/续页同受用户/工作区/连接级并发限流约束）。
 type MetadataBrowser interface {
-	Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
-	Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
-	Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
+	Schemas(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error)
+	Tables(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema string, limit int) ([]adapter.Table, error)
+	Columns(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema, table string, limit int) ([]adapter.Column, error)
 }
 
 // Limits 浏览响应硬上限（P0-06A §6/§7，D06c 已批准：连接 200、浏览层级 1000）。
@@ -173,7 +175,7 @@ func (s *Service) ListSchemas(ctx context.Context, p Principal, connID uuid.UUID
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	schemas, err := s.browser.Schemas(ctx, cfg, boundedSentinel(s.limits.MaxEntries))
+	schemas, err := s.browser.Schemas(ctx, cfg, p.adapterScope(), boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}
@@ -206,7 +208,7 @@ func (s *Service) ListTables(ctx context.Context, p Principal, connID uuid.UUID,
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	tables, err := s.browser.Tables(ctx, cfg, schema, boundedSentinel(s.limits.MaxEntries))
+	tables, err := s.browser.Tables(ctx, cfg, p.adapterScope(), schema, boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}
@@ -239,7 +241,7 @@ func (s *Service) ListColumns(ctx context.Context, p Principal, connID uuid.UUID
 	if s.browser == nil {
 		return nil, fmt.Errorf("%w", ErrInternalError)
 	}
-	cols, err := s.browser.Columns(ctx, cfg, schema, table, boundedSentinel(s.limits.MaxEntries))
+	cols, err := s.browser.Columns(ctx, cfg, p.adapterScope(), schema, table, boundedSentinel(s.limits.MaxEntries))
 	if err != nil {
 		return nil, fmt.Errorf("%w", mapAdapterError(err))
 	}

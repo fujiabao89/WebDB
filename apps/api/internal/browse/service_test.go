@@ -64,24 +64,24 @@ func (r *countingResolver) ResolveCredential(ctx context.Context, wsID, secretRe
 
 type countingBrowser struct {
 	calls   int
-	schemas func(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error)
-	tables  func(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error)
-	columns func(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error)
+	schemas func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error)
+	tables  func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema string, limit int) ([]adapter.Table, error)
+	columns func(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema, table string, limit int) ([]adapter.Column, error)
 }
 
-func (b *countingBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
+func (b *countingBrowser) Schemas(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error) {
 	b.calls++
-	return b.schemas(ctx, cfg, limit)
+	return b.schemas(ctx, cfg, scope, limit)
 }
 
-func (b *countingBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, schema string, limit int) ([]adapter.Table, error) {
+func (b *countingBrowser) Tables(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema string, limit int) ([]adapter.Table, error) {
 	b.calls++
-	return b.tables(ctx, cfg, schema, limit)
+	return b.tables(ctx, cfg, scope, schema, limit)
 }
 
-func (b *countingBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, schema, table string, limit int) ([]adapter.Column, error) {
+func (b *countingBrowser) Columns(ctx context.Context, cfg adapter.ConnectConfig, scope adapter.UserWorkspaceScope, schema, table string, limit int) ([]adapter.Column, error) {
 	b.calls++
-	return b.columns(ctx, cfg, schema, table, limit)
+	return b.columns(ctx, cfg, scope, schema, table, limit)
 }
 
 type browseDeps struct {
@@ -484,7 +484,7 @@ func TestListSchemas_Success(t *testing.T) {
 		},
 	}
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+		schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 			return []adapter.Schema{{Name: "public"}, {Name: "app"}}, nil
 		},
 	}
@@ -524,7 +524,9 @@ func TestListSchemas_ResultTooLarge(t *testing.T) {
 		over[i] = adapter.Schema{Name: "s"}
 	}
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) { return over, nil },
+		schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
+			return over, nil
+		},
 	}
 	s := newService(t, browseDeps{
 		members: stubMembers{fn: func(context.Context, uuid.UUID, uuid.UUID) (*metadata.WorkspaceMember, error) {
@@ -552,7 +554,7 @@ func TestListSchemas_ResponseTooLarge(t *testing.T) {
 	// F2（方案 A）：DTO 序列化后超过 8 MiB 字节预算 → result_too_large，不静默截断。
 	huge := strings.Repeat("a", MaxResponseBytes+1)
 	browser := &countingBrowser{
-		schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+		schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 			return []adapter.Schema{{Name: huge}}, nil
 		},
 	}
@@ -581,7 +583,7 @@ func TestListSchemas_ResponseTooLarge(t *testing.T) {
 func TestAdapterBrowser_NilManager(t *testing.T) {
 	// F3：AdapterBrowser 未注入 Manager 时不得 nil 解引用，返回 internal_error。
 	b := AdapterBrowser{}
-	_, err := b.Schemas(context.Background(), adapter.ConnectConfig{}, DefaultLimits().MaxEntries+1)
+	_, err := b.Schemas(context.Background(), adapter.ConnectConfig{}, adapter.UserWorkspaceScope{}, DefaultLimits().MaxEntries+1)
 	if !errors.Is(err, ErrInternalError) {
 		t.Fatalf("expected internal_error, got %v", err)
 	}
@@ -603,7 +605,7 @@ func TestListSchemas_Cancelled(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 				return nil, context.Canceled
 			},
 		},
@@ -632,7 +634,7 @@ func TestListSchemas_Timeout(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+			schemas: func(ctx context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 				return nil, context.DeadlineExceeded
 			},
 		},
@@ -661,7 +663,7 @@ func TestListSchemas_AdapterDatabaseError(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrDatabaseError}
 			},
 		},
@@ -688,7 +690,7 @@ func TestListSchemas_AdapterConnectionBusy(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				// 模拟真实池耗尽错误链：AdapterError 被外层包装（真实场景 cause 可为
 				// deadline）；mapAdapterError 必须先 errors.As 提取 code，不被 context 掩盖（P2-4）。
 				return nil, fmt.Errorf("outer: %w", &adapter.AdapterError{Code: adapter.ErrConnPoolExhausted, Message: "pool exhausted"})
@@ -717,7 +719,7 @@ func TestListSchemas_AdapterConnectionFailed(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			schemas: func(context.Context, adapter.ConnectConfig, int) ([]adapter.Schema, error) {
+			schemas: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, int) ([]adapter.Schema, error) {
 				return nil, &adapter.AdapterError{Code: adapter.ErrConnectionFailed}
 			},
 		},
@@ -744,7 +746,7 @@ func TestListTables_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			tables: func(context.Context, adapter.ConnectConfig, string, int) ([]adapter.Table, error) {
+			tables: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, string, int) ([]adapter.Table, error) {
 				return []adapter.Table{{Schema: "public", Name: "users", Type: adapter.TableTypeTable}}, nil
 			},
 		},
@@ -774,7 +776,7 @@ func TestListColumns_Success(t *testing.T) {
 			return credentials.CredentialPayload{User: "u", Password: "p"}, nil
 		}},
 		browser: &countingBrowser{
-			columns: func(context.Context, adapter.ConnectConfig, string, string, int) ([]adapter.Column, error) {
+			columns: func(context.Context, adapter.ConnectConfig, adapter.UserWorkspaceScope, string, string, int) ([]adapter.Column, error) {
 				return []adapter.Column{{Name: "id", Ordinal: 1, NativeType: "int4", Nullable: false, HasDefault: true}}, nil
 			},
 		},
@@ -841,7 +843,7 @@ func TestListColumns_EmptyTableRejected(t *testing.T) {
 func TestListSchemas_PassesSentinelLimit(t *testing.T) {
 	var got int
 	browser := &countingBrowser{
-		schemas: func(_ context.Context, _ adapter.ConnectConfig, limit int) ([]adapter.Schema, error) {
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, limit int) ([]adapter.Schema, error) {
 			got = limit
 			return nil, nil
 		},
@@ -858,7 +860,7 @@ func TestListSchemas_PassesSentinelLimit(t *testing.T) {
 func TestListTables_PassesSentinelLimit(t *testing.T) {
 	var got int
 	browser := &countingBrowser{
-		tables: func(_ context.Context, _ adapter.ConnectConfig, _ string, limit int) ([]adapter.Table, error) {
+		tables: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ string, limit int) ([]adapter.Table, error) {
 			got = limit
 			return nil, nil
 		},
@@ -875,7 +877,7 @@ func TestListTables_PassesSentinelLimit(t *testing.T) {
 func TestListColumns_PassesSentinelLimit(t *testing.T) {
 	var got int
 	browser := &countingBrowser{
-		columns: func(_ context.Context, _ adapter.ConnectConfig, _, _ string, limit int) ([]adapter.Column, error) {
+		columns: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _, _ string, limit int) ([]adapter.Column, error) {
 			got = limit
 			return nil, nil
 		},
@@ -897,7 +899,9 @@ func TestListSchemas_ExactlyAtLimitOK(t *testing.T) {
 		at[i] = adapter.Schema{Name: "s"}
 	}
 	browser := &countingBrowser{
-		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) { return at, nil },
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
+			return at, nil
+		},
 	}
 	s := newService(t, allowedDeps(browser))
 	out, err := s.ListSchemas(context.Background(), principal(), connID())
@@ -911,7 +915,9 @@ func TestListSchemas_ExactlyAtLimitOK(t *testing.T) {
 
 func TestListSchemas_EmptyOK(t *testing.T) {
 	browser := &countingBrowser{
-		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) { return nil, nil },
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
+			return nil, nil
+		},
 	}
 	s := newService(t, allowedDeps(browser))
 	out, err := s.ListSchemas(context.Background(), principal(), connID())
@@ -926,7 +932,7 @@ func TestListSchemas_EmptyOK(t *testing.T) {
 func TestListTables_ResultTooLarge(t *testing.T) {
 	over := make([]adapter.Table, DefaultLimits().MaxEntries+1)
 	browser := &countingBrowser{
-		tables: func(_ context.Context, _ adapter.ConnectConfig, _ string, _ int) ([]adapter.Table, error) {
+		tables: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ string, _ int) ([]adapter.Table, error) {
 			return over, nil
 		},
 	}
@@ -940,7 +946,7 @@ func TestListTables_ResultTooLarge(t *testing.T) {
 func TestListColumns_ResultTooLarge(t *testing.T) {
 	over := make([]adapter.Column, DefaultLimits().MaxEntries+1)
 	browser := &countingBrowser{
-		columns: func(_ context.Context, _ adapter.ConnectConfig, _, _ string, _ int) ([]adapter.Column, error) {
+		columns: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _, _ string, _ int) ([]adapter.Column, error) {
 			return over, nil
 		},
 	}
@@ -957,7 +963,7 @@ func TestListColumns_ResultTooLarge(t *testing.T) {
 // cause 被识别为 query_cancelled（而非 database_error/500）。
 func TestListSchemas_MidStreamCancellationMapped(t *testing.T) {
 	browser := &countingBrowser{
-		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 			return nil, adapter.WrapDatabaseError(context.Canceled)
 		},
 	}
@@ -970,7 +976,7 @@ func TestListSchemas_MidStreamCancellationMapped(t *testing.T) {
 
 func TestListSchemas_MidStreamTimeoutMapped(t *testing.T) {
 	browser := &countingBrowser{
-		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ int) ([]adapter.Schema, error) {
+		schemas: func(_ context.Context, _ adapter.ConnectConfig, _ adapter.UserWorkspaceScope, _ int) ([]adapter.Schema, error) {
 			return nil, adapter.WrapDatabaseError(context.DeadlineExceeded)
 		},
 	}

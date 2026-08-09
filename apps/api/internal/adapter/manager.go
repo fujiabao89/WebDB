@@ -365,10 +365,17 @@ func (h *PoolHandle) Ping(ctx context.Context) error {
 	}
 	return newError(ErrPoolClosed, "no connection", nil)
 }
-func (h *PoolHandle) Schemas(ctx context.Context, limit int) ([]Schema, error) {
+func (h *PoolHandle) Schemas(ctx context.Context, scope UserWorkspaceScope, limit int) ([]Schema, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	// 与 Query/NextPage 一致：元数据浏览同样受用户/工作区/连接级并发准入约束，
+	// 超限返回 ErrRateLimited（429），不得绕过并发边界（ADR-016）。
+	permit, err := h.entry.manager.ac.TryAcquire(scope.UserID, scope.WorkspaceID, h.entry.cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer permit.Release()
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
@@ -382,10 +389,15 @@ func (h *PoolHandle) Schemas(ctx context.Context, limit int) ([]Schema, error) {
 		return nil, newError(ErrUnsupportedEngine, "", nil)
 	}
 }
-func (h *PoolHandle) Tables(ctx context.Context, schema string, limit int) ([]Table, error) {
+func (h *PoolHandle) Tables(ctx context.Context, scope UserWorkspaceScope, schema string, limit int) ([]Table, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	permit, err := h.entry.manager.ac.TryAcquire(scope.UserID, scope.WorkspaceID, h.entry.cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer permit.Release()
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
@@ -399,10 +411,15 @@ func (h *PoolHandle) Tables(ctx context.Context, schema string, limit int) ([]Ta
 		return nil, newError(ErrUnsupportedEngine, "", nil)
 	}
 }
-func (h *PoolHandle) Columns(ctx context.Context, schema, table string, limit int) ([]Column, error) {
+func (h *PoolHandle) Columns(ctx context.Context, scope UserWorkspaceScope, schema, table string, limit int) ([]Column, error) {
 	if err := h.check(); err != nil {
 		return nil, err
 	}
+	permit, err := h.entry.manager.ac.TryAcquire(scope.UserID, scope.WorkspaceID, h.entry.cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer permit.Release()
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, connAcquireTimeout)
 	defer cancel()
