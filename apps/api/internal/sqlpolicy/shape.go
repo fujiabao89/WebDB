@@ -28,13 +28,16 @@ func AnalyzeShape(dialect Dialect, sql string) (*queryplan.QueryShape, error) {
 	}
 }
 
-// containsFuncCallPG 遍历 PG WHERE 表达式，发现任何函数调用即返回 true。
-// 分页续页会重放原 SQL：volatile 谓词（random()/now() 等）使结果集合随执行变化，
-// 无法证明确定性时必须 fail-closed（Codex P1）。
-func containsFuncCallPG(n pgast.Node) bool {
+// predicateHasNonDeterministicExprPG 遍历 PG WHERE 表达式，发现任何函数调用
+// （FuncCall，如 random()/now()）或 SQL-value 构造（SQLValueFunction，如
+// CURRENT_TIMESTAMP/CURRENT_DATE/LOCALTIME）即返回 true。
+// 分页续页会重放原 SQL：volatile 谓词使结果集合随执行变化（时间推移新增行、
+// 随机取样改变成员），无法证明确定性时必须 fail-closed（Codex P1）。
+func predicateHasNonDeterministicExprPG(n pgast.Node) bool {
 	found := false
 	pgast.Inspect(n, func(node pgast.Node) bool {
-		if _, ok := node.(*pgast.FuncCall); ok {
+		switch node.(type) {
+		case *pgast.FuncCall, *pgast.SQLValueFunction:
 			found = true
 		}
 		return true
@@ -70,8 +73,8 @@ func analyzePGShape(sql string) (*queryplan.QueryShape, error) {
 	if err := rejectPGShape(sel); err != nil {
 		return nil, err
 	}
-	if sel.WhereClause != nil && containsFuncCallPG(sel.WhereClause) {
-		return nil, fmt.Errorf("analyze shape: volatile predicate (function call in WHERE) not allowed")
+	if sel.WhereClause != nil && predicateHasNonDeterministicExprPG(sel.WhereClause) {
+		return nil, fmt.Errorf("analyze shape: volatile predicate (function call/SQL-value in WHERE) not allowed")
 	}
 	shape := &queryplan.QueryShape{Columns: map[string]string{}}
 	if sel.FromClause == nil || sel.FromClause.Len() != 1 {

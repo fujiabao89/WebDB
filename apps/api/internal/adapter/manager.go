@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -375,7 +376,11 @@ func (h *PoolHandle) ResolveQualifiedTable(ctx context.Context, table string) (s
 		var s string
 		qctx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
 		defer cancel()
-		if err := h.entry.pgPool.QueryRow(qctx, resolveQualifiedTablePG, table).Scan(&s); err != nil {
+		// parser 提供的标识符按 PG 引号规则转义后传给 to_regclass：未限定带引号
+		// 混合大小写表（如 "Users"）若不引号会被折叠为小写，导致解析失败或解析到
+		// 错误的同名表（Codex P1）。
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		if err := h.entry.pgPool.QueryRow(qctx, resolveQualifiedTablePG, quoted).Scan(&s); err != nil {
 			return "", mapAcquireError(err)
 		}
 		return s, nil

@@ -286,6 +286,38 @@ func TestResolveQualifiedTable_PG_SearchPathLaterEntry(t *testing.T) {
 	}
 }
 
+// TestResolveQualifiedTable_PG_QuotedMixedCase 验证未限定带引号混合大小写表（"Users"）
+// 经 to_regclass 必须保留大小写解析到实际 schema；若折叠为小写 users 会解析失败
+// 或解析到错误表（Codex P1）。
+func TestResolveQualifiedTable_PG_QuotedMixedCase(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	defer h.Release()
+
+	conn, err := h.entry.pgPool.Acquire(context.Background())
+	if err != nil {
+		t.Skipf("acquire pool conn: %v", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(context.Background(), `DROP TABLE IF EXISTS "Users"`); err != nil {
+		t.Skipf("skip: PG demo account lacks DDL privilege: %v", err)
+	}
+	if _, err := conn.Exec(context.Background(), `CREATE TABLE "Users" (id int PRIMARY KEY)`); err != nil {
+		t.Skipf("skip: cannot create quoted mixed-case table: %v", err)
+	}
+	defer func() { _, _ = conn.Exec(context.Background(), `DROP TABLE IF EXISTS "Users"`) }()
+
+	s, err := h.ResolveQualifiedTable(context.Background(), "Users")
+	if err != nil {
+		t.Fatalf("ResolveQualifiedTable(\"Users\") error = %v", err)
+	}
+	if s != "public" {
+		t.Fatalf("resolved schema = %q, want %q (quoted mixed-case table must preserve case)", s, "public")
+	}
+	t.Logf("PG resolve quoted \"Users\" -> %s", s)
+}
+
 func TestNextPage_InvalidPlan(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())

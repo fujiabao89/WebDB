@@ -41,6 +41,8 @@ func TestAnalyzeShapePG(t *testing.T) {
 		{name: "where plain comparison func on const ok", sql: "SELECT * FROM users WHERE name = 'x'", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
 		{name: "where volatile func rejected", sql: "SELECT * FROM users WHERE random() < 0.5", wantErr: true},
 		{name: "where volatile now rejected", sql: "SELECT * FROM users WHERE created_at > now() - interval '1 day'", wantErr: true},
+		{name: "where sql-value CURRENT_TIMESTAMP rejected", sql: "SELECT * FROM events WHERE visible_at <= CURRENT_TIMESTAMP", wantErr: true},
+		{name: "where sql-value CURRENT_DATE rejected", sql: "SELECT * FROM events WHERE visible_at >= CURRENT_DATE", wantErr: true},
 
 		{name: "computed expression", sql: "SELECT id+1 AS x FROM users", wantErr: true},
 		{name: "aggregate", sql: "SELECT count(*) FROM users", wantErr: true},
@@ -110,6 +112,7 @@ func TestAnalyzeShapeMySQL(t *testing.T) {
 		{name: "no from", sql: "SELECT 1", wantErr: true},
 		{name: "where allowed", sql: "SELECT * FROM users WHERE id > 10", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
 		{name: "where volatile RAND rejected", sql: "SELECT * FROM users WHERE RAND() < 0.5", wantErr: true},
+		{name: "where CURRENT_TIMESTAMP rejected", sql: "SELECT * FROM events WHERE visible_at <= CURRENT_TIMESTAMP", wantErr: true},
 	}
 
 	for _, tt := range tests {
