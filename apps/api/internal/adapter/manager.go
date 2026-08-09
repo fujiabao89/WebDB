@@ -692,12 +692,16 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	}
 	cts, _ := rows.ColumnTypes()
 	colInfos := make([]ColumnInfo, len(cn))
+	// textCols 依据驱动列元数据 DatabaseTypeName() 判定文本列，
+	// 不使用运行时值是否为 []byte 猜测文本/二进制。
+	textCols := make([]bool, len(cn))
 	for i, n := range cn {
 		dt := ""
 		if i < len(cts) {
 			dt = cts[i].DatabaseTypeName()
 		}
 		colInfos[i] = ColumnInfo{Name: n, DataType: dt}
+		textCols[i] = isMySQLTextColumn(dt)
 	}
 	var data [][]any
 	rc := 0
@@ -710,6 +714,13 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, mapExecError(err)
+		}
+		// 文本列规范化：仅对元数据判定的文本列把 []byte 转 string；
+		// 二进制/未知列保持 []byte，防御性复制由 copyAndMeasure 完成。
+		for i, v := range vals {
+			if b, ok := v.([]byte); ok && textCols[i] {
+				vals[i] = string(b)
+			}
 		}
 		// 预读行：只计数不拷贝，finalizeResult 会丢弃该行
 		if rc >= effPage {
