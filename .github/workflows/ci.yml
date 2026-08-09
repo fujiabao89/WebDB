@@ -171,7 +171,7 @@ jobs:
               (1,'Alice'),(2,'Bob'),(3,'Charlie'),(4,'David'),(5,'Eve'),(6,'Frank'),(7,'Grace');
           "
       - name: Adapter integration test
-        run: go test -tags=integration ./internal/adapter/...
+        run: go test -tags=integration -p=1 ./internal/adapter/... ./internal/browse/...
         env:
           DEMO_PG_HOST: localhost
           DEMO_PG_PORT: "5432"

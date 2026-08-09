@@ -186,7 +186,7 @@ WEB-34 目标：在任何 P0-06 HTTP/前端生产实现之前，冻结最小公�
 
 | 项 | 定义 |
 |---|---|
-| 授权条件 | 服务端 Principal 解析 → 成员资格（任意可读角色）→ 目标 workspace 与 Principal 一致。所有可读角色（owner/admin/editor/viewer）可见连接列表；**列表本身不要求 AllowRead**（AllowRead 是执行/浏览级授权，见 §7/§8） |
+| 授权条件 | 服务端 Principal 解析 → 成员资格（任意可读角色）→ 目标 workspace 与 Principal 一致。所有可读角色（owner/admin/editor/viewer）可访问连接列表接口；**列表仅展示 AllowRead=true 的连接，缺失或拒绝策略的连接不出现**（WEB-36 任务卡口径，防枚举；AllowRead 同时是执行/浏览级授权，见 §7/§8） |
 | 请求字段 | 路径：`workspace_id`（仅与 Principal.WorkspaceID 比对）；无 query/body |
 | 禁止字段 | 客户端不得提交 `user_id`、`actor_id`、`role`、`workspace_id` 覆盖、`engine` 过滤（如要按引擎过滤列为 D03 附属决策） |
 | 成功状态码 | `200 OK` |
