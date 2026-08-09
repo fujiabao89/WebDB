@@ -49,11 +49,9 @@ func TestMySQL_TypeMatrixNormalization(t *testing.T) {
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
 	defer h.Release()
+	requireTypeMatrixTable(t, h, EngineMySQL)
 
-	res, err := h.Query(context.Background(), typeMatrixReq(mysqlTypeMatrixSQL))
-	if err != nil {
-		t.Skipf("skip: MySQL type matrix unavailable: %v", err)
-	}
+	res := queryMustSucceed(t, h, typeMatrixReq(mysqlTypeMatrixSQL))
 	if res.ReturnedRows != 2 {
 		t.Fatalf("expected 2 seeded rows, got %d", res.ReturnedRows)
 	}
@@ -144,11 +142,9 @@ func TestPG_TypeMatrixRegression(t *testing.T) {
 	defer m.Close(context.Background())
 	h := mustGet(t, m, pgCfg())
 	defer h.Release()
+	requireTypeMatrixTable(t, h, EnginePostgreSQL)
 
-	res, err := h.Query(context.Background(), typeMatrixReq(pgTypeMatrixSQL))
-	if err != nil {
-		t.Skipf("skip: PG type matrix unavailable: %v", err)
-	}
+	res := queryMustSucceed(t, h, typeMatrixReq(pgTypeMatrixSQL))
 	if res.ReturnedRows != 2 {
 		t.Fatalf("expected 2 seeded rows, got %d", res.ReturnedRows)
 	}
@@ -240,10 +236,7 @@ func TestNextPage_MySQL_TextSortKey(t *testing.T) {
 		PageSize: 3,
 		MaxRows:  100,
 	}
-	r1, err := h.Query(context.Background(), req)
-	if err != nil {
-		t.Skipf("skip: query unavailable: %v", err)
-	}
+	r1 := queryMustSucceed(t, h, req)
 	if r1.NextToken == nil {
 		t.Fatal("expected next token")
 	}
@@ -275,6 +268,64 @@ func TestNextPage_MySQL_TextSortKey(t *testing.T) {
 		seen[name] = true
 	}
 	t.Logf("text sort key pagination OK: %d + %d rows", r1.ReturnedRows, r2.ReturnedRows)
+}
+
+// requireTypeMatrixTable 是集成环境预检：检查类型矩阵种子表 webdb_type_matrix
+// 是否存在。表不存在表示环境未预置（未起 Compose 或未运行 init），这是唯一允许
+// 的 Skip 场景；表存在后，查询阶段的任何错误必须由 queryMustSucceed 作为真实
+// 失败处理（t.Fatalf），不得标记为 Skip——缺表、权限错误或规范化回归都会让
+// 测试失败而非产生绿色 CI。
+func requireTypeMatrixTable(t *testing.T, h *PoolHandle, engine Engine) {
+	t.Helper()
+	var n int64
+	switch engine {
+	case EngineMySQL:
+		err := h.entry.sqlDB.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'webdb_type_matrix'").Scan(&n)
+		if err != nil {
+			t.Skipf("skip: type matrix preflight failed: %v", err)
+		}
+	case EnginePostgreSQL:
+		err := h.entry.pgPool.QueryRow(context.Background(),
+			"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'webdb_type_matrix'").Scan(&n)
+		if err != nil {
+			t.Skipf("skip: type matrix preflight failed: %v", err)
+		}
+	default:
+		t.Skipf("skip: unsupported engine %v", engine)
+	}
+	if n == 0 {
+		t.Skipf("skip: webdb_type_matrix seed table missing（集成环境未预置）")
+	}
+}
+
+// queryMustSucceed 在环境预检（mustGet + requireTypeMatrixTable）成功后执行查询。
+// 查询错误表示缺表、权限、SQL 包装或本次结果规范化回归，必须以 t.Fatalf 使测试
+// 失败；不得用 t.Skipf 隐藏，否则会产生绿色 CI。
+func queryMustSucceed(t *testing.T, h *PoolHandle, req FirstPageRequest) *QueryResult {
+	t.Helper()
+	res, err := h.Query(context.Background(), req)
+	if err != nil {
+		t.Fatalf("type matrix query failed: %v", err)
+	}
+	return res
+}
+
+// TestTypeMatrix_QueryErrorSurfaced 提供查询阶段错误的聚焦回归证据：环境预检
+// 成功后，受控的坏查询必须被 h.Query 返回错误（而非 nil）。该错误由
+// queryMustSucceed 以 t.Fatalf 暴露为测试失败，不再被 t.Skipf 隐藏。
+func TestTypeMatrix_QueryErrorSurfaced(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, myCfg())
+	defer h.Release()
+	requireTypeMatrixTable(t, h, EngineMySQL)
+
+	_, err := h.Query(context.Background(), typeMatrixReq(
+		"SELECT nonexistent_column_xyz FROM webdb_type_matrix"))
+	if err == nil {
+		t.Fatal("expected query error for nonexistent column, got nil")
+	}
 }
 
 func assertCell(t *testing.T, name string, got, want any) {
