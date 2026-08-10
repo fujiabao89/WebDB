@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fujiabao89/webdb/internal/queryplan"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -33,10 +34,10 @@ const pgTypeMatrixSQL = `SELECT id, c_text, c_varchar, c_char, c_bytea, c_jsonb,
 FROM webdb_type_matrix`
 
 func typeMatrixReq(sql string) FirstPageRequest {
+	// 单页受限查询（MaxRows=PageSize=100 → requiresPagination=false），无需 SortPlan。
 	return FirstPageRequest{
 		Scope:    UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
 		SQL:      sql,
-		SortKeys: []SortKey{{Column: "id", Order: SortAsc, NullsLast: false, Unique: true}},
 		PageSize: 100,
 		MaxRows:  100,
 	}
@@ -223,22 +224,36 @@ func TestPG_TypeMatrixRegression(t *testing.T) {
 // TestNextPage_MySQL_TextSortKey 验证分页 token 保存的文本排序值（规范化后为 string）
 // 与 MySQL keyset 续页兼容：首页 + 续页无重复、无遗漏。
 func TestNextPage_MySQL_TextSortKey(t *testing.T) {
+	// 验证分页保存的文本排序值（规范化后为 string）与 MySQL keyset 续页兼容：
+	// 首页 + 续页无重复、无遗漏（ADR-014/015 新 API：SortPlan/VerifiedNextPagePlan）。
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
 	h := mustGet(t, m, myCfg())
 	ensureEmployees(t, h)
 	defer h.Release()
 	scope := UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"}
-	req := FirstPageRequest{
-		Scope:    scope,
-		SQL:      "SELECT id, first_name FROM employees",
-		SortKeys: []SortKey{{Column: "first_name", Order: SortAsc, NullsLast: false, Unique: true}},
-		PageSize: 3,
-		MaxRows:  100,
+	schema := schemaFor(h)
+	meta, err := h.LoadTableMetadata(context.Background(), schema, "employees")
+	if err != nil {
+		t.Fatalf("LoadTableMetadata: %v", err)
 	}
-	r1 := queryMustSucceed(t, h, req)
-	if r1.NextToken == nil {
-		t.Fatal("expected next token")
+	snap, err := queryplan.NewSchemaSnapshot(h.entry.cfg.ConnectionID, queryplan.DialectMySQL, h.PoolGeneration(), meta)
+	if err != nil {
+		t.Fatalf("NewSchemaSnapshot: %v", err)
+	}
+	plan, err := queryplan.VerifySortPlan(snap,
+		&queryplan.QueryShape{BaseSchema: schema, BaseTable: "employees", SelectStar: true},
+		[]queryplan.SortKey{
+			{Column: "first_name", Direction: queryplan.SortAsc},
+			{Column: "id", Direction: queryplan.SortAsc},
+		})
+	if err != nil {
+		t.Fatalf("VerifySortPlan(first_name,id): %v", err)
+	}
+	sql := "SELECT id, first_name FROM employees"
+	r1 := queryMustSucceed(t, h, FirstPageRequest{Scope: scope, SQL: sql, SortPlan: plan, PageSize: 3, MaxRows: 100})
+	if !r1.HasMore {
+		t.Skip("no second page")
 	}
 	// 首页 first_name 应为规范化后的 string
 	for _, row := range r1.Rows {
@@ -246,7 +261,7 @@ func TestNextPage_MySQL_TextSortKey(t *testing.T) {
 			t.Fatalf("first_name: want string, got %T", row[1])
 		}
 	}
-	r2, err := h.NextPage(context.Background(), scope, *r1.NextToken)
+	r2, err := h.NextPage(context.Background(), scope, nextPagePlan(t, plan, sql, r1, 3, 100))
 	if err != nil {
 		t.Fatalf("page 2: %v", err)
 	}

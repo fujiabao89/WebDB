@@ -7,10 +7,12 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/fujiabao89/webdb/internal/queryplan"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -21,6 +23,14 @@ const (
 	connAcquireTimeout = 5 * time.Second
 	maxConnLTMin       = 27 * time.Minute
 	maxConnLTMax       = 30 * time.Minute
+
+	// resolveQualifiedTablePG 沿完整 search_path 解析未限定表名到实际 schema：
+	// to_regclass 使用与 PG 系统一致的名字解析（表位于后置 search_path 条目时也能
+	// 解析到正确 schema，而非 current_schema() 返回的首项）。表不可见时返回空行。
+	resolveQualifiedTablePG = `SELECT n.nspname
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE c.oid = to_regclass($1)`
 )
 
 type poolEntry struct {
@@ -47,43 +57,28 @@ func (e *poolEntry) close() {
 }
 
 type AdapterManager struct {
-	mu            sync.Mutex
-	pools         map[string]*poolEntry
-	ac            *AdmissionController
-	registry      *ContinuationRegistry
-	opts          ManagerOptions
-	currentRevs   map[string]int64
-	currentCfgs   map[string]ConnectConfig
-	closed        bool
-	genCounter    int64
-	cleanupCancel context.CancelFunc
-	creating      sync.Map // per-cid singleflight: map[string]chan struct{}
+	mu          sync.Mutex
+	pools       map[string]*poolEntry
+	ac          *AdmissionController
+	opts        ManagerOptions
+	currentRevs map[string]int64
+	currentCfgs map[string]ConnectConfig
+	closed      bool
+	genCounter  int64
+	creating    sync.Map // per-cid singleflight: map[string]chan struct{}
 }
 
 func NewAdapterManager(opts ManagerOptions) *AdapterManager {
-	ctx, cancel := context.WithCancel(context.Background())
+	// continuation registry 已迁移至服务层（ADR-015），Adapter 不再持有 token。
+	// 连接池生命周期由 poolEntry.MaxConnLifetime / pgxpool 内部管理，无周期清理协程。
 	m := &AdapterManager{
 		pools: make(map[string]*poolEntry), ac: newAdmissionController(),
-		registry: newContinuationRegistry(), opts: opts,
-		currentRevs: make(map[string]int64), currentCfgs: make(map[string]ConnectConfig),
-		creating:      sync.Map{},
-		cleanupCancel: cancel,
+		opts:        opts,
+		currentRevs: make(map[string]int64),
+		currentCfgs: make(map[string]ConnectConfig),
+		creating:    sync.Map{},
 	}
-	go m.cleanupLoop(ctx)
 	return m
-}
-
-func (m *AdapterManager) cleanupLoop(ctx context.Context) {
-	t := time.NewTicker(60 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			m.registry.cleanup()
-		}
-	}
 }
 
 func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandle, error) {
@@ -310,9 +305,7 @@ func (m *AdapterManager) Close(ctx context.Context) error {
 		entries = append(entries, e)
 	}
 	m.mu.Unlock()
-	m.cleanupCancel()
 	m.ac.close()
-	m.registry.close()
 	var wg sync.WaitGroup
 	for _, e := range entries {
 		wg.Add(1)
@@ -340,6 +333,43 @@ func (h *PoolHandle) check() error {
 	return nil
 }
 func (h *PoolHandle) Release() {}
+
+// PoolGeneration 返回连接池 generation（连接重建时递增；续页重新校验用）。
+func (h *PoolHandle) PoolGeneration() int64 {
+	if h == nil {
+		return 0
+	}
+	return h.gen
+}
+
+// ResolveQualifiedTable 返回未限定表名实际解析到的可信 schema。
+// PostgreSQL：经 to_regclass 沿完整 search_path 解析实际 relation 的命名空间。
+// 仅用 current_schema() 会返回 search_path 首项存在的 schema，而 PG 对未限定表名
+// 沿整个 search_path 解析（表可能在后置条目中，Codex P1）；MySQL：连接数据库。
+// 带 connAcquireTimeout 超时；查询失败/空由调用方 fail-closed。
+func (h *PoolHandle) ResolveQualifiedTable(ctx context.Context, table string) (string, error) {
+	if err := h.check(); err != nil {
+		return "", err
+	}
+	switch h.entry.cfg.Engine {
+	case EngineMySQL:
+		return h.entry.cfg.Database, nil
+	case EnginePostgreSQL:
+		var s string
+		qctx, cancel := context.WithTimeout(ctx, connAcquireTimeout)
+		defer cancel()
+		// parser 提供的标识符按 PG 引号规则转义后传给 to_regclass：未限定带引号
+		// 混合大小写表（如 "Users"）若不引号会被折叠为小写，导致解析失败或解析到
+		// 错误的同名表（Codex P1）。
+		quoted := `"` + strings.ReplaceAll(table, `"`, `""`) + `"`
+		if err := h.entry.pgPool.QueryRow(qctx, resolveQualifiedTablePG, quoted).Scan(&s); err != nil {
+			return "", mapAcquireError(err)
+		}
+		return s, nil
+	default:
+		return "", newError(ErrUnsupportedEngine, "", nil)
+	}
+}
 func (h *PoolHandle) Ping(ctx context.Context) error {
 	if err := h.check(); err != nil {
 		return err
@@ -461,6 +491,17 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if req.MaxRows <= 0 {
 		req.MaxRows = 500 // 默认最大行数，大于 PageSize 以允许续页
 	}
+	// 可信计划绑定校验：SortPlan 的 ConnectionID/PoolGeneration 必须匹配当前 handle，
+	// 防止把其他连接/generation 的唯一性证明用于本连接（Codex 审查）。
+	if queryplan.IsValidVerifiedPlan(req.SortPlan) {
+		b := req.SortPlan.SnapshotBinding()
+		if b.ConnectionID != h.entry.cfg.ConnectionID {
+			return nil, newError(ErrInvalidPageToken, "sort plan connection mismatch", nil)
+		}
+		if b.PoolGeneration != h.gen {
+			return nil, newError(ErrStaleConfig, "sort plan pool generation mismatch", nil)
+		}
+	}
 	specs, singlePage, err := prepareFirstPageSort(req)
 	if err != nil {
 		return nil, err
@@ -479,32 +520,16 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 		return nil, err
 	}
 	if singlePage {
-		result.NextToken = nil
-		return result, nil
+		result.HasMore = false
 	}
-	if result.NextToken != nil && result.TotalReturned < req.MaxRows {
-		pv, err := extractLastValues(result.Rows, result.Columns, specs)
-		if err != nil {
-			return nil, err
-		}
-		copiedArgs := make([]any, len(req.Args))
-		copy(copiedArgs, req.Args)
-		copiedSortKeys := make([]SortKey, len(req.SortKeys))
-		copy(copiedSortKeys, req.SortKeys)
-		plan := &PagePlan{SQL: req.SQL, Args: copiedArgs, SortKeys: copiedSortKeys, LastSortValues: pv,
-			PageSize: req.PageSize, MaxRows: req.MaxRows, CumulativeCount: result.TotalReturned,
-			Scope: req.Scope, ConnectionID: h.entry.cfg.ConnectionID, Generation: h.gen}
-		tok, err := h.entry.manager.registry.create(plan)
-		if err != nil {
-			return nil, err
-		}
-		result.NextToken = &tok
-	}
+	// ADR-015：Adapter 不再生成/保存 continuation token；HasMore 交由服务层决定是否续页。
 	return result, nil
 }
 
 func prepareFirstPageSort(req FirstPageRequest) ([]sortSpec, bool, error) {
-	if len(req.SortKeys) == 0 {
+	// 用 IsValidVerifiedPlan 统一处理 nil/typed-nil/无效 version 计划：
+	// 无效计划一律视为单页（singlePage=true），不进入有排序计划的分支。
+	if !queryplan.IsValidVerifiedPlan(req.SortPlan) {
 		if req.MaxRows > req.PageSize {
 			return nil, false, newError(
 				ErrUnsupportedQuery,
@@ -514,75 +539,43 @@ func prepareFirstPageSort(req FirstPageRequest) ([]sortSpec, bool, error) {
 		}
 		return nil, true, nil
 	}
-
-	specs, err := buildSortSpecs(req.SortKeys)
+	specs, err := sortSpecsFromPlan(req.SortPlan)
 	if err != nil {
 		return nil, false, err
 	}
 	return specs, false, nil
 }
 
-func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, token string) (*QueryResult, error) {
+// NextPage 使用不可伪造的 VerifiedNextPagePlan 执行续页（ADR-015）。
+// SQL/Args/SortSpecs/last values 均来自服务层恢复的 ContinuationState，
+// 不接受客户端重新提交；Adapter 不生成/解析/保存 token。
+func (h *PoolHandle) NextPage(ctx context.Context, scope UserWorkspaceScope, plan queryplan.VerifiedNextPagePlan) (*QueryResult, error) {
 	if err := h.check(); err != nil {
 		return nil, err
+	}
+	if !queryplan.IsValidVerifiedNextPagePlan(plan) {
+		return nil, newError(ErrInvalidPageToken, "invalid verified next page plan", nil)
 	}
 	permit, err := h.entry.manager.ac.TryAcquire(scope.UserID, scope.WorkspaceID, h.entry.cfg.ConnectionID)
 	if err != nil {
 		return nil, err
 	}
 	defer permit.Release()
-	plan, err := h.entry.manager.registry.claim(token)
+	specs, err := sortSpecsFromSpecs(plan.SortSpecs())
 	if err != nil {
 		return nil, err
 	}
-	if plan.Scope.UserID != scope.UserID || plan.Scope.WorkspaceID != scope.WorkspaceID {
-		h.entry.manager.registry.restore(token, plan)
-		return nil, newError(ErrInvalidPageToken, "scope mismatch", nil)
-	}
-	if plan.ConnectionID != h.entry.cfg.ConnectionID || plan.Generation != h.gen {
-		h.entry.manager.registry.restore(token, plan)
-		return nil, newError(ErrInvalidPageToken, "token not for this pool", nil)
-	}
-	if plan.CumulativeCount >= plan.MaxRows {
-		h.entry.manager.registry.expire(token)
-		return &QueryResult{Rows: [][]any{}, TotalReturned: plan.CumulativeCount}, nil
-	}
-	specs, err := buildSortSpecs(plan.SortKeys)
-	if err != nil {
-		h.entry.manager.registry.restore(token, plan)
-		return nil, err
-	}
-	limit := plan.PageSize
-	rem := plan.MaxRows - plan.CumulativeCount
+	limit := plan.PageSize()
+	rem := plan.MaxRows() - plan.CumulativeCount()
 	if rem < limit {
 		limit = rem
 	}
 	limit++
-	sql, args, err := buildWrappedSQL(plan.SQL, specs, h.entry.cfg.Engine, plan.LastSortValues, plan.Args, limit)
+	sql, args, err := buildWrappedSQL(plan.SQL(), specs, h.entry.cfg.Engine, plan.LastSortValues(), plan.Args(), limit)
 	if err != nil {
-		h.entry.manager.registry.restore(token, plan)
 		return nil, err
 	}
-	result, err := h.execQuery(ctx, sql, args, limit, plan.PageSize, plan.CumulativeCount, plan.MaxRows)
-	if err != nil {
-		h.entry.manager.registry.restore(token, plan)
-		return nil, err
-	}
-	plan.CumulativeCount = result.TotalReturned
-	if result.NextToken == nil {
-		h.entry.manager.registry.expire(token)
-	} else {
-		pv, err := extractLastValues(result.Rows, result.Columns, specs)
-		if err != nil {
-			h.entry.manager.registry.restore(token, plan)
-			return nil, err
-		}
-		plan.LastSortValues = pv
-		newTok, _ := genToken()
-		h.entry.manager.registry.replace(token, newTok, plan)
-		result.NextToken = &newTok
-	}
-	return result, nil
+	return h.execQuery(ctx, sql, args, limit, plan.PageSize(), plan.CumulativeCount(), plan.MaxRows())
 }
 func (h *PoolHandle) Stats() PoolStats {
 	if h.entry.pgPool != nil {
@@ -776,7 +769,7 @@ func finalizeResult(colInfos []ColumnInfo, data [][]any, rc, effPage, cumCount, 
 	total := cumCount + rc
 	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: total}
 	if hasMore && total < maxRows {
-		result.NextToken = &[]string{"_"}[0]
+		result.HasMore = true
 	}
 	return result
 }
@@ -904,7 +897,10 @@ func normalizeTextCols(vals []any, textCols []bool, maxCell int) error {
 	}
 	return nil
 }
-func extractLastValues(rows [][]any, colInfos []ColumnInfo, specs []sortSpec) ([]any, error) {
+
+// ExtractLastValues 从结果末行提取 last sort values（[isNull0, val0, isNull1, val1, ...]）。
+// 供服务层在首页/续页后构造 ContinuationState 使用（ADR-015）。
+func ExtractLastValues(rows [][]any, colInfos []ColumnInfo, specs []queryplan.SortSpec) ([]any, error) {
 	if len(rows) == 0 {
 		return nil, nil
 	}
@@ -918,9 +914,9 @@ func extractLastValues(rows [][]any, colInfos []ColumnInfo, specs []sortSpec) ([
 	last := rows[len(rows)-1]
 	vals := make([]any, len(specs)*2)
 	for i, s := range specs {
-		pos, ok := colIdx[s.column]
+		pos, ok := colIdx[s.Column]
 		if !ok {
-			return nil, newError(ErrDatabaseError, "sort column not in result: "+s.column, nil)
+			return nil, newError(ErrDatabaseError, "sort column not in result: "+s.Column, nil)
 		}
 		vals[i*2] = last[pos] == nil
 		vals[i*2+1] = last[pos]

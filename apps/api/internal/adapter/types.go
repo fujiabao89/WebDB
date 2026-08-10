@@ -4,6 +4,8 @@ package adapter
 
 import (
 	"crypto/subtle"
+
+	"github.com/fujiabao89/webdb/internal/queryplan"
 )
 
 // Engine 数据库引擎类型。
@@ -30,22 +32,6 @@ func normalizeTLSMode(m TLSMode) TLSMode {
 	return m
 }
 
-// SortOrder 排序方向。
-type SortOrder string
-
-const (
-	SortAsc  SortOrder = "ASC"
-	SortDesc SortOrder = "DESC"
-)
-
-// SortKey 排序键定义。
-type SortKey struct {
-	Column    string    `json:"column"`
-	Order     SortOrder `json:"order"`
-	NullsLast bool      `json:"nulls_last"`
-	Unique    bool      `json:"unique,omitempty"` // 该列是否构成唯一顺序，用于 keyset tie-breaker
-}
-
 // UserWorkspaceScope 请求作用域（非安全凭证）。
 type UserWorkspaceScope struct {
 	UserID      string `json:"user_id"`
@@ -53,20 +39,24 @@ type UserWorkspaceScope struct {
 }
 
 // FirstPageRequest 首页查询请求。
+// SortPlan 为 ADR-014 的 VerifiedSortPlan；nil 表示单页受限请求。
+// 客户端无法提交唯一性证明；Adapter 不再信任任何 SortKey.Unique。
 type FirstPageRequest struct {
 	Scope    UserWorkspaceScope
 	SQL      string
 	Args     []any
-	SortKeys []SortKey
+	SortPlan queryplan.VerifiedSortPlan
 	PageSize int
 	MaxRows  int
 }
 
 // QueryResult 查询结果。
+// HasMore 表示是否还有后续行（由 Adapter 通过预读 sentinel 判定）；
+// token 生成/续页归属服务层（ADR-015），Adapter 不返回 token。
 type QueryResult struct {
 	Columns       []ColumnInfo `json:"columns"`
 	Rows          [][]any      `json:"rows"`
-	NextToken     *string      `json:"next_token,omitempty"`
+	HasMore       bool         `json:"has_more"`
 	ReturnedRows  int          `json:"returned_rows"`
 	TotalReturned int          `json:"total_returned"`
 }

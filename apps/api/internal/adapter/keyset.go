@@ -3,6 +3,8 @@ package adapter
 import (
 	"fmt"
 	"strings"
+
+	"github.com/fujiabao89/webdb/internal/queryplan"
 )
 
 type sortSpec struct {
@@ -11,42 +13,36 @@ type sortSpec struct {
 	nullsLast   bool
 	nullRank    int
 	nonNullRank int
-	unique      bool
 }
 
-func buildSortSpecs(keys []SortKey) ([]sortSpec, error) {
-	if len(keys) == 0 {
-		return nil, newError(ErrUnsupportedQuery, "sort keys required", nil)
+// sortSpecsFromPlan 从不可伪造的 VerifiedSortPlan 派生 keyset 排序规格。
+// 唯一性证明已在 queryplan.VerifySortPlan 完成；此处不再信任任何客户端唯一性声明。
+func sortSpecsFromPlan(plan queryplan.VerifiedSortPlan) ([]sortSpec, error) {
+	if !queryplan.IsValidVerifiedPlan(plan) {
+		return nil, newError(ErrUnsupportedQuery, "invalid verified sort plan", nil)
 	}
-	specs := make([]sortSpec, len(keys))
-	seen := map[string]bool{}
-	hasUnique := false
-	for i, k := range keys {
-		if !validIdent(k.Column) {
-			return nil, newError(ErrUnsupportedQuery, "invalid column: "+k.Column, nil)
+	return sortSpecsFromSpecs(plan.SortSpecs())
+}
+
+// sortSpecsFromSpecs 从已验证的 SortSpec 切片派生 keyset 排序规格（首页/续页共用）。
+func sortSpecsFromSpecs(specs []queryplan.SortSpec) ([]sortSpec, error) {
+	if len(specs) == 0 {
+		return nil, newError(ErrUnsupportedQuery, "sort specs required", nil)
+	}
+	out := make([]sortSpec, len(specs))
+	for i, s := range specs {
+		if !validIdent(s.Column) {
+			return nil, newError(ErrUnsupportedQuery, "invalid column: "+s.Column, nil)
 		}
-		if seen[k.Column] {
-			return nil, newError(ErrUnsupportedQuery, "duplicate sort column: "+k.Column, nil)
-		}
-		seen[k.Column] = true
-		if k.Order != SortAsc && k.Order != SortDesc && k.Order != "" {
-			return nil, newError(ErrUnsupportedQuery, "invalid sort order: "+string(k.Order), nil)
-		}
-		if k.Unique {
-			hasUnique = true
-		}
-		s := sortSpec{column: k.Column, asc: k.Order != SortDesc, nullsLast: k.NullsLast, unique: k.Unique}
-		if k.NullsLast {
-			s.nullRank, s.nonNullRank = 1, 0
+		sp := sortSpec{column: s.Column, asc: s.Asc, nullsLast: s.NullsLast}
+		if s.NullsLast {
+			sp.nullRank, sp.nonNullRank = 1, 0
 		} else {
-			s.nullRank, s.nonNullRank = 0, 1
+			sp.nullRank, sp.nonNullRank = 0, 1
 		}
-		specs[i] = s
+		out[i] = sp
 	}
-	if !hasUnique {
-		return nil, newError(ErrUnsupportedQuery, "sort keys must include at least one unique column for correct keyset pagination", nil)
-	}
-	return specs, nil
+	return out, nil
 }
 func validIdent(s string) bool {
 	if len(s) == 0 || len(s) > 63 {

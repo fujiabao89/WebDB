@@ -10,6 +10,8 @@ import (
 	"github.com/fujiabao89/webdb/internal/adapter"
 	"github.com/fujiabao89/webdb/internal/credentials"
 	"github.com/fujiabao89/webdb/internal/metadata"
+	"github.com/fujiabao89/webdb/internal/pagination"
+	"github.com/fujiabao89/webdb/internal/queryplan"
 	"github.com/fujiabao89/webdb/internal/sqlpolicy"
 	"github.com/google/uuid"
 )
@@ -35,6 +37,9 @@ type Pipeline struct {
 	clock             func() time.Time
 	newTrace          func() string
 	auditWriteTimeout time.Duration // 可注入的审计持久化超时（VuXZW）
+
+	registry    *pagination.Registry // ADR-015 Service-owned continuation registry
+	ownRegistry bool                 // 是否由本管线创建（需 Close 释放）
 }
 
 // ConnectionReader 仅暴露管线所需的工作区绑定连接读取能力。
@@ -53,8 +58,17 @@ type ConnectionPolicyReader interface {
 }
 
 // AdapterHandle 是执行管线使用的最小 Adapter handle 契约。
+// ADR-015：Adapter 不生成/解析/保存 continuation token；续页输入为
+// 不可伪造的 queryplan.VerifiedNextPagePlan。
 type AdapterHandle interface {
 	Query(ctx context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error)
+	NextPage(ctx context.Context, scope adapter.UserWorkspaceScope, plan queryplan.VerifiedNextPagePlan) (*adapter.QueryResult, error)
+	LoadTableMetadata(ctx context.Context, schema, table string) (*queryplan.TableMetadata, error)
+	// ResolveQualifiedTable 返回未限定表名实际解析到的可信 schema
+	// （PG 沿完整 search_path 解析 relation，MySQL=连接数据库）；
+	// 查询失败或空时调用方 fail-closed。
+	ResolveQualifiedTable(ctx context.Context, table string) (string, error)
+	PoolGeneration() int64
 	Release()
 }
 
@@ -95,6 +109,10 @@ type PipelineConfig struct {
 	Clock             func() time.Time
 	Trace             func() string
 	AuditWriteTimeout time.Duration // 可注入的审计持久化超时（VuXZW）
+
+	// Pagination 是 Service-owned continuation registry（ADR-015）。
+	// 为 nil 时 NewPipeline 创建默认 registry；管线持有时需调用 Close 释放。
+	Pagination *pagination.Registry
 }
 
 // defaultAuditWriteTimeout 审计持久化默认超时（与 connections/credentials 一致）。
@@ -118,6 +136,12 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 	if auditWriteTimeout <= 0 {
 		auditWriteTimeout = defaultAuditWriteTimeout
 	}
+	reg := cfg.Pagination
+	ownRegistry := false
+	if reg == nil {
+		reg = pagination.New(pagination.DefaultConfig())
+		ownRegistry = true
+	}
 	return &Pipeline{
 		store:             cfg.Store,
 		policyStore:       cfg.PolicyStore,
@@ -131,19 +155,34 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		clock:             clock,
 		newTrace:          newTrace,
 		auditWriteTimeout: auditWriteTimeout,
+		registry:          reg,
+		ownRegistry:       ownRegistry,
+	}
+}
+
+// Close 释放管线持有的 registry（仅当由管线创建时）。
+// 保留 registry 指针：Close 后由 Registry 内部 closed 状态原子拒绝新操作（fail-closed），
+// 并发 Execute/ExecuteNextPage 继续使用线程安全的 closed registry，而非 nil 解引用。
+func (p *Pipeline) Close() {
+	if p != nil && p.registry != nil && p.ownRegistry {
+		p.registry.Close()
 	}
 }
 
 // ExecuteRequest 执行请求。
+// SortKeys 为客户端排序意图（queryplan 中立类型，不含唯一性声明）；PageSize 0=默认。
 type ExecuteRequest struct {
 	Principal    AuthenticatedPrincipal
 	ConnectionID uuid.UUID
 	SQL          string
 	Args         []any
 	Engine       Engine
+	SortKeys     []queryplan.SortKey
+	PageSize     int
 }
 
 // ExecuteResult 执行结果。
+// NextPageToken 仅在需要分页、唯一性证明有效且确有后续页时发放（ADR-014/015）。
 type ExecuteResult struct {
 	Decision           sqlpolicy.PolicyDecision
 	CredentialResolved bool
@@ -152,6 +191,7 @@ type ExecuteResult struct {
 	ErrorCode          StableErrorCode
 	TraceID            string
 	ExecutionID        *uuid.UUID
+	NextPageToken      *string
 }
 
 // Execute 按顺序执行：Connection → Policy → Resolver → Adapter，
@@ -404,12 +444,40 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	result.AdapterCalled = true
 
-	// ADR-014 尚未完成 VerifiedSortPlan 迁移。没有可信唯一键证明时，仅允许
-	// 单页受限执行，不伪造 SortKey.Unique，也不发放 continuation token。
+	// ADR-014：分页前置判定。effectiveMaxRows > effectivePageSize 时必须在
+	// 用户查询执行前取得可信唯一性证明；无法证明则在目标库执行前 fail-closed。
 	effectiveMaxRows := policy.MaxRows
 	if effectiveMaxRows > 500 {
 		effectiveMaxRows = 500
 	}
+	normalizedPageSize := req.PageSize
+	if normalizedPageSize <= 0 {
+		normalizedPageSize = 100
+	}
+	if normalizedPageSize > 500 {
+		normalizedPageSize = 500
+	}
+	effectivePageSize := normalizedPageSize
+	if effectivePageSize > effectiveMaxRows {
+		effectivePageSize = effectiveMaxRows
+	}
+	requiresPagination := effectiveMaxRows > effectivePageSize
+
+	var sortPlan queryplan.VerifiedSortPlan
+	var schemaGen, tableSchema, tableName string
+	if requiresPagination {
+		sortPlan, schemaGen, tableSchema, tableName, err = p.verifySortPlan(execCtx, req, conn, handle, serverEngine)
+		if err != nil {
+			handle.Release()
+			released = true
+			result.ErrorCode = ErrUnsupportedQuery
+			if rErr := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); rErr != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+			}
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+	}
+
 	queryResult, err := handle.Query(execCtx, adapter.FirstPageRequest{
 		Scope: adapter.UserWorkspaceScope{
 			UserID:      req.Principal.UserID.String(),
@@ -417,8 +485,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		},
 		SQL:      req.SQL,
 		Args:     req.Args,
-		SortKeys: nil,
-		PageSize: effectiveMaxRows,
+		SortPlan: sortPlan,
+		PageSize: effectivePageSize,
 		MaxRows:  effectiveMaxRows,
 	})
 	if err != nil {
@@ -431,6 +499,29 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
+	// ADR-015：Service 是 token/registry 唯一 Owner；深拷贝 SQL/Args/last values
+	// 后创建 continuation，客户端仅持有 opaque handle。
+	// 注意：token 创建后先不发布；须待 recordPostExecution（execution 终态 + 审计）
+	// 成功后才写入 result.NextPageToken。审计失败时原子撤销 registry token（Codex P1-B），
+	// 否则调用方会在第一页审计未成功的情况下继续读取后续页。
+	var contToken string
+	continuationCreated := false
+	if requiresPagination && queryResult.HasMore && queryResult.TotalReturned < effectiveMaxRows {
+		token, tokErr := p.createContinuation(req, conn, handle, sortPlan, schemaGen, tableSchema, tableName,
+			policy, statementHash, queryResult, effectivePageSize, effectiveMaxRows)
+		if tokErr != nil {
+			handle.Release()
+			released = true
+			result.ErrorCode = mapPaginationError(tokErr)
+			if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+				return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+			}
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		contToken = token
+		continuationCreated = true
+	}
+
 	// 单页查询完成、结果已完整填充且无活动游标：立即释放 handle，
 	// 再进入 recordPostExecution，避免审计持久化期间占用连接池（outside finding 4）。
 	handle.Release()
@@ -438,7 +529,355 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	result.Result = queryResult
 	if err := p.recordPostExecution(ctx, exec, result, conn, traceID, now, statementHash); err != nil {
+		if continuationCreated {
+			p.registry.Revoke(contToken)
+		}
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+	}
+	if continuationCreated {
+		result.NextPageToken = &contToken
+	}
+	return result, nil
+}
+
+// ---- ADR-014/015：分页唯一性证明与续页 ----------------------------------------
+
+// policyVersionOf 以 ConnectionPolicy.UpdatedAt 派生 policy version（与
+// connectionConfigRevision 一致）；策略变化即旧 token 失效。
+func policyVersionOf(policy *metadata.ConnectionPolicy) (int64, error) {
+	if policy == nil || policy.UpdatedAt.IsZero() {
+		return 0, fmt.Errorf("policy updated_at is required")
+	}
+	v := policy.UpdatedAt.UnixMicro()
+	if v <= 0 {
+		return 0, fmt.Errorf("policy updated_at must be after unix epoch")
+	}
+	return v, nil
+}
+
+// verifySortPlan 在用户查询执行前构造可信唯一性证明（ADR-014）。
+// 步骤：保守形状提取 → 加载 SchemaSnapshot → VerifySortPlan。
+// 任何一步失败都 fail-closed（调用方映射为 unsupported_query，Adapter.Query=0）。
+// 返回计划、schema generation 与表 lineage（供续页 schema generation 重新校验）。
+func (p *Pipeline) verifySortPlan(
+	execCtx context.Context,
+	req ExecuteRequest,
+	conn *metadata.Connection,
+	handle AdapterHandle,
+	engine Engine,
+) (queryplan.VerifiedSortPlan, string, string, string, error) {
+	dialect := sqlpolicy.Dialect(engine)
+	shape, err := sqlpolicy.AnalyzeShape(dialect, req.SQL)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	if shape.BaseSchema == "" {
+		// 未限定表名：经方言 relation 解析（PG 沿完整 search_path 而非 current_schema()
+		// 只返回首项存在的 schema——表可能位于后置 search_path 条目，Codex P1；
+		// MySQL 经连接数据库）。查询失败或返回空 → fail-closed。
+		s, err := handle.ResolveQualifiedTable(execCtx, shape.BaseTable)
+		if err != nil || s == "" {
+			return nil, "", "", "", fmt.Errorf("resolve table schema: %w", err)
+		}
+		shape.BaseSchema = s
+	}
+	meta, err := handle.LoadTableMetadata(execCtx, shape.BaseSchema, shape.BaseTable)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	snap, err := queryplan.NewSchemaSnapshot(conn.ID.String(), queryplan.Dialect(dialect), handle.PoolGeneration(), meta)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	plan, err := queryplan.VerifySortPlan(snap, shape, req.SortKeys)
+	if err != nil {
+		return nil, "", "", "", err
+	}
+	return plan, snap.SchemaGeneration, snap.SchemaName(), snap.TableName(), nil
+}
+
+// createContinuation 由 Service 创建 continuation token（ADR-015）。
+// SQL/Args/LastSortValues 深拷贝后计字节配额；客户端仅持有 opaque handle。
+func (p *Pipeline) createContinuation(
+	req ExecuteRequest,
+	conn *metadata.Connection,
+	handle AdapterHandle,
+	plan queryplan.VerifiedSortPlan,
+	schemaGen, tableSchema, tableName string,
+	policy *metadata.ConnectionPolicy,
+	statementHash string,
+	queryResult *adapter.QueryResult,
+	effectivePageSize, effectiveMaxRows int,
+) (string, error) {
+	specs := plan.SortSpecs()
+	lastVals, err := adapter.ExtractLastValues(queryResult.Rows, queryResult.Columns, specs)
+	if err != nil {
+		return "", err
+	}
+	pv, err := policyVersionOf(policy)
+	if err != nil {
+		return "", err
+	}
+	state := &pagination.ContinuationState{
+		UserID:           req.Principal.UserID.String(),
+		WorkspaceID:      req.Principal.WorkspaceID.String(),
+		ConnectionID:     conn.ID.String(),
+		PoolGeneration:   handle.PoolGeneration(),
+		SchemaGeneration: schemaGen,
+		TableSchema:      tableSchema,
+		TableName:        tableName,
+		PolicyVersion:    pv,
+		StatementHash:    statementHash,
+		SortPlan:         plan,
+		SQL:              req.SQL,
+		Args:             deepCopyArgs(req.Args),
+		LastSortValues:   lastVals,
+		CumulativeCount:  queryResult.TotalReturned,
+		PageSize:         effectivePageSize,
+		MaxRows:          effectiveMaxRows,
+		TimeoutMs:        policy.StatementTimeoutMs,
+	}
+	return p.registry.Create(state)
+}
+
+// NextPageRequest 续页请求（客户端仅提交 opaque token，不得重交 SQL/Args/SortKeys）。
+type NextPageRequest struct {
+	Principal AuthenticatedPrincipal
+	Token     string
+}
+
+// ExecuteNextPage 执行续页并重新授权（ADR-015 §7 / WEB-34 §9.4）。
+//
+// 流程：原子 claim → 重新验证成员/连接/策略/generation/statement hash →
+// 构造 VerifiedNextPagePlan → Adapter.NextPage → Rotate/Complete/Abort。
+// claim 后任何失败不恢复旧 token；撤权、策略变化、generation 变化、取消、
+// 超时、DB 错误均使旧 token 永久失效。
+//
+// 注意：D11 每物理页独立 Execution/Audit 的持久化编排由 WEB-35 承接；
+// 本方法提供分页安全后端（重新授权 + 状态机），不写审计。
+func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*ExecuteResult, error) {
+	result := &ExecuteResult{}
+	if p == nil || p.registry == nil || p.store == nil || p.policyStore == nil ||
+		p.members == nil || p.resolver == nil || p.adapter == nil {
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	claim, err := p.registry.Claim(req.Token)
+	if err != nil {
+		result.ErrorCode = mapPaginationError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	// panic 兜底：claim 后任何路径（成员/策略/凭证/元数据/adapter 调用 panic）都要
+	// 归还 in-flight token 并释放配额，避免占用 registry 配额直到 TTL（Greptile P2）。
+	// Abort 幂等：正常 Rotate/Complete 或显式 Abort 后，经 claim ownership/version
+	// 校验成为安全 no-op，且不会删除已旋转出的新 token。
+	defer func() { _ = claim.Abort() }()
+	state := claim.State()
+
+	// 重新授权：token 绑定 principal（ADR-015 §4）。同工作区其他用户不得横向
+	// 使用他人 token；不匹配即 abort，不泄露其他信息。
+	if state.UserID != req.Principal.UserID.String() || state.WorkspaceID != req.Principal.WorkspaceID.String() {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// 重新授权：成员资格。
+	member, err := p.members.MemberByWorkspaceAndUser(ctx, req.Principal.WorkspaceID, req.Principal.UserID)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapMembershipError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	if member == nil || !member.Role.CanRead() {
+		claim.Abort()
+		result.ErrorCode = ErrForbidden
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// 重新授权：连接（工作区绑定）。
+	connID, err := uuid.Parse(state.ConnectionID)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	conn, err := p.store.ConnectionByID(ctx, req.Principal.WorkspaceID, connID)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapConnectionError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	if conn.ID.String() != state.ConnectionID {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// 重新授权：策略（AllowRead/MaxRows/timeout/policy version）。
+	policy, err := p.policyStore.PolicyByConnection(ctx, conn.WorkspaceID, conn.ID)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapPolicyStoreError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	if policy == nil || policy.AllowRead == nil || !*policy.AllowRead ||
+		policy.MaxRows <= 0 || policy.StatementTimeoutMs <= 0 {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	pv, err := policyVersionOf(policy)
+	if err != nil || pv != state.PolicyVersion {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	// 不得从 token 恢复旧的更宽松 MaxRows/timeout。
+	effectiveMaxRows := policy.MaxRows
+	if effectiveMaxRows > state.MaxRows {
+		effectiveMaxRows = state.MaxRows
+	}
+	effectiveTimeout := policy.StatementTimeoutMs
+	if effectiveTimeout > state.TimeoutMs {
+		effectiveTimeout = state.TimeoutMs
+	}
+
+	// 凭证（重新解析，不信任 token 中的任何旧凭据）。
+	payload, err := p.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapCredentialError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	configRevision, err := connectionConfigRevision(conn)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrInternalError
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	cfg := adapter.ConnectConfig{
+		ConnectionID:   conn.ID.String(),
+		SecretVersion:  conn.SecretVersion,
+		ConfigRevision: configRevision,
+		Engine:         adapter.Engine(conn.Engine),
+		Host:           conn.Host,
+		Port:           conn.Port,
+		User:           payload.User,
+		Password:       payload.Password,
+		Database:       conn.Database,
+		TLS:            adapter.TLSRequire,
+	}
+	execCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveTimeout)*time.Millisecond)
+	defer cancel()
+	handle, err := p.adapter.Get(execCtx, cfg)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapAdapterError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	released := false
+	defer func() {
+		if !released {
+			handle.Release()
+		}
+	}()
+
+	// pool generation 变化 → token 失效。
+	if handle.PoolGeneration() != state.PoolGeneration {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// schema generation 重新校验：重新加载可信元数据并与 state 对比。
+	meta, err := handle.LoadTableMetadata(execCtx, state.TableSchema, state.TableName)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	snap, err := queryplan.NewSchemaSnapshot(
+		state.ConnectionID,
+		queryplan.Dialect(conn.Engine),
+		handle.PoolGeneration(),
+		meta,
+	)
+	if err != nil || snap.SchemaGeneration != state.SchemaGeneration {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	// 构造不可伪造的 VerifiedNextPagePlan（SQL/Args 来自 state，不来自客户端）。
+	nextPlan, err := queryplan.NewVerifiedNextPagePlan(
+		state.SortPlan, state.LastSortValues, state.SQL, state.Args,
+		state.PageSize, effectiveMaxRows, state.CumulativeCount,
+	)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrInvalidPageToken
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+
+	result.AdapterCalled = true
+	queryResult, err := handle.NextPage(execCtx, adapter.UserWorkspaceScope{
+		UserID:      req.Principal.UserID.String(),
+		WorkspaceID: req.Principal.WorkspaceID.String(),
+	}, nextPlan)
+	if err != nil {
+		handle.Release()
+		released = true
+		claim.Abort()
+		result.ErrorCode = mapAdapterError(err)
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
+	handle.Release()
+	released = true
+	result.Result = queryResult
+
+	// Rotate/Complete：旧 token 永不恢复。
+	if queryResult.HasMore && queryResult.TotalReturned < effectiveMaxRows {
+		specs := state.SortPlan.SortSpecs()
+		newLast, err := adapter.ExtractLastValues(queryResult.Rows, queryResult.Columns, specs)
+		if err != nil {
+			claim.Abort()
+			result.ErrorCode = mapAdapterError(err)
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		newState := &pagination.ContinuationState{
+			UserID:           state.UserID,
+			WorkspaceID:      state.WorkspaceID,
+			ConnectionID:     state.ConnectionID,
+			PoolGeneration:   state.PoolGeneration,
+			SchemaGeneration: state.SchemaGeneration,
+			TableSchema:      state.TableSchema,
+			TableName:        state.TableName,
+			PolicyVersion:    state.PolicyVersion,
+			StatementHash:    state.StatementHash,
+			SortPlan:         state.SortPlan,
+			SQL:              state.SQL,
+			Args:             state.Args,
+			LastSortValues:   newLast,
+			CumulativeCount:  queryResult.TotalReturned,
+			PageSize:         state.PageSize,
+			MaxRows:          effectiveMaxRows,
+			TimeoutMs:        effectiveTimeout,
+		}
+		newToken, err := claim.Rotate(newState)
+		if err != nil {
+			// 失败路径不返回本页数据：与 auditFailed 契约一致（不同时返回数据和错误）。
+			result.Result = nil
+			result.ErrorCode = mapPaginationError(err)
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
+		result.NextPageToken = &newToken
+	} else {
+		if err := claim.Complete(); err != nil {
+			result.ErrorCode = mapPaginationError(err)
+			return result, fmt.Errorf("%w", result.ErrorCode)
+		}
 	}
 	return result, nil
 }
@@ -462,8 +901,10 @@ func (p *Pipeline) auditFailed(
 		OccurredAt:  p.clock(),
 	})
 	result.ErrorCode = ErrAuditFailed
-	// ADR-017 §6：审计失败不向调用方返回查询结果。
+	// ADR-017 §6：审计失败不向调用方返回查询结果；也不得泄露未成功审计的续页 token
+	// （Codex P1-B）。registry 中的对应 token 由调用方在审计失败路径撤销。
 	result.Result = nil
+	result.NextPageToken = nil
 	return result, fmt.Errorf("%w (original error: %s)", result.ErrorCode, originalCode)
 }
 
@@ -701,6 +1142,13 @@ func (p *Pipeline) recordPostExecution(
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeFailed
 		md.ErrorCode = strPtr("query_timeout")
+	case ErrUnsupportedQuery:
+		// unsupported_query：需要分页但缺少/无法验证唯一性证明，执行前拒绝
+		// （PAGE-01：Execution failed，Audit denied）。
+		status = metadata.ExecStatusFailed
+		outcome = metadata.OutcomeDenied
+		md.ErrorCode = strPtr(string(result.ErrorCode))
+		md.Environment = strPtr(string(conn.Environment))
 	case "":
 		// E10 succeeded：矩阵要求 environment。
 		status = metadata.ExecStatusCompleted
@@ -841,6 +1289,45 @@ func mapCredentialError(err error) StableErrorCode {
 	return ErrInternalError
 }
 
+// deepCopyArgs 递归深拷贝 []any（Args 敏感，不共享可变引用）。
+func deepCopyArgs(args []any) []any {
+	if args == nil {
+		return nil
+	}
+	out := make([]any, len(args))
+	for i, v := range args {
+		out[i] = deepCopyAnyValue(v)
+	}
+	return out
+}
+
+func deepCopyAnyValue(v any) any {
+	switch t := v.(type) {
+	case []any:
+		return deepCopyArgs(t)
+	case []byte:
+		cp := make([]byte, len(t))
+		copy(cp, t)
+		return cp
+	default:
+		return v
+	}
+}
+
+// mapPaginationError 映射 registry 错误到稳定错误码。
+func mapPaginationError(err error) StableErrorCode {
+	if pagination.IsRegistryErrorCode(err, pagination.ErrInvalidPageToken) {
+		return ErrInvalidPageToken
+	}
+	if pagination.IsRegistryErrorCode(err, pagination.ErrPaginationCapacity) {
+		return ErrPaginationCapacityExhausted
+	}
+	if pagination.IsRegistryErrorCode(err, pagination.ErrRegistryClosed) {
+		return ErrInternalError
+	}
+	return ErrInternalError
+}
+
 // mapAdapterError 映射 Adapter 错误到稳定错误码。
 func mapAdapterError(err error) StableErrorCode {
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -865,6 +1352,8 @@ func mapAdapterError(err error) StableErrorCode {
 			return ErrUnsupportedQuery
 		case adapter.ErrConfigConflict:
 			return ErrConnectionConfigConflict
+		case adapter.ErrInvalidPageToken:
+			return ErrInvalidPageToken
 		}
 	}
 	return ErrInternalError

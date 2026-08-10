@@ -68,6 +68,7 @@ type fakeTxStore struct {
 	failUpdate     error
 	failCommit     error
 	failCommitTxID int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
+	failUpdateTxID int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
 }
 
 func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
@@ -79,7 +80,13 @@ func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failCommitTxID > 0 && idx == f.failCommitTxID {
 		fc = f.failCommit
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: f.failUpdate, failCommit: fc}
+	// failUpdate 默认注入到每个事务（既有测试语义）；仅当 failUpdateTxID>0 时
+	// 精确注入到第 N 个事务（recordPostExecution 终态持久化失败场景）。
+	var fu error
+	if f.failUpdate != nil && (f.failUpdateTxID == 0 || f.failUpdateTxID == idx) {
+		fu = f.failUpdate
+	}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }
