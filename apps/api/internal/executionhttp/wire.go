@@ -101,7 +101,7 @@ func mysqlWireType(dt string) WireType {
 		return WireFloat
 	case "DECIMAL", "NUMERIC", "DEC", "FIXED":
 		return WireDecimal
-	case "BOOL", "BOOLEAN", "BIT":
+	case "BOOL", "BOOLEAN":
 		return WireBoolean
 	case "DATE":
 		return WireDate
@@ -111,7 +111,10 @@ func mysqlWireType(dt string) WireType {
 		return WireTimestamp
 	case "JSON":
 		return WireJSONText
-	case "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB":
+	// BIT 驱动值为 []byte（位域字节），走 WireBinary/Base64，而非 WireBoolean
+	//（WireBoolean 期望 bool，[]byte 会 errUnrepresentable → database_error，
+	// CodeRabbit #18）。BOOL/BOOLEAN/TINYINT 行为不变（BOOL 底层为 TINYINT(1)，驱动报 TINYINT → WireInt）。
+	case "BIT", "BINARY", "VARBINARY", "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB":
 		return WireBinary
 	case "UUID":
 		return WireUUID
@@ -198,13 +201,22 @@ func wireCell(wt string, v any) (any, int, error) {
 	case WireBinary:
 		switch t := v.(type) {
 		case []byte:
-			return base64.StdEncoding.EncodeToString(t), len(t), nil
+			// 字节预算按 Base64 编码后长度计算（CodeRabbit #19）：实际输出是
+			// Base64 字符串（约为原始 4/3），按原始长度计会低估响应体字节。
+			b := base64.StdEncoding.EncodeToString(t)
+			return b, len(b), nil
 		case string:
-			return base64.StdEncoding.EncodeToString([]byte(t)), len(t), nil
+			b := base64.StdEncoding.EncodeToString([]byte(t))
+			return b, len(b), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	case WireJSONText:
 		if s, ok := asString(v); ok {
+			// 合法 JSON 透传；非法/截断 JSON 在写响应前返回 database_error，
+			// 避免 json.RawMessage 透传无效 JSON 产生截断的 200 响应（CodeRabbit #20）。
+			if !json.Valid([]byte(s)) {
+				return nil, 0, codef(ErrDatabaseError, "invalid json value in result")
+			}
 			return json.RawMessage(s), len(s), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)

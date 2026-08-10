@@ -112,9 +112,11 @@ func TestNextPageCancelledTerminatesExecutionAndAudits(t *testing.T) {
 	}
 }
 
-// TestNextPageAuditFailureKeepsCancelledCode 验证续页审计也失败时，
-// 原始 query_cancelled 错误码不被覆盖（P1-2 修复：不降级为 audit_failed）。
-func TestNextPageAuditFailureKeepsCancelledCode(t *testing.T) {
+// TestNextPageFailureAuditAppendFailureFailClosedToAuditFailed 验证续页失败页
+// （查询取消）的审计追加也失败时，不得静默声称 query_cancelled 已完整审计：
+// fail-closed 返回 audit_failed、触发安全告警、不返回结果/token（ADR-017 /
+// P0-06A §11.2，Greptile P1 / CodeRabbit #10）。
+func TestNextPageFailureAuditAppendFailureFailClosedToAuditFailed(t *testing.T) {
 	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
 	conn := &metadata.Connection{
 		ID: uuid.New(), WorkspaceID: principal.WorkspaceID, Engine: metadata.EnginePostgreSQL,
@@ -148,17 +150,78 @@ func TestNextPageAuditFailureKeepsCancelledCode(t *testing.T) {
 	if err != nil || res1.NextPageToken == nil {
 		t.Fatalf("首页应成功返回 token: err=%v", err)
 	}
-	// 续页阶段同时注入查询取消与审计失败，验证原始 query_cancelled 不被覆盖。
+	// 续页阶段注入查询取消 + 审计追加失败。
 	handle.err = context.Canceled
-	auditStore.fail = errors.New("injected audit failure")
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	res2, err := pipeline.ExecuteNextPage(ctx, NextPageRequest{Principal: principal, Token: *res1.NextPageToken})
+	auditStore.fail = errors.New("injected audit append failure")
+	res2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *res1.NextPageToken})
 	if err == nil {
-		t.Fatal("应返回错误")
+		t.Fatal("续页审计持久化失败必须返回错误")
 	}
-	if res2.ErrorCode != ErrQueryCancelled {
-		t.Fatalf("error code = %q, want query_cancelled（审计失败也不得覆盖）", res2.ErrorCode)
+	if res2.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed（fail-closed，不得声称 query_cancelled 已完整审计）", res2.ErrorCode)
+	}
+	if res2.Result != nil || res2.NextPageToken != nil {
+		t.Fatal("审计失败不得返回结果或 token")
+	}
+	// $SECURITY_ALERT 必须触发（审计失败的可观测信号）。
+	if len(alarm.events) == 0 {
+		t.Fatal("审计持久化失败必须触发安全告警")
+	}
+}
+
+// TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed 验证续页失败页
+// 的 Execution 终态更新失败（元数据库故障）时同样 fail-closed 为 audit_failed，
+// 而不是静默保持 query_cancelled 并遗留已提交的 pending Execution（Greptile P1）。
+// 事务编号：首页 Execute 用 tx1(pending)/tx2(running)/tx3(终态)；续页 auditNextPage
+// 用 tx4(新 pending)，recordPostExecution 用 tx5(终态更新)。failUpdateTxID=5 即注入
+// 续页终态更新失败。
+func TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed(t *testing.T) {
+	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
+	conn := &metadata.Connection{
+		ID: uuid.New(), WorkspaceID: principal.WorkspaceID, Engine: metadata.EnginePostgreSQL,
+		Host: "db.example.invalid", Port: 5432, Database: "synthetic",
+		SecretRef: uuid.New(), SecretVersion: 1, UpdatedAt: time.Unix(1_700_000_000, 123_000),
+	}
+	policy := &metadata.ConnectionPolicy{
+		WorkspaceID: principal.WorkspaceID, ConnectionID: conn.ID, AllowRead: boolPtr(true),
+		StatementTimeoutMs: 5_000, MaxRows: 500, UpdatedAt: time.Unix(1_700_000_000, 456_000),
+	}
+	resolver := &fakeResolver{payload: credentials.CredentialPayload{User: "u", Password: "p"}}
+	handle := &fakeAdapterHandle{
+		result: &adapter.QueryResult{HasMore: true, TotalReturned: 2, ReturnedRows: 2,
+			Columns: []adapter.ColumnInfo{{Name: "id"}}, Rows: [][]any{{int32(1)}, {int32(2)}}},
+		meta:          &queryplan.TableMetadata{Schema: "public", Table: "employees", Columns: []queryplan.Column{{Name: "id", Ordinal: 1, Nullable: false}}, PrimaryKey: &queryplan.PrimaryKey{Columns: []string{"id"}}},
+		currentSchema: "public",
+	}
+	txStore := &fakeTxStore{}
+	auditStore := &fakeAuditStore{}
+	alarm := &fakeAlarm{}
+	reg := pagination.New(pagination.DefaultConfig())
+	t.Cleanup(reg.Close)
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: policy},
+		Members:     &fakeMemberReader{member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer}},
+		Resolver:    resolver, Adapter: &fakeAdapterClient{handle: handle},
+		Tx: txStore, Audit: auditStore, Alarm: alarm, Pagination: reg,
+	})
+	res1, err := pipeline.Execute(context.Background(), paginationRequest(principal, conn.ID))
+	if err != nil || res1.NextPageToken == nil {
+		t.Fatalf("首页应成功返回 token: err=%v", err)
+	}
+	// 续页阶段注入查询取消 + 终态 Execution 更新失败（第 5 个事务）。
+	handle.err = context.Canceled
+	txStore.failUpdateTxID = 5
+	txStore.failUpdate = errors.New("injected terminal update failure")
+	res2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *res1.NextPageToken})
+	if err == nil {
+		t.Fatal("续页终态更新失败必须返回错误")
+	}
+	if res2.ErrorCode != ErrAuditFailed {
+		t.Fatalf("error code = %q, want audit_failed（终态更新失败即审计持久化失败）", res2.ErrorCode)
+	}
+	if len(alarm.events) == 0 {
+		t.Fatal("终态更新失败必须触发安全告警")
 	}
 }
 

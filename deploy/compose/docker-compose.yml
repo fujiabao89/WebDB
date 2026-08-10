@@ -113,6 +113,9 @@ services:
       META_DB_NAME: webdb_meta
       META_MIGRATE_USER: webdb
       META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      # 仅本地演示环境显式启用 TLS disable 的本地演示连接（WebDB 安全约束 #4）：
+      # 默认关闭；非演示/生产不得设置。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
       DEMO_PG_HOST: demo-pg
       DEMO_PG_PORT: "5432"
       DEMO_PG_USER: demo_reader

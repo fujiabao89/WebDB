@@ -37,6 +37,10 @@ Copy-Item deploy/compose/env.example deploy/compose/.env
 
 默认值可满足本地开发。需要自定义时编辑 `.env` 文件。
 
+> **安全开关 `ALLOW_INSECURE_LOCAL_DEMO`**：本地演示环境由 `docker-compose.yml`
+> 显式设置为 `true`（允许 TLS disable 的本地演示连接）。WebDB 安全约束要求默认关闭；
+> 非演示/生产部署不得设置该变量。
+
 ### 2. 启动
 
 ```bash

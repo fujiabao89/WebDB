@@ -13,14 +13,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// defaultRequestTimeout 执行/续页请求级兜底超时（P2-1 审查修复）：
+// DefaultRequestTimeout 执行/续页请求级兜底超时（P2-1 审查修复）：
 // Pipeline 阶段 A/B/C 的成员/连接/策略元数据库查询无自身超时，元数据库挂起时
 // 若无兜底会无限阻塞请求 goroutine 与连接。HTTP 层加有界兜底超时，防止无限挂起。
 // 注意（P3 审查）：此兜底是**所有阶段**（含目标库查询）的硬上限；若
 // ConnectionPolicy.StatementTimeoutMs 配置大于 60s，查询会被本兜底提前取消并返回
 // 504 query_timeout（方向安全 fail-closed）。演示默认 StatementTimeoutMs 较小；
 // 生产部署应将兜底超时与策略超时上限对齐，避免策略超时形同虚设。
-const defaultRequestTimeout = 60 * time.Second
+//
+// 导出给 cmd/server 用于 WriteTimeout 的单一时间预算（Greptile P1 修复）：
+// WriteTimeout = DefaultRequestTimeout + 响应写出余量，保证写超时不早于最长查询。
+const DefaultRequestTimeout = 60 * time.Second
 
 // Executor 是执行服务的最小 handler 契约。
 // 生产实现为 execution.Pipeline（Execute/ExecuteNextPage），测试可注入替身。
@@ -37,13 +40,13 @@ type Server struct {
 }
 
 // NewServer 创建执行 handler server。
-// 装配错误 fail-fast：nil executor 立即 panic（F3）；Principal 缺失由调用方启动 fatal。
-func NewServer(principal browse.Principal, executor Executor) *Server {
+// 装配错误 fail-fast：nil executor 立即 panic（F3）。
+// 身份来源是 PrincipalMiddleware 注入的 request context（D01b），构造函数不再接收
+// principal 参数，避免误导调用方以为传入的 Principal 决定授权（CodeRabbit #15）；
+// 可信 Principal 的启动期校验由调用方在 PrincipalFromEnv 处完成（fail-closed）。
+func NewServer(executor Executor) *Server {
 	if executor == nil {
 		panic("executionhttp: nil Executor")
-	}
-	if principal.UserID == uuid.Nil || principal.WorkspaceID == uuid.Nil {
-		panic("executionhttp: nil principal")
 	}
 	return &Server{executor: executor, logger: slog.Default()}
 }
@@ -92,7 +95,7 @@ func (s *Server) handleExecutions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 请求级兜底超时（P2-1）：防止元数据库挂起导致无限阻塞。
-	ctx, cancel := context.WithTimeout(r.Context(), defaultRequestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), DefaultRequestTimeout)
 	defer cancel()
 	result, err := s.executor.Execute(ctx, execution.ExecuteRequest{
 		Principal:    execution.AuthenticatedPrincipal{UserID: p.UserID, WorkspaceID: p.WorkspaceID},
@@ -132,7 +135,7 @@ func (s *Server) handleQueryPages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 请求级兜底超时（P2-1）：防止元数据库挂起导致无限阻塞。
-	ctx, cancel := context.WithTimeout(r.Context(), defaultRequestTimeout)
+	ctx, cancel := context.WithTimeout(r.Context(), DefaultRequestTimeout)
 	defer cancel()
 	result, err := s.executor.ExecuteNextPage(ctx, execution.NextPageRequest{
 		Principal: execution.AuthenticatedPrincipal{UserID: p.UserID, WorkspaceID: p.WorkspaceID},
@@ -159,7 +162,9 @@ func (s *Server) writeQueryResponse(w http.ResponseWriter, result *execution.Exe
 	}
 	meta := QueryMetaDto{
 		Page: QueryPageDto{
-			PageSize:      result.Result.ReturnedRows,
+			// P0-06A §8.2：page.page_size 是服务端实际分页上限（P0-06A 契约），
+			// 而非当前页实际行数（CodeRabbit #16）。
+			PageSize:      result.PageSize,
 			HasMore:       result.Result.HasMore,
 			NextPageToken: result.NextPageToken,
 		},

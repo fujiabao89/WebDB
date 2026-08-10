@@ -96,6 +96,56 @@ func TestToWireResultNilResult(t *testing.T) {
 	}
 }
 
+// TestToWireResultBinaryBudgetUsesBase64Length 验证 binary 单元格的 1 MiB 行预算
+// 按 Base64 编码后长度计算（CodeRabbit #19）。单 binary cell 边界：
+//
+//	base64(786429B) = 1048572 < 1 MiB → 放行；
+//	base64(786432B) = 1048576 = 恰好 1 MiB → 放行；
+//	base64(786433B) = 1048580 > 1 MiB → result_too_large（按原始长度则误放行）。
+//
+// （单 cell 256 KiB 上限由 adapter MaxCellBytes 上游强制；本测试只验证行预算。）
+func TestToWireResultBinaryBudgetUsesBase64Length(t *testing.T) {
+	cases := []struct {
+		name         string
+		size         int
+		wantTooLarge bool
+	}{
+		{"under boundary", 786429, false},
+		{"exactly 1 MiB", 786432, false},
+		{"over boundary", 786433, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			qr := &adapter.QueryResult{
+				Columns:      []adapter.ColumnInfo{{Name: "b", DataType: "17"}},
+				Rows:         [][]any{{make([]byte, c.size)}},
+				ReturnedRows: 1,
+			}
+			_, err := toWireResult("postgresql", qr)
+			if c.wantTooLarge != isCode(err, ErrResultTooLarge) {
+				t.Fatalf("size=%d: err=%v, want result_too_large=%v", c.size, err, c.wantTooLarge)
+			}
+		})
+	}
+}
+
+// TestWireCellRejectsInvalidJSON 验证 json_text 透传前必须校验合法 JSON：非法/截断
+// JSON 返回 database_error，避免产生截断的 200 响应（CodeRabbit #20）；合法 JSON 保持透传。
+func TestWireCellRejectsInvalidJSON(t *testing.T) {
+	for _, s := range []string{`{"a":`, `not json`, `{"a":1`} {
+		if _, _, err := wireCell("json_text", s); err == nil {
+			t.Errorf("wireCell(json_text, %q) 应返回 database_error（非法 JSON 不得透传）", s)
+		}
+	}
+	got, _, err := wireCell("json_text", `{"a":1}`)
+	if err != nil {
+		t.Fatalf("合法 JSON 应透传: %v", err)
+	}
+	if string(got.(json.RawMessage)) != `{"a":1}` {
+		t.Fatalf("合法 JSON 透传值 = %v, want {\"a\":1}", got)
+	}
+}
+
 // TestWireTypeForPG 验证 PG OID 派生。
 func TestWireTypeForPG(t *testing.T) {
 	cases := map[string]WireType{
@@ -119,13 +169,35 @@ func TestWireTypeForMySQL(t *testing.T) {
 		"DECIMAL": WireDecimal, "DOUBLE": WireFloat, "FLOAT": WireFloat,
 		"BOOL": WireBoolean, "DATE": WireDate, "TIME": WireTime,
 		"DATETIME": WireTimestamp, "TIMESTAMP": WireTimestamp, "JSON": WireJSONText,
-		"BLOB": WireBinary, "VARBINARY": WireBinary, "UUID": WireUUID,
+		// BIT 驱动值为 []byte，走 WireBinary（CodeRabbit #18）。
+		"BIT": WireBinary, "BLOB": WireBinary, "VARBINARY": WireBinary, "UUID": WireUUID,
 		"VARCHAR": WireText, "TEXT": WireText, "UNKNOWN_TYPE": WireText,
 	}
 	for dt, want := range cases {
 		if got := mysqlWireType(dt); got != want {
 			t.Errorf("mysqlWireType(%s) = %s, want %s", dt, got, want)
 		}
+	}
+}
+
+// TestMySQLBITGoesBinaryBase64 验证 MySQL BIT 列驱动值为 []byte，正确走
+// WireBinary/Base64（CodeRabbit #18），不产生 WireBoolean 的 unrepresentable 错误。
+func TestMySQLBITGoesBinaryBase64(t *testing.T) {
+	qr := &adapter.QueryResult{
+		Columns:      []adapter.ColumnInfo{{Name: "flag", DataType: "BIT"}},
+		Rows:         [][]any{{[]byte{0x0f}}},
+		ReturnedRows: 1,
+	}
+	w, err := toWireResult("mysql", qr)
+	if err != nil {
+		t.Fatalf("BIT 列应成功转换: %v", err)
+	}
+	if w.Columns[0].WireType != string(WireBinary) {
+		t.Fatalf("BIT wire_type = %q, want binary", w.Columns[0].WireType)
+	}
+	// []byte{0x0f} → base64 "Dw=="。
+	if got, ok := w.Rows[0][0].(string); !ok || got != "Dw==" {
+		t.Fatalf("BIT 值 = %v, want Base64 \"Dw==\"", w.Rows[0][0])
 	}
 }
 

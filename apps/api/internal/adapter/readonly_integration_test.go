@@ -62,7 +62,8 @@ func TestReadOnlyBoundary_PG_SideEffectRejected(t *testing.T) {
 }
 
 // TestReadOnlyBoundary_PG_ExistingTransactionRejected 验证连接已有事务时
-// beginReadOnlyPG fail-closed（不覆盖/回滚未知事务）。
+// beginReadOnlyPG fail-closed（不覆盖/回滚未知事务），且错误折叠为
+// connection_unavailable（ErrConnectionFailed → 公共 503，D15a）。
 func TestReadOnlyBoundary_PG_ExistingTransactionRejected(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
@@ -80,9 +81,12 @@ func TestReadOnlyBoundary_PG_ExistingTransactionRejected(t *testing.T) {
 		t.Fatalf("begin: %v", err)
 	}
 	defer conn.Exec(ctx, "ROLLBACK")
-	if err := beginReadOnlyPG(ctx, conn); err == nil {
+	err = beginReadOnlyPG(ctx, conn)
+	if err == nil {
 		t.Fatal("连接已有事务时 beginReadOnlyPG 必须 fail-closed")
 	}
+	// 真实失败路径（已有事务）必须折叠为 ErrConnectionFailed，而非返回驱动原始错误。
+	assertFoldConnectionFailed(t, err)
 }
 
 // TestReadOnlyBoundary_PG_ConnectionReuse 验证连续查询连接复用无事务残留
@@ -125,7 +129,8 @@ func TestReadOnlyBoundary_MySQL_Success(t *testing.T) {
 }
 
 // TestReadOnlyBoundary_MySQL_ManualTransactionRejected 验证 MySQL 连接为手动
-// 事务模式（autocommit=0，可能有未提交事务）时 beginReadOnlyMySQL fail-closed。
+// 事务模式（autocommit=0，可能有未提交事务）时 beginReadOnlyMySQL fail-closed，
+// 且错误折叠为 connection_unavailable。
 func TestReadOnlyBoundary_MySQL_ManualTransactionRejected(t *testing.T) {
 	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
 	defer m.Close(context.Background())
@@ -143,8 +148,24 @@ func TestReadOnlyBoundary_MySQL_ManualTransactionRejected(t *testing.T) {
 		t.Fatalf("set autocommit: %v", err)
 	}
 	defer conn.ExecContext(ctx, "SET autocommit=1")
-	if err := beginReadOnlyMySQL(ctx, conn); err == nil {
+	err = beginReadOnlyMySQL(ctx, conn)
+	if err == nil {
 		t.Fatal("autocommit=0 时 beginReadOnlyMySQL 必须 fail-closed")
+	}
+	// 真实失败路径（手动事务模式）必须折叠为 ErrConnectionFailed，而非驱动原始错误。
+	assertFoldConnectionFailed(t, err)
+}
+
+// assertFoldConnectionFailed 断言只读边界失败路径折叠为 ErrConnectionFailed
+// （D15a：公共层折叠为 connection_unavailable，不泄露内部原因）。
+func assertFoldConnectionFailed(t *testing.T, err error) {
+	t.Helper()
+	var ae *AdapterError
+	if !errors.As(err, &ae) {
+		t.Fatalf("err = %v (%T)，必须为 *AdapterError（只读失败折叠）", err, err)
+	}
+	if ae.Code != ErrConnectionFailed {
+		t.Fatalf("err.Code = %s, want connection_failed（只读失败折叠，不返回驱动原始错误）", ae.Code)
 	}
 }
 
@@ -165,15 +186,5 @@ func TestReadOnlyBoundary_MySQL_ConnectionReuse(t *testing.T) {
 	res2 := queryMustSucceed(t, h, req)
 	if res1.TotalReturned == 0 || res2.TotalReturned == 0 {
 		t.Fatal("连续查询应都成功")
-	}
-}
-
-// TestReadOnlyMapErrorFolded 验证只读失败错误折叠为 connection_failed 语义
-// （D15a：公共层折叠为 connection_unavailable，不泄露内部原因）。
-func TestReadOnlyMapErrorFolded(t *testing.T) {
-	err := newError(ErrConnectionFailed, "read-only begin transaction failed", nil)
-	var ae *AdapterError
-	if !errors.As(err, &ae) || ae.Code != ErrConnectionFailed {
-		t.Fatalf("err = %v, want AdapterError{Code: connection_failed}", err)
 	}
 }

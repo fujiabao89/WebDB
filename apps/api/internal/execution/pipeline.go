@@ -199,6 +199,9 @@ type ExecuteResult struct {
 	Outcome            metadata.AuditOutcome
 	// Engine 服务端权威引擎（wire_type 派生用；不来自客户端）。
 	Engine Engine
+	// PageSize 服务端实际分页上限（P0-06A §8.2 meta.page.page_size 语义：
+	// 分页上限而非当前页实际行数，CodeRabbit #16）。
+	PageSize int
 }
 
 // Execute 按顺序执行：Connection → Policy → Resolver → Adapter，
@@ -252,9 +255,14 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// 占位符检测（P0-06A §8.1）：方言感知 token 级判定，含未绑定原生位置占位符
 	// （PG $N / MySQL ?）一律拒绝 statement_not_allowed，Adapter 0 次访问。
 	// 放行 PG JSONB ?/?|/?& 与字符串/注释内符号。
-	if decision.Allowed && sqlpolicy.HasUnboundPlaceholder(sqlpolicy.Dialect(serverEngine), req.SQL) {
-		decision = sqlpolicy.PolicyDecision{Allowed: false, ReasonCode: sqlpolicy.ReasonNotAllowed}
-		code = ErrStatementNotAllowed
+	// fail-closed（CodeRabbit #21）：未知方言或未闭合词法结构返回 error 时同样按
+	// statement_not_allowed 拒绝，不得静默按"无占位符"放行。
+	if decision.Allowed {
+		found, pErr := sqlpolicy.HasUnboundPlaceholder(sqlpolicy.Dialect(serverEngine), req.SQL)
+		if pErr != nil || found {
+			decision = sqlpolicy.PolicyDecision{Allowed: false, ReasonCode: sqlpolicy.ReasonNotAllowed}
+			code = ErrStatementNotAllowed
+		}
 	}
 	result.Decision = decision
 	statementHash := decision.Classification.StatementHash
@@ -476,6 +484,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	if effectivePageSize > effectiveMaxRows {
 		effectivePageSize = effectiveMaxRows
 	}
+	// 服务端实际分页上限（P0-06A §8.2 meta.page.page_size 语义，CodeRabbit #16）。
+	result.PageSize = effectivePageSize
 	requiresPagination := effectiveMaxRows > effectivePageSize
 
 	var sortPlan queryplan.VerifiedSortPlan
@@ -673,7 +683,10 @@ type NextPageRequest struct {
 func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
 	if p == nil || p.registry == nil || p.store == nil || p.policyStore == nil ||
-		p.members == nil || p.resolver == nil || p.adapter == nil {
+		p.members == nil || p.resolver == nil || p.adapter == nil ||
+		// 与 Execute 一致的 fail-closed：生产 Pipeline 必须同时配置 Tx 与 Audit，
+		// 否则续页独立 Execution 无法持久化终态或审计写入缺失（CodeRabbit #9）。
+		p.txs == nil || p.audit == nil {
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -729,6 +742,8 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	result.Engine = Engine(conn.Engine)
+	// 服务端实际分页上限来自续页 state（P0-06A §8.2 meta.page.page_size 语义，CodeRabbit #16）。
+	result.PageSize = state.PageSize
 
 	// 重新授权：策略（AllowRead/MaxRows/timeout/policy version）。
 	policy, err := p.policyStore.PolicyByConnection(ctx, conn.WorkspaceID, conn.ID)
@@ -846,22 +861,26 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		handle.Release()
 		released = true
 		claim.Abort()
-		result.ErrorCode = mapAdapterError(err)
-		// D11：失败页也创建独立 Execution + AuditEvent（尽力；审计失败不阻断错误返回）。
-		_ = p.auditNextPage(ctx, req, state, conn, result, nil, err)
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		origCode := mapAdapterError(err)
+		result.ErrorCode = origCode
+		// D11（P0-06A §9.4）：失败页也创建独立 Execution + AuditEvent。审计持久化
+		// 失败必须 fail-closed（ADR-017 / §11.2）：返回 audit_failed、触发告警、
+		// 不静默声称 query_cancelled 已完整审计，也不遗留已提交的 pending Execution
+		// 而无终态（Greptile P1 / CodeRabbit #10）。
+		if aErr := p.auditNextPage(ctx, req, state, conn, result, nil, err); aErr != nil {
+			return p.auditFailed(ctx, result, result.TraceID, conn.WorkspaceID, origCode)
+		}
+		return result, fmt.Errorf("%w", origCode)
 	}
 	handle.Release()
 	released = true
 	result.Result = queryResult
 
 	// D11（P0-06A §9.4）：每个物理页创建独立 Execution，并在返回页面前持久化
-	// AuditEvent。审计失败 → audit_failed，扣留结果，旧 token 不恢复。
+	// AuditEvent。审计失败 → audit_failed（$SECURITY_ALERT），扣留结果，旧 token 不恢复。
 	if err := p.auditNextPage(ctx, req, state, conn, result, queryResult, nil); err != nil {
 		claim.Abort()
-		result.Result = nil
-		result.ErrorCode = ErrAuditFailed
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		return p.auditFailed(ctx, result, result.TraceID, conn.WorkspaceID, result.ErrorCode)
 	}
 
 	// Rotate/Complete：旧 token 永不恢复。
@@ -959,9 +978,13 @@ func (p *Pipeline) auditNextPage(
 	// query_cancelled → cancelled + E13；其他失败 → failed + E11；成功 → completed + E10。
 	if queryErr != nil {
 		result.ErrorCode = mapAdapterError(queryErr)
-		// 失败页（查询已失败、无数据泄露）：审计尽力而为，失败不阻断错误返回；
-		// result.ErrorCode 保持原始语义（如 query_cancelled），调用方返回 499（P1-2）。
-		_ = p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
+		// 失败页（查询已失败、无数据泄露）：审计必须持久化（ADR-017 fail-closed）。
+		// recordPostExecution（终态更新 + AuditEvent append）失败时返回错误，
+		// 调用方 fail-closed 为 audit_failed，不得静默声称 query_cancelled 已完整审计，
+		// 也不得遗留已提交的 pending Execution 而无终态（Greptile P1 / CodeRabbit #10）。
+		if err := p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash); err != nil {
+			return fmt.Errorf("%w: failed page audit persistence failed (original: %s)", err, result.ErrorCode)
+		}
 		return nil
 	}
 	result.ErrorCode = ""

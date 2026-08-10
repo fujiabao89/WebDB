@@ -93,6 +93,16 @@ func discardConn(conn *sql.Conn) {
 	})
 }
 
+// discardPGConn 销毁 pgxpool 连接，确保其不被归还连接池复用（与 discardConn 对
+// MySQL 的语义一致，CodeRabbit #7）。只读事务结束/回滚失败后连接状态未知，必须
+// 关闭底层 PgConn；pgxpool 在 Release 时检测到已关闭连接会销毁而非复用。
+func discardPGConn(ctx context.Context, conn *pgxpool.Conn) {
+	if conn == nil {
+		return
+	}
+	_ = conn.Conn().Close(ctx)
+}
+
 // wrapReadOnly 包装只读设置失败，message 固定（不含驱动原始错误，防止敏感信息
 // 进入日志/响应）；cause 保留在错误链供 errors.Is 判定。
 func wrapReadOnly(stage string, err error) error {

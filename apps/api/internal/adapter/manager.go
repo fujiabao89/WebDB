@@ -652,9 +652,16 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 		return nil, err
 	}
 	// 查询结束（含取消/超时/panic）回滚只读事务，确保连接归还后无事务残留。
-	// 用 WithoutCancel + 独立超时，客户端断开不阻断回滚。
+	// 成功路径显式回滚（rolledBack=true 后 defer 不再重复 ROLLBACK，CodeRabbit #7）；
+	// defer 仅作为取消/超时/panic/早退错误路径的兜底，与显式回滚互斥。
+	rolledBack := false
 	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-	defer func() { _ = endReadOnlyPG(rbCtx, conn); rbCancel() }()
+	defer func() {
+		if !rolledBack {
+			_ = endReadOnlyPG(rbCtx, conn)
+		}
+		rbCancel()
+	}()
 	rows, err := conn.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
@@ -696,11 +703,16 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 		return nil, mapExecError(err)
 	}
 	// 数据已全部读入内存。先关闭结果集再回滚只读事务（与 execMySQL 一致，
-	// 确保连接协议干净后归还）。
+	// 确保连接协议干净后归还）。回滚失败 → fail-closed：销毁连接、返回
+	// connection_unavailable，不返回已读入的成功结果（与 execMySQL 公共语义一致，
+	// CodeRabbit #7）。
 	rows.Close()
 	if err := endReadOnlyPG(rbCtx, conn); err != nil {
-		return nil, mapExecError(err)
+		rolledBack = true
+		discardPGConn(rbCtx, conn)
+		return nil, newError(ErrConnectionFailed, "read-only transaction end failed", err)
 	}
+	rolledBack = true
 	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
 }
 func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
@@ -715,22 +727,26 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	if err != nil {
 		return nil, mapAcquireError(err)
 	}
-	// 归还前统一兜底（Owner P1-1 决策）：回滚只读事务；回滚失败或已标记异常时
-	// 销毁连接（不归还池），确保取消/超时/panic 后连接不携带事务状态复用。
-	discard := false
-	defer func() {
-		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-		defer rbCancel()
-		if err := endReadOnlyMySQL(rbCtx, conn); err != nil || discard {
-			discardConn(conn)
-		}
-		conn.Close()
-	}()
+	defer conn.Close()
 	// 强制只读边界（WEB-35，P0-06A §8.3/§14 R5）：只读设置/验证失败 → fail-closed。
 	if err := beginReadOnlyMySQL(ctx, conn); err != nil {
-		discard = true // 只读设置失败：连接状态未知 → 销毁
+		// 只读设置失败：连接状态未知 → 销毁（不归还池，Owner P1-1）。
+		discardConn(conn)
 		return nil, err
 	}
+	// 兜底回滚：取消/超时/panic/早退错误路径（rows 错误）确保只读事务回滚；
+	// 成功路径显式回滚后 rolledBack=true 使本兜底 no-op（与显式回滚互斥，CodeRabbit #7）。
+	rolledBack := false
+	defer func() {
+		if rolledBack {
+			return
+		}
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer rbCancel()
+		if err := endReadOnlyMySQL(rbCtx, conn); err != nil {
+			discardConn(conn)
+		}
+	}()
 	rows, err := conn.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
@@ -789,9 +805,18 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 		return nil, mapExecError(err)
 	}
 	// 数据已全部读入内存；先关闭结果集确保连接协议干净（MySQL 活动结果集上
-	// ROLLBACK 会触发 "commands out of sync" → bad connection），再由统一 defer
-	// 回滚只读事务（回滚失败时销毁连接，Owner P1-1）。
+	// ROLLBACK 会触发 "commands out of sync" → bad connection）。显式回滚只读事务；
+	// 回滚失败 → fail-closed：销毁连接、返回 connection_unavailable，不返回已读入的
+	// 成功结果（与 execPG 公共语义一致，CodeRabbit #7）。
 	rows.Close()
+	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer rbCancel()
+	if err := endReadOnlyMySQL(rbCtx, conn); err != nil {
+		rolledBack = true
+		discardConn(conn)
+		return nil, newError(ErrConnectionFailed, "read-only transaction end failed", err)
+	}
+	rolledBack = true
 	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
 }
 func finalizeResult(colInfos []ColumnInfo, data [][]any, rc, effPage, cumCount, maxRows int) *QueryResult {

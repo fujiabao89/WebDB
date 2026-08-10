@@ -107,3 +107,18 @@ func TestWriteDataEnvelopeBudget(t *testing.T) {
 		t.Errorf("超限响应应返回 result_too_large，body = %.200s", rec.Body.String())
 	}
 }
+
+// TestWriteDataEnvelopeBudgetAccountsEncoderNewline 验证 8 MiB 上限按最终实际写出字节
+// 计算（含 Encoder 末尾换行，CodeRabbit #13）：data 单独序列化长度恰为 MaxResponseBytes
+// 时，加上换行后实际写出 > 8 MiB，必须返回 result_too_large，不得放行超限响应。
+func TestWriteDataEnvelopeBudgetAccountsEncoderNewline(t *testing.T) {
+	// {"data":"xxx...x"}\n 长度 = 11 + L + 1（换行）。取 L 使 11+L = MaxResponseBytes，
+	// 则 Encoder 输出 = MaxResponseBytes + 1 > 8 MiB。
+	L := MaxResponseBytes - 11
+	data := strings.Repeat("x", L)
+	rec := httptest.NewRecorder()
+	writeDataEnvelope(rec, data, nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422（含末尾换行的实际字节超出 8 MiB 必须拒绝）", rec.Code)
+	}
+}

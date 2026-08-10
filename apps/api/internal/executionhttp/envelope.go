@@ -1,8 +1,10 @@
 package executionhttp
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"strconv"
 )
 
 // MaxResponseBytes 成功响应体字节上限（P0-06A §13.2 D06a：8 MiB）。
@@ -15,47 +17,36 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-// writeData 写成功 envelope：{ "data": ... }。
-// 先序列化到内存并检查 8 MiB 字节预算；超限返回 result_too_large，
-// 不写出超限响应、不静默截断（P0-06A §6/§7 D06b）。序列化失败视为内部错误。
-func writeData(w http.ResponseWriter, data any) {
-	b, err := json.Marshal(data)
-	if err != nil {
-		writeError(w, ErrInternalError)
-		return
-	}
-	if len(b) > MaxResponseBytes {
-		writeError(w, ErrResultTooLarge)
-		return
-	}
-	writeJSON(w, http.StatusOK, json.RawMessage(b))
-}
-
 // writeDataEnvelope 写统一成功 envelope { "data": ..., "meta": ... }（P0-06A §5.3）。
-// 数据与 meta 一起序列化并检查字节预算。
+// 先以 Encoder 完整序列化到内存（含 JSON 转义、Base64 膨胀、末尾换行与 page/audit
+// metadata），并按最终实际写出字节数检查 8 MiB 上限（D06a，CodeRabbit #13）：
+// 超限返回 result_too_large，不写出超限响应、不静默截断、不产生半个 200。
 func writeDataEnvelope(w http.ResponseWriter, data, meta any) {
 	body := map[string]any{"data": data}
 	if meta != nil {
 		body["meta"] = meta
 	}
-	b, err := json.Marshal(body)
-	if err != nil {
+	var buf bytes.Buffer
+	if err := json.NewEncoder(&buf).Encode(body); err != nil {
 		writeError(w, ErrInternalError)
 		return
 	}
-	if len(b) > MaxResponseBytes {
+	if buf.Len() > MaxResponseBytes {
 		writeError(w, ErrResultTooLarge)
 		return
 	}
-	writeJSON(w, http.StatusOK, json.RawMessage(b))
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 // writeError 写统一错误 envelope：{ "error": { "code", "message" } }。
-// message 固定为 code（安全摘要，不泄露根因）。429 附带确定性的 Retry-After。
+// message 固定为 code（安全摘要，不泄露根因）。429 附带确定性的 Retry-After
+// （接入 retryAfterSeconds 常量，CodeRabbit #11）。
 func writeError(w http.ResponseWriter, code StableErrorCode) {
 	status := statusFor(code)
 	if status == http.StatusTooManyRequests {
-		w.Header().Set("Retry-After", "1")
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
 	}
 	writeJSON(w, status, map[string]any{
 		"error": map[string]any{"code": string(code), "message": string(code)},

@@ -51,15 +51,18 @@ func testPrincipal() browse.Principal {
 // newTestHandler 构造带 principal 注入与 panic recovery 的完整 handler。
 func newTestHandler(exec Executor) (http.Handler, browse.Principal) {
 	p := testPrincipal()
-	server := NewServer(p, exec)
+	server := NewServer(exec)
 	mux := ComposeHandler(nil, server)
-	return RecoverMiddleware(nil)(PrincipalMiddleware(p)(mux)), p
+	// PrincipalMiddleware 在 RecoverMiddleware 之外：panic 恢复点能读取已验证 Principal
+	//（与 cmd/server 装配一致，CodeRabbit #17）。
+	return PrincipalMiddleware(p)(RecoverMiddleware(nil)(mux)), p
 }
 
 func execSuccess() *execution.ExecuteResult {
 	eid := uuid.New()
 	aid := uuid.New()
 	return &execution.ExecuteResult{
+		PageSize: 100, // 服务端实际分页上限（P0-06A §8.2 page.page_size 语义，CodeRabbit #16）
 		Result: &adapter.QueryResult{
 			Columns:       []adapter.ColumnInfo{{Name: "id", DataType: "23"}},
 			Rows:          [][]any{{int64(1)}},
@@ -77,7 +80,7 @@ func execSuccess() *execution.ExecuteResult {
 
 // TestExecutionsUnauthorized 验证未注入 Principal → 401。
 func TestExecutionsUnauthorized(t *testing.T) {
-	server := NewServer(testPrincipal(), &fakeExecutor{})
+	server := NewServer(&fakeExecutor{})
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/executions",
 		strings.NewReader(`{"connection_id":"`+testConnID+`","sql":"SELECT 1"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -189,6 +192,9 @@ func TestExecutionsSuccess(t *testing.T) {
 	if resp.Data.ReturnedRows != 1 || resp.Data.TotalReturned != 1 {
 		t.Errorf("counts = %d/%d", resp.Data.ReturnedRows, resp.Data.TotalReturned)
 	}
+	if resp.Meta.Page.PageSize != 100 {
+		t.Errorf("page_size = %d, want 100（服务端实际分页上限，而非当前页行数）", resp.Meta.Page.PageSize)
+	}
 	if resp.Meta.Audit.State != "recorded" || resp.Meta.Audit.Outcome != "succeeded" {
 		t.Errorf("audit = %+v", resp.Meta.Audit)
 	}
@@ -230,7 +236,7 @@ func TestExecutionsErrorMapping(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			code := c.code
 			exec := &fakeExecutor{executeFn: func(ctx context.Context, req execution.ExecuteRequest) (*execution.ExecuteResult, error) {
-				return &execution.ExecuteResult{ErrorCode: code}, execution.StableErrorCode(code)
+				return &execution.ExecuteResult{ErrorCode: code}, code
 			}}
 			handler, _ := newTestHandler(exec)
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/executions",
