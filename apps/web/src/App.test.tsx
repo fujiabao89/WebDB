@@ -189,7 +189,7 @@ describe("P0 workbench", () => {
     const pageFailure: WebDbApi = {
       ...api,
       execute: vi.fn().mockResolvedValue({
-        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["first-page"]], returned_rows: 1, total_returned: 2 },
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["first-page"]], returned_rows: 1, total_returned: 1 },
         meta: { page: { page_size: 100, has_more: true, next_page_token: "synthetic-token" }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
       }),
       nextPage: vi.fn().mockRejectedValue(new ApiError("connection_unavailable", 503, "connection_unavailable")),
@@ -202,6 +202,7 @@ describe("P0 workbench", () => {
 
     expect(await screen.findByText("连接暂不可用")).toBeTruthy();
     expect(screen.getByText("first-page")).toBeTruthy();
+    expect(screen.getByText("已显示 1 行")).toBeTruthy();
   });
 
   it("keeps earlier rows visible after loading the next page", async () => {

@@ -1,14 +1,20 @@
 WebDB third-party notices
 ==========================
 
-This source distribution includes the following direct frontend dependencies for
-the WEB-37 workbench. Their licenses are compatible with this project's Apache
-License 2.0. The dependency inventory is maintained in
-docs/DEPENDENCY-LICENSES.md.
+This source distribution includes the following direct frontend dependencies.
+Their licenses are compatible with this project's Apache License 2.0. The
+dependency inventory is maintained in docs/DEPENDENCY-LICENSES.md.
 
-* Monaco Editor 0.56.0 — MIT — Microsoft Corporation
-* Playwright Test 1.62.1 — Apache-2.0 — Microsoft Corporation
-* Testing Library React 16.3.2 — MIT — Kent C. Dodds
-* Testing Library User Event 14.6.3 — MIT — Giorgio Polvara
-* jsdom 30.0.1 — MIT — jsdom contributors
-* Vitest 4.1.10 — MIT — Anthony Fu and Vitest contributors
+* monaco-editor 0.56.0 — MIT
+* react 19.2.7 — MIT
+* react-dom 19.2.7 — MIT
+* @playwright/test 1.62.1 — Apache-2.0
+* @testing-library/react 16.3.2 — MIT
+* @testing-library/user-event 14.6.3 — MIT
+* @types/react 19.2.17 — MIT
+* @types/react-dom 19.2.3 — MIT
+* @vitejs/plugin-react 4.7.0 — MIT
+* jsdom 30.0.1 — MIT
+* typescript 5.9.3 — Apache-2.0
+* vite 7.3.6 — MIT
+* vitest 4.1.10 — MIT

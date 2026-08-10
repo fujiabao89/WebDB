@@ -37,7 +37,7 @@ export interface ApiClientOptions {
 }
 
 type JsonObject = Record<string, unknown>;
-type DataArrayEnvelope = { data: unknown[] };
+type DataArrayEnvelope<T> = { data: T[] };
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -58,18 +58,81 @@ function errorEnvelope(value: unknown): ErrorEnvelopeDto | undefined {
   return { error: { code: value.error.code, message: value.error.message } };
 }
 
-function dataArrayEnvelope(value: unknown): value is DataArrayEnvelope {
-  return isRecord(value) && Array.isArray(value.data);
+function isNonNegativeInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isConnection(value: unknown): value is ConnectionDto {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.name === "string"
+    && (value.engine === "postgresql" || value.engine === "mysql")
+    && (value.environment === "development" || value.environment === "staging" || value.environment === "production")
+    && typeof value.database === "string";
+}
+
+function isSchema(value: unknown): value is SchemaDto {
+  return isRecord(value) && typeof value.name === "string" && typeof value.catalog === "string";
+}
+
+function isTable(value: unknown): value is TableDto {
+  return isRecord(value)
+    && typeof value.schema === "string"
+    && typeof value.name === "string"
+    && (value.type === "TABLE" || value.type === "VIEW");
+}
+
+function isColumn(value: unknown): value is ColumnDto {
+  return isRecord(value)
+    && typeof value.name === "string"
+    && isNonNegativeInteger(value.ordinal)
+    && typeof value.native_type === "string"
+    && typeof value.nullable === "boolean"
+    && typeof value.has_default === "boolean";
+}
+
+function dataArrayEnvelope<T>(isItem: (value: unknown) => value is T): (value: unknown) => value is DataArrayEnvelope<T> {
+  return (value: unknown): value is DataArrayEnvelope<T> => isRecord(value) && Array.isArray(value.data) && value.data.every(isItem);
+}
+
+function isResultColumn(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.name === "string"
+    && ["int", "decimal", "boolean", "float", "date", "time", "timestamp", "timestamptz", "json_text", "binary", "text", "uuid"].includes(value.wire_type as string)
+    && (value.data_type === undefined || typeof value.data_type === "string");
+}
+
+function isWireCell(value: unknown): boolean {
+  return value === null || typeof value === "string" || typeof value === "boolean" || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isQueryPage(value: unknown): boolean {
+  if (!isRecord(value) || !isNonNegativeInteger(value.page_size) || value.page_size === 0 || typeof value.has_more !== "boolean") return false;
+  return value.has_more ? typeof value.next_page_token === "string" && value.next_page_token.length > 0 : value.next_page_token === undefined;
+}
+
+function isAuditReceipt(value: unknown): boolean {
+  return isRecord(value)
+    && ["recorded", "denied", "failed", "cancelled"].includes(value.state as string)
+    && typeof value.audit_event_id === "string"
+    && typeof value.execution_id === "string"
+    && typeof value.trace_id === "string"
+    && ["succeeded", "denied", "failed", "cancelled"].includes(value.outcome as string);
 }
 
 function queryResponse(value: unknown): value is QueryResponseDto {
   return isRecord(value)
     && isRecord(value.data)
     && Array.isArray(value.data.columns)
+    && value.data.columns.every(isResultColumn)
     && Array.isArray(value.data.rows)
+    && value.data.rows.every((row) => Array.isArray(row) && row.every(isWireCell))
+    && isNonNegativeInteger(value.data.returned_rows)
+    && isNonNegativeInteger(value.data.total_returned)
+    && value.data.total_returned >= value.data.returned_rows
     && isRecord(value.meta)
-    && isRecord(value.meta.page)
-    && isRecord(value.meta.audit);
+    && isQueryPage(value.meta.page)
+    && isAuditReceipt(value.meta.audit);
 }
 
 async function json(response: Response): Promise<unknown> {
@@ -113,22 +176,22 @@ export function createApiClient({ baseUrl, fetcher = fetch }: ApiClientOptions):
 
   return {
     async connections(workspaceId, signal) {
-      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections`, signal, dataArrayEnvelope);
-      return response.data as ConnectionDto[];
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections`, signal, dataArrayEnvelope(isConnection));
+      return response.data;
     },
     async schemas(workspaceId, connectionId, signal) {
-      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/schemas`, signal, dataArrayEnvelope);
-      return response.data as SchemaDto[];
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/schemas`, signal, dataArrayEnvelope(isSchema));
+      return response.data;
     },
     async tables(workspaceId, connectionId, schema, signal) {
       const query = new URLSearchParams({ schema });
-      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/tables?${query}`, signal, dataArrayEnvelope);
-      return response.data as TableDto[];
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/tables?${query}`, signal, dataArrayEnvelope(isTable));
+      return response.data;
     },
     async columns(workspaceId, connectionId, schema, table, signal) {
       const query = new URLSearchParams({ schema, table });
-      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/columns?${query}`, signal, dataArrayEnvelope);
-      return response.data as ColumnDto[];
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/columns?${query}`, signal, dataArrayEnvelope(isColumn));
+      return response.data;
     },
     execute(workspaceId, body, signal) {
       return post(`/workspaces/${urlPart(workspaceId)}/executions`, body, signal, queryResponse);

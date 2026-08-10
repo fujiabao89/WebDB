@@ -1,5 +1,7 @@
 import type { AuditReceiptDto, QueryPageDto, QueryResultDto, SchemaDto } from "../api/contracts";
 
+export const MAX_RESULT_ROWS = 500;
+
 export type ExecutionStatus = "idle" | "running" | "cancelled" | "succeeded" | "failed" | "loading-next-page";
 
 export interface WorkbenchError {
@@ -66,19 +68,26 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
       return { ...state, execution: { status: "loading-next-page" }, error: undefined };
     case "executionSucceeded": {
       const previousResult = state.execution.status === "loading-next-page" ? state.result : undefined;
+      const retainedRows = previousResult?.rows.slice(0, MAX_RESULT_ROWS);
+      const rows = retainedRows && [
+        ...retainedRows,
+        ...action.result.rows.slice(0, Math.max(0, MAX_RESULT_ROWS - retainedRows.length)),
+      ];
+      const reachedResultLimit = rows !== undefined && rows.length >= MAX_RESULT_ROWS;
       return {
         ...state,
         execution: { status: "succeeded" },
-        result: previousResult
+        result: rows
           ? {
               ...action.result,
-              rows: [...previousResult.rows, ...action.result.rows],
-              returned_rows: previousResult.returned_rows + action.result.returned_rows,
+              rows,
+              returned_rows: rows.length,
+              total_returned: rows.length,
             }
           : action.result,
         audit: action.audit,
         error: undefined,
-        nextPageToken: action.page.has_more ? action.page.next_page_token : undefined,
+        nextPageToken: action.page.has_more && !reachedResultLimit ? action.page.next_page_token : undefined,
       };
     }
     case "executionFailed": {

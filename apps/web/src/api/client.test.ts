@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { ApiError, createApiClient } from "./client";
 
+const validQueryResponse = {
+  data: {
+    columns: [{ name: "id", wire_type: "int" }],
+    rows: [["1"]],
+    returned_rows: 1,
+    total_returned: 1,
+  },
+  meta: {
+    page: { page_size: 1, has_more: false },
+    audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" },
+  },
+};
+
 describe("WebDB HTTP client", () => {
   it("uses the approved execution DTO and maps 429 Retry-After without logging the request", async () => {
     const fetcher = vi.fn().mockResolvedValue(
@@ -56,6 +69,30 @@ describe("WebDB HTTP client", () => {
     const client = createApiClient({ baseUrl: "/api/v1", fetcher });
 
     await expect(client.connections("workspace-1")).rejects.toMatchObject({ code: "internal_error", status: 200 } satisfies Partial<ApiError>);
+  });
+
+  it.each([
+    ["connection", { data: [{ id: "connection-1", name: "Synthetic", engine: "sqlite", environment: "staging", database: "app" }] }, (client: ReturnType<typeof createApiClient>) => client.connections("workspace-1")],
+    ["schema", { data: [{ name: "public", catalog: 1 }] }, (client: ReturnType<typeof createApiClient>) => client.schemas("workspace-1", "connection-1")],
+    ["table", { data: [{ schema: "public", name: "users", type: "INDEX" }] }, (client: ReturnType<typeof createApiClient>) => client.tables("workspace-1", "connection-1", "public")],
+    ["column", { data: [{ name: "id", ordinal: "1", native_type: "int4", nullable: false, has_default: false }] }, (client: ReturnType<typeof createApiClient>) => client.columns("workspace-1", "connection-1", "public", "users")],
+  ])("rejects a successful response with an invalid %s DTO entry", async (_name, payload, call) => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const client = createApiClient({ baseUrl: "/api/v1", fetcher });
+
+    await expect(call(client)).rejects.toMatchObject({ code: "internal_error", status: 200 } satisfies Partial<ApiError>);
+  });
+
+  it.each([
+    ["an invalid result column", { ...validQueryResponse, data: { ...validQueryResponse.data, columns: [{ name: "id", wire_type: "unknown" }] } }],
+    ["an invalid result row cell", { ...validQueryResponse, data: { ...validQueryResponse.data, rows: [[{ value: "1" }]] } }],
+    ["an incomplete page", { ...validQueryResponse, meta: { ...validQueryResponse.meta, page: { page_size: 1, has_more: true } } }],
+    ["an incomplete audit receipt", { ...validQueryResponse, meta: { ...validQueryResponse.meta, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1" } } }],
+  ])("rejects a successful query response with %s", async (_name, payload) => {
+    const fetcher = vi.fn().mockResolvedValue(new Response(JSON.stringify(payload), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const client = createApiClient({ baseUrl: "/api/v1", fetcher });
+
+    await expect(client.execute("workspace-1", { connection_id: "connection-1", sql: "SELECT 1" })).rejects.toMatchObject({ code: "internal_error", status: 200 } satisfies Partial<ApiError>);
   });
 
   it("retains Retry-After metadata for non-429 gateway responses", async () => {

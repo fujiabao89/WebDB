@@ -1,8 +1,8 @@
 # WebDB P0 依赖许可证清单
 
-> 状态：P0（Go/Docker 已完成，npm 包待补充）｜更新日期：2026-07-31
+> 状态：P0（Go/Docker 与 apps/web npm direct dependencies 已完成清点）｜更新日期：2026-08-10
 >
-> 本项目采用 Apache License 2.0。以下列出 Go 后端和 Docker 镜像依赖，均与 AL2.0 兼容。npm 前端依赖未包含。
+> 本项目采用 Apache License 2.0。以下列出 Go 后端、Docker 镜像和 apps/web direct npm 依赖；npm 清单已包含在本文档中。
 >
 > WEB-13 (P0-04) 新增 Omni SQL 解析器依赖（MIT），完整传递依赖许可证清单见 `docs/tasks/P0-04-spike-licenses.tsv`（75 个外部模块，无 GPL/AGPL/SSPL）。
 
@@ -42,13 +42,20 @@
 | Package | Version | License | Type |
 |---|---|---|---|
 | monaco-editor | 0.56.0 | MIT | direct runtime (WEB-37) |
+| react | 19.2.7 | MIT | direct runtime |
+| react-dom | 19.2.7 | MIT | direct runtime |
 | @playwright/test | 1.62.1 | Apache-2.0 | direct development/test (WEB-37) |
 | @testing-library/react | 16.3.2 | MIT | direct development/test (WEB-37) |
 | @testing-library/user-event | 14.6.3 | MIT | direct development/test (WEB-37) |
+| @types/react | 19.2.17 | MIT | direct development/typecheck |
+| @types/react-dom | 19.2.3 | MIT | direct development/typecheck |
+| @vitejs/plugin-react | 4.7.0 | MIT | direct development/build |
 | jsdom | 30.0.1 | MIT | direct development/test (WEB-37) |
+| typescript | 5.9.3 | Apache-2.0 | direct development/typecheck |
+| vite | 7.3.6 | MIT | direct development/build |
 | vitest | 4.1.10 | MIT | direct development/test (WEB-37) |
 
-> This WEB-37 section supersedes the earlier P0 status note that marked npm dependencies as pending.
+> WEB-37 introduced the Monaco and test dependencies marked above; this table is the current complete apps/web direct npm inventory.
 
 ## 合规说明
 
