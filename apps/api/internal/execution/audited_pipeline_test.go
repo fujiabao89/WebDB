@@ -24,6 +24,7 @@ type fakeMetadataTx struct {
 	failCommit   error
 	committed    bool
 	rolledBack   bool
+	store        *fakeTxStore // 语义化 failUpdateN 计数（CodeRabbit 新 #4）
 }
 
 func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Execution) error {
@@ -36,6 +37,14 @@ func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Executio
 }
 
 func (t *fakeMetadataTx) UpdateExecution(_ context.Context, _ uuid.UUID, e *metadata.Execution) error {
+	// failUpdateN：按 UpdateExecution 调用次数注入失败（语义定位而非事务序号，
+	// 增删非更新事务不会漂移注入点，CodeRabbit 新 #4）。
+	if t.store != nil && t.store.failUpdateN > 0 {
+		t.store.updateCount++
+		if t.store.updateCount == t.store.failUpdateN {
+			return t.store.failUpdate
+		}
+	}
 	if t.failUpdate != nil {
 		return t.failUpdate
 	}
@@ -69,6 +78,8 @@ type fakeTxStore struct {
 	failCommit     error
 	failCommitTxID int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
 	failUpdateTxID int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
+	failUpdateN    int // 从 1 开始：仅第 N 次 UpdateExecution 调用失败（语义定位，按调用计数而非事务序号，CodeRabbit 新 #4）
+	updateCount    int // 已执行的 UpdateExecution 调用次数
 }
 
 func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
@@ -86,7 +97,7 @@ func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failUpdate != nil && (f.failUpdateTxID == 0 || f.failUpdateTxID == idx) {
 		fu = f.failUpdate
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc, store: f}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }

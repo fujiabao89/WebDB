@@ -327,3 +327,89 @@ func TestErrorResponseNoSensitiveCanary(t *testing.T) {
 		t.Errorf("错误响应应包含稳定 code，body=%s", rec.Body.String())
 	}
 }
+
+// TestExecutionsCtxHasDeadline 验证执行 handler 传入 executor 的 ctx 具有 Deadline
+// （请求级兜底超时 DefaultRequestTimeout 传播，CodeRabbit 新 #5）。
+func TestExecutionsCtxHasDeadline(t *testing.T) {
+	var gotDeadline bool
+	exec := &fakeExecutor{executeFn: func(ctx context.Context, req execution.ExecuteRequest) (*execution.ExecuteResult, error) {
+		_, gotDeadline = ctx.Deadline()
+		return execSuccess(), nil
+	}}
+	handler, _ := newTestHandler(exec)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/executions",
+		strings.NewReader(`{"connection_id":"`+testConnID+`","sql":"SELECT 1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !gotDeadline {
+		t.Fatal("执行 handler 传入 executor 的 ctx 必须具有 Deadline（DefaultRequestTimeout 兜底）")
+	}
+}
+
+// TestQueryPagesCtxHasDeadline 验证续页 handler 传入 executor 的 ctx 同样具有 Deadline。
+func TestQueryPagesCtxHasDeadline(t *testing.T) {
+	var gotDeadline bool
+	exec := &fakeExecutor{nextPageFn: func(ctx context.Context, req execution.NextPageRequest) (*execution.ExecuteResult, error) {
+		_, gotDeadline = ctx.Deadline()
+		return execSuccess(), nil
+	}}
+	handler, _ := newTestHandler(exec)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/query-pages",
+		strings.NewReader(`{"next_page_token":"`+strings.Repeat("a", 64)+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	if !gotDeadline {
+		t.Fatal("续页 handler 传入 executor 的 ctx 必须具有 Deadline")
+	}
+}
+
+// TestExecutionsRequestCancelMapsToQueryCancelled 验证请求取消传播（D13 transport
+// abort）：r.Context() 取消后，executor 通过 ctx.Done() 中断并返回 query_cancelled，
+// 响应为 499（CodeRabbit 新 #5）。
+func TestExecutionsRequestCancelMapsToQueryCancelled(t *testing.T) {
+	exec := &fakeExecutor{executeFn: func(ctx context.Context, req execution.ExecuteRequest) (*execution.ExecuteResult, error) {
+		<-ctx.Done()
+		return &execution.ExecuteResult{ErrorCode: execution.ErrQueryCancelled}, context.Canceled
+	}}
+	handler, _ := newTestHandler(exec)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/executions",
+		strings.NewReader(`{"connection_id":"`+testConnID+`","sql":"SELECT 1"}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 499 {
+		t.Fatalf("status = %d, want 499 query_cancelled（请求取消应中断执行并映射为取消）", rec.Code)
+	}
+}
+
+// TestQueryPagesRequestCancelMapsToQueryCancelled 验证续页请求取消同样映射为
+// query_cancelled（499）。
+func TestQueryPagesRequestCancelMapsToQueryCancelled(t *testing.T) {
+	exec := &fakeExecutor{nextPageFn: func(ctx context.Context, req execution.NextPageRequest) (*execution.ExecuteResult, error) {
+		<-ctx.Done()
+		return &execution.ExecuteResult{ErrorCode: execution.ErrQueryCancelled}, context.Canceled
+	}}
+	handler, _ := newTestHandler(exec)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/workspaces/"+testWorkID+"/query-pages",
+		strings.NewReader(`{"next_page_token":"`+strings.Repeat("a", 64)+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != 499 {
+		t.Fatalf("status = %d, want 499 query_cancelled", rec.Code)
+	}
+}

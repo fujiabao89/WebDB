@@ -172,9 +172,9 @@ func TestNextPageFailureAuditAppendFailureFailClosedToAuditFailed(t *testing.T) 
 // TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed 验证续页失败页
 // 的 Execution 终态更新失败（元数据库故障）时同样 fail-closed 为 audit_failed，
 // 而不是静默保持 query_cancelled 并遗留已提交的 pending Execution（Greptile P1）。
-// 事务编号：首页 Execute 用 tx1(pending)/tx2(running)/tx3(终态)；续页 auditNextPage
-// 用 tx4(新 pending)，recordPostExecution 用 tx5(终态更新)。failUpdateTxID=5 即注入
-// 续页终态更新失败。
+// 注入点语义定位：failUpdateN 按 UpdateExecution 调用次数（非事务序号）注入——
+// 首页 running 更新=#1、首页终态更新=#2、续页终态更新=#3；增删非更新事务不会
+// 漂移注入点（CodeRabbit 新 #4）。
 func TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed(t *testing.T) {
 	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
 	conn := &metadata.Connection{
@@ -209,9 +209,9 @@ func TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed(t *testing.
 	if err != nil || res1.NextPageToken == nil {
 		t.Fatalf("首页应成功返回 token: err=%v", err)
 	}
-	// 续页阶段注入查询取消 + 终态 Execution 更新失败（第 5 个事务）。
+	// 续页阶段注入查询取消 + 终态 Execution 更新失败（第 3 次 UpdateExecution 调用）。
 	handle.err = context.Canceled
-	txStore.failUpdateTxID = 5
+	txStore.failUpdateN = 3
 	txStore.failUpdate = errors.New("injected terminal update failure")
 	res2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *res1.NextPageToken})
 	if err == nil {
@@ -219,6 +219,9 @@ func TestNextPageFailureTerminalUpdateFailureFailClosedToAuditFailed(t *testing.
 	}
 	if res2.ErrorCode != ErrAuditFailed {
 		t.Fatalf("error code = %q, want audit_failed（终态更新失败即审计持久化失败）", res2.ErrorCode)
+	}
+	if res2.Result != nil || res2.NextPageToken != nil {
+		t.Fatal("终态更新失败不得返回结果或 token（与审计 append 失败路径一致，CodeRabbit 新 #4）")
 	}
 	if len(alarm.events) == 0 {
 		t.Fatal("终态更新失败必须触发安全告警")

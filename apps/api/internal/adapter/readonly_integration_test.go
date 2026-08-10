@@ -89,6 +89,34 @@ func TestReadOnlyBoundary_PG_ExistingTransactionRejected(t *testing.T) {
 	assertFoldConnectionFailed(t, err)
 }
 
+// TestReadOnlyBoundary_PG_NoResidualTransactionAfterQuery 验证成功查询后连接无残余
+// 事务：显式 ROLLBACK 且 rolledBack 标志使 defer 兜底不再重复 ROLLBACK（CodeRabbit #7
+// 的 PG 语义），池复用连接 TxStatus 必须回到 idle 'I'（CodeRabbit 新 #3 PG 覆盖）。
+func TestReadOnlyBoundary_PG_NoResidualTransactionAfterQuery(t *testing.T) {
+	m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+	defer m.Close(context.Background())
+	h := mustGet(t, m, pgCfg())
+	defer h.Release()
+
+	req := FirstPageRequest{
+		Scope:    UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+		SQL:      "SELECT id FROM employees ORDER BY id LIMIT 2",
+		PageSize: 100,
+		MaxRows:  100,
+	}
+	queryMustSucceed(t, h, req)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	conn, err := h.entry.pgPool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer conn.Release()
+	if status := conn.Conn().PgConn().TxStatus(); status != 'I' {
+		t.Fatalf("查询后连接 TxStatus = %c, want 'I'（无残余事务，显式回滚且不重复 ROLLBACK）", status)
+	}
+}
+
 // TestReadOnlyBoundary_PG_ConnectionReuse 验证连续查询连接复用无事务残留
 // （第二次查询不受第一次只读事务影响）。
 func TestReadOnlyBoundary_PG_ConnectionReuse(t *testing.T) {

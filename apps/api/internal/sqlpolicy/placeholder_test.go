@@ -50,6 +50,8 @@ func TestHasUnboundPlaceholderMySQL(t *testing.T) {
 		{"backslash escaped quote", "SELECT 'it\\'s ?'", false},
 		{"backtick ident", "SELECT `a?b` FROM t", false},
 		{"string literal", "SELECT '?'", false},
+		// MySQL `$` 是合法标识符字符，不得当美元引号跳过区间内 ? 占位符（CodeRabbit 新 #6）。
+		{"dollar-like identifier with placeholder", "SELECT a$b$c FROM t WHERE id = ?", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

@@ -28,7 +28,7 @@ func HasUnboundPlaceholder(dialect Dialect, sql string) (bool, error) {
 }
 
 func hasPGPlaceholder(sql string) (bool, error) {
-	return scanPlaceholder(sql, false, false, func(sql string, i int) bool {
+	return scanPlaceholder(sql, false, false, true, func(sql string, i int) bool {
 		if i+1 >= len(sql) {
 			return false
 		}
@@ -38,19 +38,24 @@ func hasPGPlaceholder(sql string) (bool, error) {
 }
 
 func hasMySQLPlaceholder(sql string) (bool, error) {
-	return scanPlaceholder(sql, true, true, func(sql string, i int) bool {
+	return scanPlaceholder(sql, true, true, false, func(sql string, i int) bool {
 		return sql[i] == '?'
 	})
 }
 
 // scanPlaceholder 词法扫描 SQL，跳过字符串/注释/引号标识符/美元引号，
-// 在可执行位置调用 isPlaceholder 判定。hashComment 仅 MySQL 启用（`#` 行注释；
-// PG 中 `#` 是 JSONB 操作符字符 `#>`/`#>>`，不得按注释跳过，否则会吞掉其后的
-// 占位符）；backslashEscapes 仅 MySQL 启用（MySQL 默认 `\` 是字符串转义；
-// PG 普通字符串用 `'` 转义，E 字符串才转义——PG 保守按无转义处理，见注释）。
+// 在可执行位置调用 isPlaceholder 判定。方言开关：
+//   - hashComment 仅 MySQL 启用（`#` 行注释；PG 中 `#` 是 JSONB 操作符字符
+//     `#>`/`#>>`，不得按注释跳过，否则会吞掉其后的占位符）。
+//   - backslashEscapes 仅 MySQL 启用（MySQL 默认 `\` 是字符串转义；PG 普通字符串
+//     用 `'` 转义，E 字符串才转义——PG 保守按无转义处理，见注释）。
+//   - dollarQuotes 仅 PostgreSQL 启用（美元引号 `$tag$...$tag$` 仅 PG 语法；MySQL
+//     中 `$` 是合法标识符字符，若把 `$...$` 当美元引号跳过会吞掉区间内的 `?`
+//     占位符 → fail-open，CodeRabbit 新 #6）。
+//
 // 任何未闭合的词法结构（字符串/块注释/引号标识符/美元引号）返回 error
 // （fail-closed，CodeRabbit #21），不得静默按"无占位符"放行。
-func scanPlaceholder(sql string, hashComment, backslashEscapes bool, isPlaceholder func(sql string, i int) bool) (bool, error) {
+func scanPlaceholder(sql string, hashComment, backslashEscapes, dollarQuotes bool, isPlaceholder func(sql string, i int) bool) (bool, error) {
 	for i := 0; i < len(sql); {
 		c := sql[i]
 		switch {
@@ -83,11 +88,12 @@ func scanPlaceholder(sql string, hashComment, backslashEscapes bool, isPlacehold
 			}
 			i = next
 		case c == '$':
-			// 先判定占位符（$N），再判定美元引号（$tag$/$$）。
+			// 先判定占位符（$N），再判定美元引号（$tag$/$$）——美元引号仅 PG 启用
+			//（MySQL 中 $ 是标识符字符，跳过会把区间内 ? 占位符吞掉 → fail-open）。
 			if isPlaceholder(sql, i) {
 				return true, nil
 			}
-			if isDollarQuoteStart(sql, i) {
+			if dollarQuotes && isDollarQuoteStart(sql, i) {
 				next, closed := skipDollarQuoted(sql, i)
 				if !closed {
 					return false, fmt.Errorf("unclosed dollar-quoted string")

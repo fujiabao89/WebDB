@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -41,7 +42,7 @@ func TestServerWriteTimeoutAllowsFullQueryBudget(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -50,7 +51,13 @@ func TestServerWriteTimeoutAllowsFullQueryBudget(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 
 	start := time.Now()
-	resp, err := http.Get("http://" + ln.Addr().String() + "/")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+ln.Addr().String()+"/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET 失败（查询可能被 WriteTimeout 提前切断）: %v", err)
 	}
@@ -72,7 +79,7 @@ func TestServerClientDisconnectCancelsRequestContext(t *testing.T) {
 		close(cancelled)
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -80,7 +87,10 @@ func TestServerClientDisconnectCancelsRequestContext(t *testing.T) {
 	defer srv.Close()
 	go func() { _ = srv.Serve(ln) }()
 
-	conn, err := net.Dial("tcp", ln.Addr().String())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var d net.Dialer
+	conn, err := d.DialContext(ctx, "tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}

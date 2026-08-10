@@ -6,12 +6,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -159,7 +162,30 @@ func runServe() error {
 	}
 
 	log.Printf("WebDB API %s 启动，端口 %s", version, port)
-	return server.ListenAndServe()
+
+	// 优雅关闭（CodeRabbit 新 #1）：Docker Compose 停止容器发 SIGTERM，Go 默认直接
+	// 退出不执行 defer，manager.Close/pipeline.Close 不会运行。注册 SIGINT/SIGTERM，
+	// 用有界 context 调 server.Shutdown（等活跃请求完成后返回 http.ErrServerClosed），
+	// 随后函数返回触发 defer 关闭 pipeline 与 AdapterManager 连接池。
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("HTTP 服务异常退出: %w", err)
+		}
+		return nil
+	case <-sigCh:
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		if err := server.Shutdown(ctx); err != nil {
+			return fmt.Errorf("优雅关闭未能在超时内完成: %w", err)
+		}
+		return nil
+	}
 }
 
 // responseWriteBudget 响应序列化与写出余量：给服务端在查询完成后写出成功/安全错误
