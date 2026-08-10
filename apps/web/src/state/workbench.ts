@@ -64,15 +64,23 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
       return { ...state, execution: { status: "cancelled" }, error: undefined, result: undefined, audit: undefined, nextPageToken: undefined };
     case "nextPageStarted":
       return { ...state, execution: { status: "loading-next-page" }, error: undefined };
-    case "executionSucceeded":
+    case "executionSucceeded": {
+      const previousResult = state.execution.status === "loading-next-page" ? state.result : undefined;
       return {
         ...state,
         execution: { status: "succeeded" },
-        result: action.result,
+        result: previousResult
+          ? {
+              ...action.result,
+              rows: [...previousResult.rows, ...action.result.rows],
+              returned_rows: previousResult.returned_rows + action.result.returned_rows,
+            }
+          : action.result,
         audit: action.audit,
         error: undefined,
         nextPageToken: action.page.has_more ? action.page.next_page_token : undefined,
       };
+    }
     case "executionFailed": {
       const withholdResults = action.code === "audit_failed";
       return {

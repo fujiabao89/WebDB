@@ -42,6 +42,27 @@ describe("workbench state machine", () => {
     expect(auditFailed.result).toBeUndefined();
   });
 
+  it("appends next-page rows while retaining the server cumulative count", () => {
+    const firstPage = workbenchReducer(initialWorkbenchState, {
+      type: "executionSucceeded",
+      result: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"], ["2"]], returned_rows: 2, total_returned: 2 },
+      page: { page_size: 2, has_more: true, next_page_token: "opaque-token" },
+      audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" },
+    });
+    const loadingNextPage = workbenchReducer(firstPage, { type: "nextPageStarted" });
+    const appended = workbenchReducer(loadingNextPage, {
+      type: "executionSucceeded",
+      result: { columns: [{ name: "id", wire_type: "int" }], rows: [["3"]], returned_rows: 1, total_returned: 3 },
+      page: { page_size: 2, has_more: false },
+      audit: { state: "recorded", audit_event_id: "audit-2", execution_id: "execution-2", trace_id: "trace-2", outcome: "succeeded" },
+    });
+
+    expect(appended.result?.rows).toEqual([["1"], ["2"], ["3"]]);
+    expect(appended.result?.returned_rows).toBe(3);
+    expect(appended.result?.total_returned).toBe(3);
+    expect(appended.nextPageToken).toBeUndefined();
+  });
+
   it.each(["statement_not_allowed", "multiple_statements", "forbidden"])("retains prior audited data as non-successful output after %s", (code) => {
     const succeeded = workbenchReducer(initialWorkbenchState, {
       type: "executionSucceeded",

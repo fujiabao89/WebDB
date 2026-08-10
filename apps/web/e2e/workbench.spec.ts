@@ -65,6 +65,7 @@ test("P0 keyboard workflow uses the DTO seam, cancels, pages, and renders the de
   await expect(page.getByRole("button", { name: /加载下一页/ })).toBeVisible();
   await page.getByRole("button", { name: /加载下一页/ }).click();
   await expect(page.getByText("e2e-second-page")).toBeVisible();
+  await expect(page.getByText("9f7494b8-0c94-46ac-b7f6-1ed403d56b5e")).toBeVisible();
   await expect(page.getByText("synthetic-memory-only-token")).toHaveCount(0);
 
   await page.getByRole("tab", { name: "消息" }).click();

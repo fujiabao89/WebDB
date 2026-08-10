@@ -204,6 +204,30 @@ describe("P0 workbench", () => {
     expect(screen.getByText("first-page")).toBeTruthy();
   });
 
+  it("keeps earlier rows visible after loading the next page", async () => {
+    const paged: WebDbApi = {
+      ...api,
+      execute: vi.fn().mockResolvedValue({
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["first-page-1"], ["first-page-2"]], returned_rows: 2, total_returned: 2 },
+        meta: { page: { page_size: 2, has_more: true, next_page_token: "synthetic-token" }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+      }),
+      nextPage: vi.fn().mockResolvedValue({
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["second-page-1"]], returned_rows: 1, total_returned: 3 },
+        meta: { page: { page_size: 2, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-2", execution_id: "execution-2", trace_id: "trace-2", outcome: "succeeded" } },
+      }),
+    };
+    const user = userEvent.setup();
+    render(<App api={paged} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    await user.click(await screen.findByRole("button", { name: /加载下一页/ }));
+
+    expect(await screen.findByText("first-page-1")).toBeTruthy();
+    expect(screen.getByText("first-page-2")).toBeTruthy();
+    expect(screen.getByText("second-page-1")).toBeTruthy();
+    expect(screen.getByText("已显示 3 行")).toBeTruthy();
+  });
+
   it.each([
     ["statement_not_allowed"],
     ["multiple_statements"],
