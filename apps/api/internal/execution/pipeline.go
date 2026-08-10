@@ -161,10 +161,11 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 }
 
 // Close 释放管线持有的 registry（仅当由管线创建时）。
+// 保留 registry 指针：Close 后由 Registry 内部 closed 状态原子拒绝新操作（fail-closed），
+// 并发 Execute/ExecuteNextPage 继续使用线程安全的 closed registry，而非 nil 解引用。
 func (p *Pipeline) Close() {
 	if p != nil && p.registry != nil && p.ownRegistry {
 		p.registry.Close()
-		p.registry = nil
 	}
 }
 
@@ -866,6 +867,8 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		}
 		newToken, err := claim.Rotate(newState)
 		if err != nil {
+			// 失败路径不返回本页数据：与 auditFailed 契约一致（不同时返回数据和错误）。
+			result.Result = nil
 			result.ErrorCode = mapPaginationError(err)
 			return result, fmt.Errorf("%w", result.ErrorCode)
 		}

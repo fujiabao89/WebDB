@@ -246,6 +246,45 @@ func TestScanMySQLUniquePairsMixedIndexes(t *testing.T) {
 	}
 }
 
+// TestScanMySQLUniquePairsDangerousBranches 表驱动覆盖两个危险判定分支：
+// 1) 前缀 key part 出现在干净列之后（危险列后置仍须整索引剔除）；
+// 2) 隐藏函数索引 key part 的 COLUMN_NAME 为 NULL（无效）+ 另一列，仍整索引剔除。
+func TestScanMySQLUniquePairsDangerousBranches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rows [][]any
+	}{
+		{
+			name: "prefixed part follows clean column excludes whole index",
+			rows: [][]any{
+				{"uq", "tenant_id", sql.NullInt64{}, sql.NullString{}},
+				{"uq", "name", sql.NullInt64{Int64: 10, Valid: true}, sql.NullString{}},
+			},
+		},
+		{
+			name: "hidden function-index part with invalid column name excludes whole index",
+			rows: [][]any{
+				{"uq", nil, sql.NullInt64{}, sql.NullString{String: "lower(`name`)", Valid: true}},
+				{"uq", "tenant_id", sql.NullInt64{}, sql.NullString{}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			uqs, err := scanMySQLUniquePairs(&fakeRows{data: tt.rows})
+			if err != nil {
+				t.Fatalf("scanMySQLUniquePairs() error = %v", err)
+			}
+			if len(uqs) != 0 {
+				t.Fatalf("scanMySQLUniquePairs() = %+v, want whole index excluded", uqs)
+			}
+		})
+	}
+}
+
 func TestAssembleTableMetadata(t *testing.T) {
 	t.Parallel()
 	meta, err := assembleTableMetadata("public", "users",

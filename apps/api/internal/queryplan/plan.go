@@ -82,7 +82,7 @@ func IsValidVerifiedPlan(p VerifiedSortPlan) bool {
 		return false
 	}
 	rv := reflect.ValueOf(p)
-	if rv.Kind() == reflect.Ptr && rv.IsNil() {
+	if rv.Kind() == reflect.Pointer && rv.IsNil() {
 		return false
 	}
 	return p.Valid()

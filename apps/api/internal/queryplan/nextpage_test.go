@@ -41,14 +41,18 @@ func TestNewVerifiedNextPagePlanDeepCopiesLastValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	lv := p.LastSortValues()
-	if s, ok := lv[1].([]int64); ok {
-		s[0] = 999
+	s, ok := lv[1].([]int64)
+	if !ok {
+		t.Fatalf("lv[1] type = %T, want []int64", lv[1])
 	}
+	s[0] = 999
 	lv2 := p.LastSortValues()
-	if s, ok := lv2[1].([]int64); ok {
-		if s[0] == 999 {
-			t.Fatal("LastSortValues not deep-copied")
-		}
+	s2, ok := lv2[1].([]int64)
+	if !ok {
+		t.Fatalf("lv2[1] type = %T, want []int64", lv2[1])
+	}
+	if s2[0] == 999 {
+		t.Fatal("LastSortValues not deep-copied")
 	}
 }
 

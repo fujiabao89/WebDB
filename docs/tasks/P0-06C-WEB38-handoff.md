@@ -1,6 +1,6 @@
 # WEB-38 / P0-06C 交接文档：SchemaSnapshot、VerifiedSortPlan 与 Service-owned 分页
 
-> 状态：实施完成，待独立安全审查｜日期：2026-08-09｜分支：`feat/WEB-38-service-owned-pagination`（worktree `C:\Users\34026\worktrees\webdb-WEB-38`）
+> 状态：实施完成，待独立安全审查｜日期：2026-08-09｜分支：`feat/WEB-38-service-owned-pagination`
 >
 > 本任务实现 ADR-014/015 已接受目标态：不可伪造排序唯一性证明、可信 SchemaSnapshot、Service-owned continuation registry、续页重新授权。未注册任何 HTTP 路由、未改前端、未创建 migration、未新增依赖、未改变 ADR。
 
@@ -117,7 +117,7 @@
 |---|---|
 | `go -C apps/api test ./...` | 全部 ok |
 | `go -C apps/api vet ./...` | 无输出（通过） |
-| `gofmt -l apps/api/` | 无输出（干净） |
+| `gofmt -l .` | 无输出（干净） |
 | `go -C apps/api build ./...` | 通过 |
 | `GOOS=linux GOARCH=amd64 go -C apps/api build ./...` | 通过 |
 | `go -C apps/api test ./internal/pagination/ -fuzz=FuzzRegistryInvariants -fuzztime=5s` | PASS（~45k execs） |

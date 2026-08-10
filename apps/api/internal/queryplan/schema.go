@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // SchemaSnapshot 绑定 connection/dialect/generation 的可信表元数据（ADR-014）。
@@ -149,11 +150,20 @@ func computeSchemaGeneration(m *TableMetadata) string {
 	}
 	writeStr(m.Schema)
 	writeStr(m.Table)
-	// 列按 ordinal 排序后写入（ordinal 由信息架构保证唯一，防御重复）。
+	// 列按 ordinal 排序后写入（防御重复 ordinal）；ordinal 相同列用 name 作确定性次级键，
+	// 并把 ordinal 一并写入摘要，使列顺序变化必然影响 generation。
 	cols := append([]Column(nil), m.Columns...)
-	sort.Slice(cols, func(i, j int) bool { return cols[i].Ordinal < cols[j].Ordinal })
+	sort.Slice(cols, func(i, j int) bool {
+		if cols[i].Ordinal != cols[j].Ordinal {
+			return cols[i].Ordinal < cols[j].Ordinal
+		}
+		return cols[i].Name < cols[j].Name
+	})
 	for _, c := range cols {
 		writeStr(c.Name)
+		var ord [4]byte
+		binary.BigEndian.PutUint32(ord[:], uint32(c.Ordinal))
+		h.Write(ord[:])
 		var flags [1]byte
 		if c.Nullable {
 			flags[0] = 1
@@ -169,9 +179,14 @@ func computeSchemaGeneration(m *TableMetadata) string {
 	} else {
 		h.Write([]byte{0})
 	}
-	// 唯一约束按名称排序后写入，保证确定性。
+	// 唯一约束按名称排序后写入；同名约束按列集合内容比较，保证排序唯一、哈希确定。
 	uqs := append([]UniqueConstraint(nil), m.UniqueConstraints...)
-	sort.Slice(uqs, func(i, j int) bool { return uqs[i].Name < uqs[j].Name })
+	sort.Slice(uqs, func(i, j int) bool {
+		if uqs[i].Name != uqs[j].Name {
+			return uqs[i].Name < uqs[j].Name
+		}
+		return strings.Join(uqs[i].Columns, "\x00") < strings.Join(uqs[j].Columns, "\x00")
+	})
 	for _, uq := range uqs {
 		writeStr(uq.Name)
 		for _, name := range uq.Columns {

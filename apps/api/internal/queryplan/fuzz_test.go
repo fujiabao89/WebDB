@@ -19,7 +19,7 @@ func FuzzVerifySortPlanNoPanic(f *testing.F) {
 	}
 	snap, err := NewSchemaSnapshot("conn-1", DialectPostgreSQL, 1, meta)
 	if err != nil {
-		panic(err)
+		f.Fatalf("NewSchemaSnapshot: %v", err)
 	}
 	shape := &QueryShape{BaseSchema: "public", BaseTable: "users", SelectStar: true}
 

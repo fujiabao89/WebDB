@@ -57,45 +57,28 @@ func (e *poolEntry) close() {
 }
 
 type AdapterManager struct {
-	mu            sync.Mutex
-	pools         map[string]*poolEntry
-	ac            *AdmissionController
-	opts          ManagerOptions
-	currentRevs   map[string]int64
-	currentCfgs   map[string]ConnectConfig
-	closed        bool
-	genCounter    int64
-	cleanupCancel context.CancelFunc
-	creating      sync.Map // per-cid singleflight: map[string]chan struct{}
+	mu          sync.Mutex
+	pools       map[string]*poolEntry
+	ac          *AdmissionController
+	opts        ManagerOptions
+	currentRevs map[string]int64
+	currentCfgs map[string]ConnectConfig
+	closed      bool
+	genCounter  int64
+	creating    sync.Map // per-cid singleflight: map[string]chan struct{}
 }
 
 func NewAdapterManager(opts ManagerOptions) *AdapterManager {
-	ctx, cancel := context.WithCancel(context.Background())
+	// continuation registry 已迁移至服务层（ADR-015），Adapter 不再持有 token。
+	// 连接池生命周期由 poolEntry.MaxConnLifetime / pgxpool 内部管理，无周期清理协程。
 	m := &AdapterManager{
 		pools: make(map[string]*poolEntry), ac: newAdmissionController(),
-		opts:          opts,
-		currentRevs:   make(map[string]int64),
-		currentCfgs:   make(map[string]ConnectConfig),
-		creating:      sync.Map{},
-		cleanupCancel: cancel,
+		opts:        opts,
+		currentRevs: make(map[string]int64),
+		currentCfgs: make(map[string]ConnectConfig),
+		creating:    sync.Map{},
 	}
-	// continuation registry 已迁移至服务层（ADR-015），Adapter 不再持有 token。
-	go m.cleanupPoolLoop(ctx)
 	return m
-}
-
-func (m *AdapterManager) cleanupPoolLoop(ctx context.Context) {
-	t := time.NewTicker(60 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
-			// 连接池清理由 poolEntry.MaxConnLifetime / pgxpool 内部管理；
-			// 本 ticker 仅保留以维持生命周期可扩展性。
-		}
-	}
 }
 
 func (m *AdapterManager) Get(ctx context.Context, cfg ConnectConfig) (*PoolHandle, error) {
@@ -322,7 +305,6 @@ func (m *AdapterManager) Close(ctx context.Context) error {
 		entries = append(entries, e)
 	}
 	m.mu.Unlock()
-	m.cleanupCancel()
 	m.ac.close()
 	var wg sync.WaitGroup
 	for _, e := range entries {
@@ -509,6 +491,17 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if req.MaxRows <= 0 {
 		req.MaxRows = 500 // 默认最大行数，大于 PageSize 以允许续页
 	}
+	// 可信计划绑定校验：SortPlan 的 ConnectionID/PoolGeneration 必须匹配当前 handle，
+	// 防止把其他连接/generation 的唯一性证明用于本连接（Codex 审查）。
+	if queryplan.IsValidVerifiedPlan(req.SortPlan) {
+		b := req.SortPlan.SnapshotBinding()
+		if b.ConnectionID != h.entry.cfg.ConnectionID {
+			return nil, newError(ErrInvalidPageToken, "sort plan connection mismatch", nil)
+		}
+		if b.PoolGeneration != h.gen {
+			return nil, newError(ErrStaleConfig, "sort plan pool generation mismatch", nil)
+		}
+	}
 	specs, singlePage, err := prepareFirstPageSort(req)
 	if err != nil {
 		return nil, err
@@ -534,7 +527,9 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 }
 
 func prepareFirstPageSort(req FirstPageRequest) ([]sortSpec, bool, error) {
-	if req.SortPlan == nil {
+	// 用 IsValidVerifiedPlan 统一处理 nil/typed-nil/无效 version 计划：
+	// 无效计划一律视为单页（singlePage=true），不进入有排序计划的分支。
+	if !queryplan.IsValidVerifiedPlan(req.SortPlan) {
 		if req.MaxRows > req.PageSize {
 			return nil, false, newError(
 				ErrUnsupportedQuery,

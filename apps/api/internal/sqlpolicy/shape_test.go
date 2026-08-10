@@ -113,6 +113,13 @@ func TestAnalyzeShapeMySQL(t *testing.T) {
 		{name: "where allowed", sql: "SELECT * FROM users WHERE id > 10", want: &queryplan.QueryShape{BaseTable: "users", SelectStar: true}},
 		{name: "where volatile RAND rejected", sql: "SELECT * FROM users WHERE RAND() < 0.5", wantErr: true},
 		{name: "where CURRENT_TIMESTAMP rejected", sql: "SELECT * FROM events WHERE visible_at <= CURRENT_TIMESTAMP", wantErr: true},
+		{name: "having rejected", sql: "SELECT id FROM users GROUP BY id HAVING count(*)>1", wantErr: true},
+		{name: "window rejected", sql: "SELECT id, row_number() OVER () FROM users", wantErr: true},
+		{name: "for update rejected", sql: "SELECT * FROM users FOR UPDATE", wantErr: true},
+		{name: "into rejected", sql: "SELECT id FROM users INTO @x", wantErr: true},
+		{name: "offset rejected", sql: "SELECT * FROM users LIMIT 10 OFFSET 5", wantErr: true},
+		{name: "paren source rejected", sql: "(SELECT * FROM users)", wantErr: true},
+		{name: "table source rejected", sql: "TABLE users", wantErr: true},
 	}
 
 	for _, tt := range tests {

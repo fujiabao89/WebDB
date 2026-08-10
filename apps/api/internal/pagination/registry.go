@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -33,10 +34,13 @@ func newRegistryError(code ErrorCode, msg string) error {
 	return &RegistryError{Code: code, Msg: msg}
 }
 
-// IsRegistryErrorCode 判断错误是否带指定 registry 错误码。
+// IsRegistryErrorCode 判断错误是否带指定 registry 错误码（含包装错误，errors.As 解包）。
 func IsRegistryErrorCode(err error, code ErrorCode) bool {
-	re, ok := err.(*RegistryError)
-	return ok && re.Code == code
+	var re *RegistryError
+	if !errors.As(err, &re) {
+		return false
+	}
+	return re.Code == code
 }
 
 // Config 是 registry 配置。数量上限沿用 ADR-015；字节上限为 Owner 批准的默认值
@@ -462,9 +466,16 @@ func (c *Claim) Rotate(newState *ContinuationState) (string, error) {
 		r.deleteEntry(c.digest)
 		return "", newRegistryError(ErrInvalidPageToken, "token expired")
 	}
-	if newState == nil {
+	if newState == nil || !validState(newState) {
 		r.deleteEntry(c.digest)
 		return "", newRegistryError(ErrInvalidPageToken, "invalid new state")
+	}
+	// 身份一致性：旋转后的状态必须绑定与 claim 前相同的 user/workspace/connection，
+	// 防止旋转把 token 迁移到其他主体（Codex 审查）。
+	if newState.UserID != e.state.UserID || newState.WorkspaceID != e.state.WorkspaceID ||
+		newState.ConnectionID != e.state.ConnectionID {
+		r.deleteEntry(c.digest)
+		return "", newRegistryError(ErrInvalidPageToken, "rotated state identity mismatch")
 	}
 	cp := newState.deepCopy()
 	// TTL 为绝对过期时间，自 token 创建起算（ADR-015 §6），旋转不得重新计算

@@ -45,13 +45,6 @@ func fuzzState(seed string) *ContinuationState {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // invariantsHeld 校验 registry 计数/字节配额与 entries 一致（含锁）。
 func invariantsHeld(r *Registry) bool {
 	r.mu.Lock()
