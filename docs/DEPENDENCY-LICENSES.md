@@ -37,6 +37,19 @@
 | node:22-alpine | Web 构建/dev | MIT |
 | nginx:1.28-alpine | Web 生产 | BSD-style |
 
+## Web npm dependencies (`apps/web`)
+
+| Package | Version | License | Type |
+|---|---|---|---|
+| monaco-editor | 0.56.0 | MIT | direct runtime (WEB-37) |
+| @playwright/test | 1.62.1 | Apache-2.0 | direct development/test (WEB-37) |
+| @testing-library/react | 16.3.2 | MIT | direct development/test (WEB-37) |
+| @testing-library/user-event | 14.6.3 | MIT | direct development/test (WEB-37) |
+| jsdom | 30.0.1 | MIT | direct development/test (WEB-37) |
+| vitest | 4.1.10 | MIT | direct development/test (WEB-37) |
+
+> This WEB-37 section supersedes the earlier P0 status note that marked npm dependencies as pending.
+
 ## 合规说明
 
 - Go 依赖均与 AL2.0 兼容（MIT/BSD/Apache 2.0/MPL-2.0）。

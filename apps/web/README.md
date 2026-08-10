@@ -1,6 +1,6 @@
 # Web 前端
 
-这里是 WebDB 的 React + TypeScript 前端。P0-06 提供最小工作台：已授权连接和 Schema 浏览、Monaco SQL 编辑器、服务端只读执行、单向分页与审计 receipt 展示。前端只调用受限 API，绝不保存数据库密码或直接连接目标数据库。
+这里是 WebDB 的 React + TypeScript 前端。WEB-37（P0-06E）提供最小工作台：已授权连接和 Schema 浏览、Monaco SQL 编辑器、服务端只读执行、单向分页与审计 receipt 展示。前端只调用受限 API，绝不保存数据库密码或直接连接目标数据库。
 
 ## 运行方式与端口
 

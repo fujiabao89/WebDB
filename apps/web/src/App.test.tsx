@@ -1,8 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { editor as monacoEditor } from "monaco-editor/editor/editor.api";
 import { describe, expect, it, vi } from "vitest";
 import { App } from "./App";
-import type { WebDbApi } from "./api/client";
+import { ApiError, type WebDbApi } from "./api/client";
 import type { ConnectionDto } from "./api/contracts";
 
 const sensitiveResponseCanary = "synthetic-secret-ref-must-not-render";
@@ -43,6 +44,14 @@ const api: WebDbApi = {
 };
 
 describe("P0 workbench", () => {
+  it("creates Monaco with SQL edits made before its asynchronous module load completes", async () => {
+    render(<App api={api} workspaceId="workspace-1" />);
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT current_value" } });
+
+    await waitFor(() => expect(monacoEditor.create).toHaveBeenCalled());
+    expect(vi.mocked(monacoEditor.create).mock.calls.at(-1)?.[1]).toMatchObject({ value: "SELECT current_value" });
+  });
+
   it("supports the keyboard connection → schema → run flow and renders wire values without sensitive fields", async () => {
     const user = userEvent.setup();
     render(<App api={api} workspaceId="workspace-1" />);
@@ -63,7 +72,7 @@ describe("P0 workbench", () => {
   });
 
   it("announces Retry-After and keeps the SQL available after a 429", async () => {
-    const rateLimited: WebDbApi = { ...api, execute: vi.fn().mockRejectedValue({ code: "rate_limited", status: 429, retryAfterSeconds: 12, message: "rate_limited" }) };
+    const rateLimited: WebDbApi = { ...api, execute: vi.fn().mockRejectedValue(new ApiError("rate_limited", 429, "rate_limited", 12)) };
     render(<App api={rateLimited} workspaceId="workspace-1" />);
     await userEvent.setup().click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
     fireEvent.click(screen.getByRole("button", { name: /运行查询/ }));
@@ -78,6 +87,18 @@ describe("P0 workbench", () => {
 
     expect(await screen.findByText("当前没有可用连接。" )).toBeTruthy();
     expect(screen.getByRole("button", { name: /运行查询/ })).toHaveProperty("disabled", true);
+  });
+
+  it("shows a safe 403 when a different workspace cannot load connections", async () => {
+    const crossWorkspace: WebDbApi = {
+      ...api,
+      connections: vi.fn().mockRejectedValue(new ApiError("forbidden", 403, "forbidden")),
+    };
+    render(<App api={crossWorkspace} workspaceId="other-workspace" />);
+
+    expect(await screen.findByText("无权访问")).toBeTruthy();
+    expect(screen.queryByRole("treeitem", { name: /Synthetic PostgreSQL/ })).toBeNull();
+    expect(crossWorkspace.connections).toHaveBeenCalledTimes(1);
   });
 
   it("retries failed connection and schema loads without reloading the page", async () => {
@@ -125,7 +146,26 @@ describe("P0 workbench", () => {
     expect(await screen.findByRole("treeitem", { name: "commerce" })).toBeTruthy();
   });
 
-  it("prevents duplicate runs and reports local cancellation without waiting for a server response", async () => {
+  it("prevents a keyboard shortcut from submitting a duplicate running query", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const running: WebDbApi = {
+      ...api,
+      execute: vi.fn((_workspaceId, _request, signal) => new Promise<never>((_, reject) => {
+        capturedSignal = signal;
+        signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")));
+      })),
+    };
+    const user = userEvent.setup();
+    render(<App api={running} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+
+    fireEvent.click(screen.getByRole("button", { name: /运行查询/ }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { key: "Enter", ctrlKey: true });
+    expect(running.execute).toHaveBeenCalledTimes(1);
+    expect(capturedSignal?.aborted).toBe(false);
+  });
+
+  it("reports local cancellation without waiting for a server response", async () => {
     let capturedSignal: AbortSignal | undefined;
     const cancelled: WebDbApi = {
       ...api,
@@ -138,17 +178,36 @@ describe("P0 workbench", () => {
     render(<App api={cancelled} workspaceId="workspace-1" />);
     await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
 
-    const run = screen.getByRole("button", { name: /运行查询/ });
-    fireEvent.click(run);
-    fireEvent.click(run);
-    expect(cancelled.execute).toHaveBeenCalledTimes(1);
+    fireEvent.click(screen.getByRole("button", { name: /运行查询/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /取消查询/ }));
 
     expect(capturedSignal?.aborted).toBe(true);
     expect(await screen.findByText(/查询已取消/)).toBeTruthy();
   });
 
+  it("retains already audited results when a later page fails without withholding them", async () => {
+    const pageFailure: WebDbApi = {
+      ...api,
+      execute: vi.fn().mockResolvedValue({
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["first-page"]], returned_rows: 1, total_returned: 2 },
+        meta: { page: { page_size: 100, has_more: true, next_page_token: "synthetic-token" }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+      }),
+      nextPage: vi.fn().mockRejectedValue(new ApiError("connection_unavailable", 503, "connection_unavailable")),
+    };
+    const user = userEvent.setup();
+    render(<App api={pageFailure} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    await user.click(await screen.findByRole("button", { name: /加载下一页/ }));
+
+    expect(await screen.findByText("连接暂不可用")).toBeTruthy();
+    expect(screen.getByText("first-page")).toBeTruthy();
+  });
+
   it.each([
     ["statement_not_allowed"],
+    ["multiple_statements"],
+    ["forbidden"],
     ["connection_unavailable"],
     ["query_timeout"],
   ])("shows a safe server decision for %s", async (code) => {

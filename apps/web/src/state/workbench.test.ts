@@ -41,4 +41,19 @@ describe("workbench state machine", () => {
     expect(invalid.result).toEqual(withPage.result);
     expect(auditFailed.result).toBeUndefined();
   });
+
+  it.each(["statement_not_allowed", "multiple_statements", "forbidden"])("retains prior audited data as non-successful output after %s", (code) => {
+    const succeeded = workbenchReducer(initialWorkbenchState, {
+      type: "executionSucceeded",
+      result: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+      page: { page_size: 100, has_more: false },
+      audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" },
+    });
+    const failed = workbenchReducer(succeeded, { type: "executionFailed", code, message: code });
+
+    expect(failed.execution.status).toBe("failed");
+    expect(failed.error?.code).toBe(code);
+    expect(failed.result).toEqual(succeeded.result);
+    expect(failed.nextPageToken).toBeUndefined();
+  });
 });

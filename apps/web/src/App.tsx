@@ -106,8 +106,10 @@ function SqlEditor({ engine, value, onChange, onRun }: { engine?: DatabaseEngine
   } | undefined>(undefined);
   const changeRef = useRef(onChange);
   const runRef = useRef(onRun);
+  const valueRef = useRef(value);
   changeRef.current = onChange;
   runRef.current = onRun;
+  valueRef.current = value;
 
   useEffect(() => {
     let active = true;
@@ -129,7 +131,7 @@ function SqlEditor({ engine, value, onChange, onRun }: { engine?: DatabaseEngine
         },
       });
       const instance = monaco.editor.create(container.current, {
-        value,
+        value: valueRef.current,
         language: engine === "mysql" ? "mysql" : "pgsql",
         theme: "webdb-linear",
         automaticLayout: true,
@@ -415,7 +417,7 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
   };
 
   const executionError = state.execution.status === "failed" ? state.error : undefined;
-  const retainResultAfterError = executionError?.code === "invalid_page_token" && state.result;
+  const retainResultAfterError = executionError !== undefined && executionError.code !== "audit_failed" && state.result;
 
   return (
     <div className="workbench">

@@ -10,7 +10,9 @@ const audit = {
 
 test("P0 keyboard workflow uses the DTO seam, cancels, pages, and renders the desktop workbench", async ({ page }) => {
   let executionCount = 0;
-  let releaseSecondExecution: (() => void) | undefined;
+  let releaseSecondExecution: () => void = () => undefined;
+  let notifySecondExecutionStarted: () => void = () => undefined;
+  const secondExecutionStarted = new Promise<void>((resolve) => { notifySecondExecutionStarted = resolve; });
   let cancelSecondExecution = false;
   const browserErrors: string[] = [];
   page.on("pageerror", (error) => browserErrors.push(error.message));
@@ -26,11 +28,12 @@ test("P0 keyboard workflow uses the DTO seam, cancels, pages, and renders the de
     if (path.endsWith("/executions")) {
       executionCount += 1;
       if (executionCount === 2) {
+        notifySecondExecutionStarted();
         await new Promise<void>((resolve) => { releaseSecondExecution = resolve; });
         if (cancelSecondExecution) return route.abort("failed");
       }
       return json({
-        data: { columns: [{ name: "id", wire_type: "uuid" }], rows: [["9f7494b8-0c94-46ac-b7f6-1ed403d56b5e"]], returned_rows: 1, total_returned: 2 },
+        data: { columns: [{ name: "id", wire_type: "uuid" }], rows: [[executionCount === 2 ? "second-execution-result" : "9f7494b8-0c94-46ac-b7f6-1ed403d56b5e"]], returned_rows: 1, total_returned: 2 },
         meta: { page: { page_size: 100, has_more: true, next_page_token: "synthetic-memory-only-token" }, audit },
       });
     }
@@ -63,7 +66,6 @@ test("P0 keyboard workflow uses the DTO seam, cancels, pages, and renders the de
   await page.getByRole("button", { name: /加载下一页/ }).click();
   await expect(page.getByText("e2e-second-page")).toBeVisible();
   await expect(page.getByText("synthetic-memory-only-token")).toHaveCount(0);
-  expect(executionCount).toBe(1);
 
   await page.getByRole("tab", { name: "消息" }).click();
   await expect(page.getByLabel("服务端审计回执")).toContainText("audit-synthetic-02");
@@ -75,10 +77,11 @@ test("P0 keyboard workflow uses the DTO seam, cancels, pages, and renders the de
 
   await page.locator(".monaco-editor .view-lines").click();
   await page.keyboard.press("Control+Enter");
+  await secondExecutionStarted;
   await expect(page.getByRole("button", { name: /取消查询/ })).toBeVisible();
   await page.getByRole("button", { name: /取消查询/ }).click();
-  await expect(page.getByText(/查询已取消/)).toBeVisible();
   cancelSecondExecution = true;
-  releaseSecondExecution?.();
-  expect(executionCount).toBe(2);
+  releaseSecondExecution();
+  await expect(page.getByText(/查询已取消/)).toBeVisible();
+  await expect(page.getByText("second-execution-result")).toHaveCount(0);
 });

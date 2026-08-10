@@ -37,6 +37,7 @@ export interface ApiClientOptions {
 }
 
 type JsonObject = Record<string, unknown>;
+type DataArrayEnvelope = { data: unknown[] };
 
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -57,6 +58,20 @@ function errorEnvelope(value: unknown): ErrorEnvelopeDto | undefined {
   return { error: { code: value.error.code, message: value.error.message } };
 }
 
+function dataArrayEnvelope(value: unknown): value is DataArrayEnvelope {
+  return isRecord(value) && Array.isArray(value.data);
+}
+
+function queryResponse(value: unknown): value is QueryResponseDto {
+  return isRecord(value)
+    && isRecord(value.data)
+    && Array.isArray(value.data.columns)
+    && Array.isArray(value.data.rows)
+    && isRecord(value.meta)
+    && isRecord(value.meta.page)
+    && isRecord(value.meta.audit);
+}
+
 async function json(response: Response): Promise<unknown> {
   try {
     return await response.json();
@@ -70,7 +85,7 @@ async function json(response: Response): Promise<unknown> {
  * persists opaque pagination handles; callers own their in-memory lifecycle.
  */
 export function createApiClient({ baseUrl, fetcher = fetch }: ApiClientOptions): WebDbApi {
-  const request = async <T>(path: string, init: RequestInit): Promise<T> => {
+  const request = async <T>(path: string, init: RequestInit, isExpectedPayload: (value: unknown) => value is T): Promise<T> => {
     const response = await fetcher(`${baseUrl}${path}`, init);
     const payload = await json(response);
     if (!response.ok) {
@@ -79,45 +94,47 @@ export function createApiClient({ baseUrl, fetcher = fetch }: ApiClientOptions):
         envelope?.error.code ?? "internal_error",
         response.status,
         envelope?.error.message ?? "internal_error",
-        response.status === 429 ? parseRetryAfter(response.headers.get("Retry-After")) : undefined,
+        parseRetryAfter(response.headers.get("Retry-After")),
       );
     }
-    return payload as T;
+    if (!isExpectedPayload(payload)) throw new ApiError("internal_error", response.status, "internal_error");
+    return payload;
   };
 
-  const get = <T>(path: string, signal?: AbortSignal) => request<T>(path, { method: "GET", signal });
-  const post = <T>(path: string, body: unknown, signal?: AbortSignal) =>
+  const get = <T>(path: string, signal: AbortSignal | undefined, isExpectedPayload: (value: unknown) => value is T) =>
+    request<T>(path, { method: "GET", signal }, isExpectedPayload);
+  const post = <T>(path: string, body: unknown, signal: AbortSignal | undefined, isExpectedPayload: (value: unknown) => value is T) =>
     request<T>(path, {
       method: "POST",
       signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
-    });
+    }, isExpectedPayload);
 
   return {
     async connections(workspaceId, signal) {
-      const response = await get<{ data: ConnectionDto[] }>(`/workspaces/${urlPart(workspaceId)}/connections`, signal);
-      return response.data;
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections`, signal, dataArrayEnvelope);
+      return response.data as ConnectionDto[];
     },
     async schemas(workspaceId, connectionId, signal) {
-      const response = await get<{ data: SchemaDto[] }>(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/schemas`, signal);
-      return response.data;
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/schemas`, signal, dataArrayEnvelope);
+      return response.data as SchemaDto[];
     },
     async tables(workspaceId, connectionId, schema, signal) {
       const query = new URLSearchParams({ schema });
-      const response = await get<{ data: TableDto[] }>(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/tables?${query}`, signal);
-      return response.data;
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/tables?${query}`, signal, dataArrayEnvelope);
+      return response.data as TableDto[];
     },
     async columns(workspaceId, connectionId, schema, table, signal) {
       const query = new URLSearchParams({ schema, table });
-      const response = await get<{ data: ColumnDto[] }>(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/columns?${query}`, signal);
-      return response.data;
+      const response = await get(`/workspaces/${urlPart(workspaceId)}/connections/${urlPart(connectionId)}/columns?${query}`, signal, dataArrayEnvelope);
+      return response.data as ColumnDto[];
     },
     execute(workspaceId, body, signal) {
-      return post<QueryResponseDto>(`/workspaces/${urlPart(workspaceId)}/executions`, body, signal);
+      return post(`/workspaces/${urlPart(workspaceId)}/executions`, body, signal, queryResponse);
     },
     nextPage(workspaceId, token, signal) {
-      return post<QueryResponseDto>(`/workspaces/${urlPart(workspaceId)}/query-pages`, { next_page_token: token }, signal);
+      return post(`/workspaces/${urlPart(workspaceId)}/query-pages`, { next_page_token: token }, signal, queryResponse);
     },
   };
 }
