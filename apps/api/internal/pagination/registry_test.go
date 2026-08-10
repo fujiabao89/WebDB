@@ -569,6 +569,25 @@ func TestRevokeNoOpsForClaimedOrMissing(t *testing.T) {
 	}
 }
 
+func TestByteQuotaAccountsForNonStringMapKeys(t *testing.T) {
+	t.Parallel()
+	// [4096]byte 数组键的 map：按元素递归计费，不能仅按反射显示字符串记账而绕过配额
+	// （Codex 审查：64 个 [4096]byte 键实际保留 256 KiB，曾只计 2490 字节）。
+	r := newTestRegistry(t, func(c *Config) { c.MaxStateBytes = 64 << 10 })
+	st := testState(t, "u1")
+	keys := make(map[[4096]byte]int)
+	var zero [4096]byte
+	for i := 0; i < 64; i++ {
+		zero[0] = byte(i)
+		keys[zero] = i
+		zero[0] = 0
+	}
+	st.Args = []any{keys}
+	if _, err := r.Create(st); err == nil {
+		t.Fatal("64x[4096]byte map keys must be rejected by per-state byte quota")
+	}
+}
+
 func TestByteQuotaAccountsForSortPlanSpecs(t *testing.T) {
 	t.Parallel()
 	// 宽计划：大量排序列的 VerifiedSortPlan 必须计入 per-state 字节配额（Codex P2），

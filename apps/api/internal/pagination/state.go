@@ -109,14 +109,24 @@ func retainedBytes(v any) int64 {
 				n += retainedBytes(rv.Index(j).Interface())
 			}
 			return n
+		case reflect.Array:
+			// 数组按元素递归计费（如 [4096]byte），避免仅按反射显示字符串记账造成配额绕过
+			// （Codex 审查：非 string 键 map 曾以 64 个 [4096]byte 键只计 2490 字节）。
+			var n int64 = 16
+			for j := 0; j < rv.Len(); j++ {
+				n += retainedBytes(rv.Index(j).Interface())
+			}
+			return n
 		case reflect.Map:
 			var n int64 = 32
 			iter := rv.MapRange()
 			for iter.Next() {
-				n += int64(len(iter.Key().String())) + 8 + retainedBytes(iter.Value().Interface())
+				// 键与值均按具体类型递归计费（非反射显示字符串），数组/标量走保守估计。
+				n += 8 + retainedBytes(iter.Key().Interface()) + retainedBytes(iter.Value().Interface())
 			}
 			return n
 		default:
+			// 未知类型按 64 字节保守下限计费（fail-closed 低估计；可安全覆盖的数组/映射已递归）。
 			return 64
 		}
 	}

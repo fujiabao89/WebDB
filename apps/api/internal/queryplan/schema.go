@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -161,9 +162,8 @@ func computeSchemaGeneration(m *TableMetadata) string {
 	})
 	for _, c := range cols {
 		writeStr(c.Name)
-		var ord [4]byte
-		binary.BigEndian.PutUint32(ord[:], uint32(c.Ordinal))
-		h.Write(ord[:])
+		// Ordinal 以完整整数规范文本写入（长度前缀、确定性字节序），避免 uint32 截断。
+		writeStr(strconv.Itoa(c.Ordinal))
 		var flags [1]byte
 		if c.Nullable {
 			flags[0] = 1
