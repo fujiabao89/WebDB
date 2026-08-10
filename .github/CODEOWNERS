@@ -1,15 +1,15 @@
-# 单人维护阶段：本文件用于路径责任归属和未来团队扩展；main 的 ruleset 不要求 Code Owner 审批。
-# 团队建立后，将 @fujiabao89 替换/补充为 GitHub Teams，并在 ruleset 中重新启用 Code Owner 审批。
-* @fujiabao89
+# 双账号维护阶段：两个账号共同负责代码路径。
+# main 启用 Code Owner 强制审批时，PR 必须由另一个有效 Code Owner 审批。
+* @fujiabao89 @AllenShelly-1229
 
 # 协作与仓库治理
-/AGENTS.md @fujiabao89
-/CLAUDE.md @fujiabao89
-/.github/ @fujiabao89
-/docs/ @fujiabao89
-/webdb-design-draft.md @fujiabao89
+/AGENTS.md @fujiabao89 @AllenShelly-1229
+/CLAUDE.md @fujiabao89 @AllenShelly-1229
+/.github/ @fujiabao89 @AllenShelly-1229
+/docs/ @fujiabao89 @AllenShelly-1229
+/webdb-design-draft.md @fujiabao89 @AllenShelly-1229
 
 # WebDB 高风险区域（代码落地后生效）
-/apps/api/ @fujiabao89
-/packages/contracts/ @fujiabao89
-/deploy/ @fujiabao89
+/apps/api/ @fujiabao89 @AllenShelly-1229
+/packages/contracts/ @fujiabao89 @AllenShelly-1229
+/deploy/ @fujiabao89 @AllenShelly-1229
