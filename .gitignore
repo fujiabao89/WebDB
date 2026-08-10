@@ -43,6 +43,8 @@ docker-compose.override.yml
 # Test coverage
 coverage/
 .nyc_output/
+test-results/
+playwright-report/
 
 # Go
 *.exe

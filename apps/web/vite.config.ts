@@ -1,4 +1,4 @@
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
 
 export default defineConfig({
@@ -8,15 +8,25 @@ export default defineConfig({
     strictPort: true,
     host: "0.0.0.0",
     proxy: {
-      "/api": {
+      "/api/health": {
         target: "http://api:8080",
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
+      },
+      "/api/v1": {
+        target: "http://api:8080",
+        changeOrigin: true,
       },
     },
   },
   build: {
     sourcemap: true,
     target: "es2024",
+  },
+  test: {
+    environment: "jsdom",
+    setupFiles: ["./src/test/setup.ts"],
+    clearMocks: true,
+    exclude: ["e2e/**", "node_modules/**", "dist/**"],
   },
 });

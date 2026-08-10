@@ -4,6 +4,6 @@ import { App } from "./App";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <App />
+    <App workspaceId={import.meta.env.VITE_WEBDB_WORKSPACE_ID ?? ""} />
   </StrictMode>,
 );
