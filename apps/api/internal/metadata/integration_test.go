@@ -136,6 +136,142 @@ func setupFull(t *testing.T) (*sql.DB, *PGStore, *User, *Workspace, *WorkspaceMe
 	return db, store, u, ws, m, env, conn, cleanup
 }
 
+func boolPtr(b bool) *bool { return &b }
+
+// TestListConnectionsAllowed_FiltersAndBounds 验证连接级授权过滤 SQL（WEB-36 P1-2）：
+// 仅 allow_read=true 的连接返回；allow_read=false 与缺失策略的连接排除；LIMIT 参数化生效。
+// 该查询是安全相关过滤，防止后续列默认值/NULL 语义漂移。
+func TestListConnectionsAllowed_FiltersAndBounds(t *testing.T) {
+	_, store, u, ws, _, _, _, cleanup := setupFull(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	mkConn := func(name string) *Connection {
+		env := &CredentialEnvelope{
+			WorkspaceID: ws.ID, SecretRef: uuid.New(), Version: 1,
+			Ciphertext: []byte{1}, DataNonce: []byte{2}, WrappedDEK: []byte{3}, WrapNonce: []byte{4},
+			EnvelopeSuite: "aes256-gcm-hkdf-sha256", KEKVersion: 1,
+		}
+		if err := store.CreateEnvelope(ctx, env); err != nil {
+			t.Fatalf("创建信封失败: %v", err)
+		}
+		c := &Connection{
+			WorkspaceID: ws.ID, Name: name, Engine: EnginePostgreSQL,
+			Host: "localhost", Port: 5432, Database: "db", Environment: EnvDevelopment,
+			SecretRef: env.SecretRef, SecretVersion: 1, CreatedBy: u.ID,
+		}
+		if err := store.CreateConnection(ctx, c); err != nil {
+			t.Fatalf("创建连接失败: %v", err)
+		}
+		return c
+	}
+
+	allowed1 := mkConn("allowed-1")
+	allowed2 := mkConn("allowed-2")
+	denied := mkConn("denied")
+	noPolicy := mkConn("no-policy")
+
+	// 策略：allowed 两个 true，denied false；noPolicy 不建策略（缺失）。
+	for _, c := range []*Connection{allowed1, allowed2} {
+		if err := store.CreatePolicy(ctx, &ConnectionPolicy{WorkspaceID: ws.ID, ConnectionID: c.ID, AllowRead: boolPtr(true), MaxRows: 1000, StatementTimeoutMs: 30000}); err != nil {
+			t.Fatalf("创建 allow 策略失败: %v", err)
+		}
+	}
+	if err := store.CreatePolicy(ctx, &ConnectionPolicy{WorkspaceID: ws.ID, ConnectionID: denied.ID, AllowRead: boolPtr(false), MaxRows: 1000, StatementTimeoutMs: 30000}); err != nil {
+		t.Fatalf("创建 deny 策略失败: %v", err)
+	}
+
+	conns, err := store.ListConnectionsAllowed(ctx, ws.ID, 10)
+	if err != nil {
+		t.Fatalf("ListConnectionsAllowed: %v", err)
+	}
+	ids := make(map[uuid.UUID]bool, len(conns))
+	for _, c := range conns {
+		ids[c.ID] = true
+	}
+	if !ids[allowed1.ID] || !ids[allowed2.ID] {
+		t.Fatalf("allow_read=true 连接未返回: %+v", ids)
+	}
+	if ids[denied.ID] {
+		t.Fatalf("allow_read=false 连接不应返回")
+	}
+	if ids[noPolicy.ID] {
+		t.Fatalf("缺失策略连接不应返回")
+	}
+	// setupFull 创建的原连接无策略，也不应返回 → 总数恰为 2。
+	if len(conns) != 2 {
+		t.Fatalf("got %d connections, want 2 (only allow_read=true)", len(conns))
+	}
+
+	// 跨工作区隔离：第二个工作区存在 allow_read=true 连接时，不得出现在本工作区
+	// ws.ID 的结果中，且本工作区结果数保持不变。
+	u2 := &User{Email: "other-ws@example.com", PasswordHash: "hash"}
+	if err := store.CreateUser(ctx, u2); err != nil {
+		t.Fatalf("创建第二个用户失败: %v", err)
+	}
+	ws2 := &Workspace{Name: "other-ws"}
+	if err := store.CreateWorkspace(ctx, ws2); err != nil {
+		t.Fatalf("创建第二个工作区失败: %v", err)
+	}
+	if err := store.AddMember(ctx, &WorkspaceMember{WorkspaceID: ws2.ID, UserID: u2.ID, Role: RoleOwner}); err != nil {
+		t.Fatalf("添加第二个工作区成员失败: %v", err)
+	}
+	env2 := &CredentialEnvelope{
+		WorkspaceID: ws2.ID, SecretRef: uuid.New(), Version: 1,
+		Ciphertext: []byte{1}, DataNonce: []byte{2}, WrappedDEK: []byte{3}, WrapNonce: []byte{4},
+		EnvelopeSuite: "aes256-gcm-hkdf-sha256", KEKVersion: 1,
+	}
+	if err := store.CreateEnvelope(ctx, env2); err != nil {
+		t.Fatalf("创建第二个信封失败: %v", err)
+	}
+	conn2 := &Connection{
+		WorkspaceID: ws2.ID, Name: "other-allowed", Engine: EnginePostgreSQL,
+		Host: "localhost", Port: 5432, Database: "db", Environment: EnvDevelopment,
+		SecretRef: env2.SecretRef, SecretVersion: 1, CreatedBy: u2.ID,
+	}
+	if err := store.CreateConnection(ctx, conn2); err != nil {
+		t.Fatalf("创建第二个连接失败: %v", err)
+	}
+	if err := store.CreatePolicy(ctx, &ConnectionPolicy{WorkspaceID: ws2.ID, ConnectionID: conn2.ID, AllowRead: boolPtr(true), MaxRows: 1000, StatementTimeoutMs: 30000}); err != nil {
+		t.Fatalf("创建第二个工作区 allow 策略失败: %v", err)
+	}
+
+	again, err := store.ListConnectionsAllowed(ctx, ws.ID, 10)
+	if err != nil {
+		t.Fatalf("ListConnectionsAllowed(again): %v", err)
+	}
+	againIDs := make(map[uuid.UUID]bool, len(again))
+	for _, c := range again {
+		againIDs[c.ID] = true
+	}
+	if againIDs[conn2.ID] {
+		t.Fatal("第二个工作区的连接不应出现在本工作区结果中")
+	}
+	if len(again) != 2 {
+		t.Fatalf("got %d connections, want 2 (cross-workspace must not leak)", len(again))
+	}
+
+	// LIMIT 参数化生效：limit=1 只返回 1 行。
+	limited, err := store.ListConnectionsAllowed(ctx, ws.ID, 1)
+	if err != nil {
+		t.Fatalf("ListConnectionsAllowed(limit=1): %v", err)
+	}
+	if len(limited) != 1 {
+		t.Fatalf("got %d, want 1 (LIMIT)", len(limited))
+	}
+
+	// F4：limit<=0 必须钳制为 1，不允许 PG LIMIT -1（等价无限制）或 LIMIT 0（返回空）。
+	for _, bad := range []int{0, -1} {
+		got, err := store.ListConnectionsAllowed(ctx, ws.ID, bad)
+		if err != nil {
+			t.Fatalf("ListConnectionsAllowed(limit=%d): %v", bad, err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("limit=%d got %d rows, want 1 (clamped)", bad, len(got))
+		}
+	}
+}
+
 // ---- migration 测试 --------------------------------------------------------
 
 func TestMigration_UpDownUpUp_NoSideEffects(t *testing.T) {

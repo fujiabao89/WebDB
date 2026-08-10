@@ -334,6 +334,43 @@ func (s *PGStore) ListConnections(ctx context.Context, wsID uuid.UUID) ([]Connec
 	return conns, rows.Err()
 }
 
+// ListConnectionsAllowed 列出工作区内 AllowRead=true 的连接（连接级授权过滤，WEB-36）。
+// 连接列表要求"缺失或拒绝策略的连接不出现"，因此将过滤下沉到 SQL（JOIN
+// connection_policies WHERE allow_read=true），并用 LIMIT 保证集合有界（P1-2）。
+// limit 应传 MaxConnections+1，由调用方检测超限（返回行数 > MaxConnections → result_too_large）。
+func (s *PGStore) ListConnectionsAllowed(ctx context.Context, wsID uuid.UUID, limit int) ([]Connection, error) {
+	// F4：PG 中 LIMIT -1 等价于无限制、LIMIT 0 返回空；limit<=0 钳制为 1，保证集合始终有界。
+	if limit < 1 {
+		limit = 1
+	}
+	const q = `SELECT c.id, c.workspace_id, c.name, c.engine, c.host, c.port, c.database,
+		c.environment, c.secret_ref, c.secret_version, c.created_by,
+		c.created_at, c.updated_at
+		FROM connections c
+		JOIN connection_policies p ON p.workspace_id = c.workspace_id AND p.connection_id = c.id
+		WHERE c.workspace_id = $1 AND p.allow_read = true
+		ORDER BY c.created_at DESC LIMIT $2`
+	rows, err := s.DB.QueryContext(ctx, q, wsID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var conns []Connection
+	for rows.Next() {
+		var c Connection
+		if err := rows.Scan(
+			&c.ID, &c.WorkspaceID, &c.Name, &c.Engine,
+			&c.Host, &c.Port, &c.Database, &c.Environment,
+			&c.SecretRef, &c.SecretVersion, &c.CreatedBy,
+			&c.CreatedAt, &c.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		conns = append(conns, c)
+	}
+	return conns, rows.Err()
+}
+
 func (s *PGStore) UpdateConnection(ctx context.Context, wsID uuid.UUID, c *Connection) error {
 	// 复用共享 SQL（CodeRabbit-9）：与原子路径 updateConnectionExec 同一份
 	// active-envelope FOR KEY SHARE 语义与 updated_at 单调递增表达式。

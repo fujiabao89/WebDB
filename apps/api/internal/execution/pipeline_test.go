@@ -11,6 +11,7 @@ import (
 	"github.com/fujiabao89/webdb/internal/adapter"
 	"github.com/fujiabao89/webdb/internal/credentials"
 	"github.com/fujiabao89/webdb/internal/metadata"
+	"github.com/fujiabao89/webdb/internal/queryplan"
 	"github.com/google/uuid"
 )
 
@@ -85,17 +86,60 @@ func (f *fakeAdapterClient) Get(_ context.Context, cfg adapter.ConnectConfig) (A
 }
 
 type fakeAdapterHandle struct {
-	result   *adapter.QueryResult
-	err      error
-	calls    int
-	releases int
-	requests []adapter.FirstPageRequest
+	result           *adapter.QueryResult
+	nextResult       *adapter.QueryResult
+	err              error
+	calls            int
+	nextCalls        int
+	releases         int
+	requests         []adapter.FirstPageRequest
+	nextPlans        []queryplan.VerifiedNextPagePlan
+	meta             *queryplan.TableMetadata
+	metaErr          error
+	metaSchema       string
+	metaTable        string
+	currentSchema    string
+	currentSchemaErr error
+	poolGeneration   int64
+	panicNextPage    bool // 注入 NextPage panic，验证 claim 的 panic 兜底
 }
 
 func (f *fakeAdapterHandle) Query(_ context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error) {
 	f.calls++
 	f.requests = append(f.requests, req)
 	return f.result, f.err
+}
+
+func (f *fakeAdapterHandle) NextPage(_ context.Context, _ adapter.UserWorkspaceScope, plan queryplan.VerifiedNextPagePlan) (*adapter.QueryResult, error) {
+	f.nextCalls++
+	f.nextPlans = append(f.nextPlans, plan)
+	if f.panicNextPage {
+		panic("injected panic in adapter NextPage")
+	}
+	return f.nextResult, f.err
+}
+
+func (f *fakeAdapterHandle) LoadTableMetadata(_ context.Context, schema, table string) (*queryplan.TableMetadata, error) {
+	f.metaSchema = schema
+	f.metaTable = table
+	if f.meta != nil && f.metaErr == nil {
+		cp := *f.meta
+		cp.Schema = schema
+		cp.Table = table
+		return &cp, nil
+	}
+	return f.meta, f.metaErr
+}
+
+func (f *fakeAdapterHandle) ResolveQualifiedTable(_ context.Context, _ string) (string, error) {
+	return f.currentSchema, f.currentSchemaErr
+}
+
+func (f *fakeAdapterHandle) PoolGeneration() int64 {
+	if f.poolGeneration == 0 {
+		return 1
+	}
+	return f.poolGeneration
 }
 
 func (f *fakeAdapterHandle) Release() {
@@ -149,7 +193,7 @@ func validPipelineInputs() (
 		ConnectionID:       conn.ID,
 		AllowRead:          boolPtr(true),
 		StatementTimeoutMs: 5_000,
-		MaxRows:            250,
+		MaxRows:            100, // 默认 PageSize=100 → 单页受限，不触发分页证明
 	}
 	resolver := &fakeResolver{
 		payload: credentials.CredentialPayload{User: "synthetic_user", Password: "synthetic_password"},
@@ -329,8 +373,8 @@ func TestPipelineUsesPolicyBoundSinglePageAndPersistentConfigRevision(t *testing
 		t.Fatalf("query requests = %d, want 2", len(client.handle.requests))
 	}
 	for i, queryReq := range client.handle.requests {
-		if len(queryReq.SortKeys) != 0 {
-			t.Fatalf("request #%d sort keys = %+v, want none without a verified unique key", i+1, queryReq.SortKeys)
+		if queryReq.SortPlan != nil {
+			t.Fatalf("request #%d sort plan set, want none without a verified unique key", i+1)
 		}
 		if queryReq.MaxRows != policy.MaxRows || queryReq.PageSize != policy.MaxRows {
 			t.Fatalf(
@@ -377,6 +421,11 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 			name: "config conflict",
 			err:  &adapter.AdapterError{Code: adapter.ErrConfigConflict},
 			want: ErrConnectionConfigConflict,
+		},
+		{
+			name: "invalid page token",
+			err:  &adapter.AdapterError{Code: adapter.ErrInvalidPageToken},
+			want: ErrInvalidPageToken,
 		},
 		{
 			name: "wrapped deadline",
