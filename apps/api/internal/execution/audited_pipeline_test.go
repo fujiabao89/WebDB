@@ -405,8 +405,8 @@ func TestAuditedExecute_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionTimeout {
-		t.Fatalf("error code = %q, want execution_timeout", result.ErrorCode)
+	if result.ErrorCode != ErrQueryTimeout {
+		t.Fatalf("error code = %q, want query_timeout", result.ErrorCode)
 	}
 	if result.AdapterCalled != true {
 		t.Fatal("adapter should have been called")
@@ -452,8 +452,8 @@ func TestAuditedExecute_Cancelled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionCancelled {
-		t.Fatalf("error code = %q, want execution_cancelled", result.ErrorCode)
+	if result.ErrorCode != ErrQueryCancelled {
+		t.Fatalf("error code = %q, want query_cancelled", result.ErrorCode)
 	}
 
 	updates := txStore.allUpdatedExecs()
@@ -491,8 +491,8 @@ func TestAuditedExecute_CancelledContextStillPersists(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionCancelled {
-		t.Fatalf("error code = %q, want execution_cancelled", result.ErrorCode)
+	if result.ErrorCode != ErrQueryCancelled {
+		t.Fatalf("error code = %q, want query_cancelled", result.ErrorCode)
 	}
 
 	updates := txStore.allUpdatedExecs()

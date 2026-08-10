@@ -183,6 +183,8 @@ type ExecuteRequest struct {
 
 // ExecuteResult 执行结果。
 // NextPageToken 仅在需要分页、唯一性证明有效且确有后续页时发放（ADR-014/015）。
+// AuditEventID/AuditState/Outcome 为审计 receipt（P0-06A §11.2 D14）：
+// AuditEventID 仅在 AuditEvent 已持久化并取得 event.ID 后回填。
 type ExecuteResult struct {
 	Decision           sqlpolicy.PolicyDecision
 	CredentialResolved bool
@@ -192,6 +194,11 @@ type ExecuteResult struct {
 	TraceID            string
 	ExecutionID        *uuid.UUID
 	NextPageToken      *string
+	AuditEventID       *uuid.UUID
+	AuditState         string
+	Outcome            metadata.AuditOutcome
+	// Engine 服务端权威引擎（wire_type 派生用；不来自客户端）。
+	Engine Engine
 }
 
 // Execute 按顺序执行：Connection → Policy → Resolver → Adapter，
@@ -234,6 +241,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 
 	serverEngine := Engine(conn.Engine)
+	result.Engine = serverEngine
 	if req.Engine != "" && req.Engine != serverEngine {
 		result.ErrorCode = ErrUnsupportedEngine
 		return result, fmt.Errorf("%w", ErrUnsupportedEngine)
@@ -241,6 +249,13 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	// 阶段 C: SQL Policy（使用服务端权威 Engine）。
 	decision, code := EvaluateSQL(serverEngine, req.SQL, p.mysqlMode)
+	// 占位符检测（P0-06A §8.1）：方言感知 token 级判定，含未绑定原生位置占位符
+	// （PG $N / MySQL ?）一律拒绝 statement_not_allowed，Adapter 0 次访问。
+	// 放行 PG JSONB ?/?|/?& 与字符串/注释内符号。
+	if decision.Allowed && sqlpolicy.HasUnboundPlaceholder(sqlpolicy.Dialect(serverEngine), req.SQL) {
+		decision = sqlpolicy.PolicyDecision{Allowed: false, ReasonCode: sqlpolicy.ReasonNotAllowed}
+		code = ErrStatementNotAllowed
+	}
 	result.Decision = decision
 	statementHash := decision.Classification.StatementHash
 	if statementHash == "" {
@@ -713,6 +728,7 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		result.ErrorCode = ErrInvalidPageToken
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	result.Engine = Engine(conn.Engine)
 
 	// 重新授权：策略（AllowRead/MaxRows/timeout/policy version）。
 	policy, err := p.policyStore.PolicyByConnection(ctx, conn.WorkspaceID, conn.ID)
@@ -831,11 +847,22 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		released = true
 		claim.Abort()
 		result.ErrorCode = mapAdapterError(err)
+		// D11：失败页也创建独立 Execution + AuditEvent（尽力；审计失败不阻断错误返回）。
+		_ = p.auditNextPage(ctx, req, state, conn, result, nil, err)
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	handle.Release()
 	released = true
 	result.Result = queryResult
+
+	// D11（P0-06A §9.4）：每个物理页创建独立 Execution，并在返回页面前持久化
+	// AuditEvent。审计失败 → audit_failed，扣留结果，旧 token 不恢复。
+	if err := p.auditNextPage(ctx, req, state, conn, result, queryResult, nil); err != nil {
+		claim.Abort()
+		result.Result = nil
+		result.ErrorCode = ErrAuditFailed
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
 
 	// Rotate/Complete：旧 token 永不恢复。
 	if queryResult.HasMore && queryResult.TotalReturned < effectiveMaxRows {
@@ -880,6 +907,67 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		}
 	}
 	return result, nil
+}
+
+// auditNextPage 为续页创建独立 Execution 并持久化 AuditEvent（D11，P0-06A §9.4）。
+// 每个实际访问目标库的续页请求都创建独立 Execution，并在返回页面前持久化
+// 对应 AuditEvent；statementHash 从服务端 ContinuationState 恢复（不来自客户端）。
+// 失败页写 failed 审计；成功页写 succeeded 审计。任何审计失败返回错误
+// （调用方返回 audit_failed 并扣留结果；token 不恢复）。
+func (p *Pipeline) auditNextPage(
+	ctx context.Context,
+	req NextPageRequest,
+	state *pagination.ContinuationState,
+	conn *metadata.Connection,
+	result *ExecuteResult,
+	queryResult *adapter.QueryResult,
+	queryErr error,
+) error {
+	// 独立有界审计 context：客户端断开（transport abort）后 request ctx 已取消，
+	// 必须用 WithoutCancel + auditWriteTimeout 终结 Execution 并写审计（D13 义务 3/4）。
+	// 否则 pending Execution 永不终结、E13 丢失（P1-2 审查修复）。
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+
+	traceID := p.newTrace()
+	result.TraceID = traceID
+	now := p.clock()
+
+	// 创建独立 Execution（pending），短事务提交（findings 2/3 语义）。
+	mtx, err := p.txs.Begin(auditCtx)
+	if err != nil {
+		return err
+	}
+	exec := &metadata.Execution{
+		WorkspaceID:   conn.WorkspaceID,
+		ConnectionID:  conn.ID,
+		ActorID:       req.Principal.UserID,
+		StatementHash: state.StatementHash,
+		Status:        metadata.ExecStatusPending,
+		TraceID:       traceID,
+	}
+	if err := mtx.CreateExecution(auditCtx, exec); err != nil {
+		mtx.Rollback()
+		return err
+	}
+	if err := mtx.Commit(); err != nil {
+		return err
+	}
+	result.ExecutionID = &exec.ID
+
+	// 按 queryErr 设置 ErrorCode，交 recordPostExecution 决定终态：
+	// query_cancelled → cancelled + E13；其他失败 → failed + E11；成功 → completed + E10。
+	if queryErr != nil {
+		result.ErrorCode = mapAdapterError(queryErr)
+		// 失败页（查询已失败、无数据泄露）：审计尽力而为，失败不阻断错误返回；
+		// result.ErrorCode 保持原始语义（如 query_cancelled），调用方返回 499（P1-2）。
+		_ = p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
+		return nil
+	}
+	result.ErrorCode = ""
+	// 成功页：审计失败必须返回错误，调用方扣留结果/token 并返回 audit_failed
+	//（ADR-017 §6 / P0-06A §11.2，P1-R1 修复：state=recorded 只能在持久化后返回）。
+	return p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
 }
 
 // ---- 审计与 execution 生命周期辅助（ADR-017）----------------------------------
@@ -1016,7 +1104,14 @@ func (p *Pipeline) recordPreExecution(
 	if err != nil {
 		return err
 	}
-	return mtx.AppendAudit(ctx, event)
+	if err := mtx.AppendAudit(ctx, event); err != nil {
+		return err
+	}
+	// H：执行前失败路径也回填审计 receipt（state=denied/failed）。
+	result.AuditEventID = &event.ID
+	result.Outcome = outcome
+	result.AuditState = auditStateForOutcome(outcome)
+	return nil
 }
 
 // recordCredentialFailure 记录凭证解析失败：E14-E16 + $SECURITY_ALERT，Adapter 调用 0 次。
@@ -1132,13 +1227,13 @@ func (p *Pipeline) recordPostExecution(
 	}
 
 	switch result.ErrorCode {
-	case ErrExecutionCancelled:
-		// E13 cancelled：矩阵不含 environment。
+	case ErrExecutionCancelled, ErrQueryCancelled:
+		// E13 cancelled：矩阵不含 environment。兼容新旧词汇（D15f）。
 		status = metadata.ExecStatusCancelled
 		outcome = metadata.OutcomeCancelled
 		md.ErrorCode = strPtr("query_cancelled")
-	case ErrExecutionTimeout:
-		// E12 timeout：矩阵不含 environment。
+	case ErrExecutionTimeout, ErrQueryTimeout:
+		// E12 timeout：矩阵不含 environment。兼容新旧词汇（D15f）。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeFailed
 		md.ErrorCode = strPtr("query_timeout")
@@ -1217,7 +1312,25 @@ func (p *Pipeline) recordPostExecution(
 	if err != nil {
 		return err
 	}
-	return p.audit.AppendAudit(auditCtx, event)
+	if err := p.audit.AppendAudit(auditCtx, event); err != nil {
+		return err
+	}
+	// H：审计事件持久化并取得 event.ID 后回填 receipt（state=recorded/终态）。
+	// state=recorded 只能在 AuditEvent 已持久化后返回。
+	result.AuditEventID = &event.ID
+	result.Outcome = outcome
+	result.AuditState = auditStateForOutcome(outcome)
+	return nil
+}
+
+// auditStateForOutcome 把审计 outcome 映射为公共 receipt 的 state（P0-06A §11.2）。
+func auditStateForOutcome(outcome metadata.AuditOutcome) string {
+	switch outcome {
+	case metadata.OutcomeSucceeded:
+		return "recorded"
+	default:
+		return string(outcome) // denied / failed / cancelled
+	}
 }
 
 func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
@@ -1231,40 +1344,40 @@ func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
 	return revision, nil
 }
 
-// mapMembershipError 映射成员资格查询错误到稳定错误码。
+// mapMembershipError 映射成员资格查询错误到稳定错误码（新写入公共词汇）。
 func mapMembershipError(err error) StableErrorCode {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrForbidden
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
 
-// mapConnectionError 映射连接查询错误到稳定错误码。
+// mapConnectionError 映射连接查询错误到稳定错误码（新写入公共词汇）。
 func mapConnectionError(err error) StableErrorCode {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrConnectionNotFound
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
 
 func mapPolicyStoreError(err error) StableErrorCode {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
@@ -1328,15 +1441,11 @@ func mapPaginationError(err error) StableErrorCode {
 	return ErrInternalError
 }
 
-// mapAdapterError 映射 Adapter 错误到稳定错误码。
+// mapAdapterError 映射 Adapter 错误到稳定错误码（I：补齐已批准码，禁止折叠为
+// internal_error；凭证/pool/config 类内部故障折叠为 connection_unavailable，D15a）。
+// 先按 Adapter 稳定码映射，再退化 context 语义，避免带 cause 的错误链
+// （如池耗尽包装 deadline）被 context 判定抢先掩盖真实语义（对齐 browse）。
 func mapAdapterError(err error) StableErrorCode {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
-	}
-	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
-	}
-
 	var adapterErr *adapter.AdapterError
 	if errors.As(err, &adapterErr) {
 		switch adapterErr.Code {
@@ -1345,16 +1454,39 @@ func mapAdapterError(err error) StableErrorCode {
 		case adapter.ErrConnPoolExhausted:
 			return ErrConnectionBusy
 		case adapter.ErrQueryTimeout:
-			return ErrExecutionTimeout
+			return ErrQueryTimeout
 		case adapter.ErrQueryCanceled:
-			return ErrExecutionCancelled
+			return ErrQueryCancelled
 		case adapter.ErrUnsupportedQuery:
 			return ErrUnsupportedQuery
 		case adapter.ErrConfigConflict:
 			return ErrConnectionConfigConflict
 		case adapter.ErrInvalidPageToken:
 			return ErrInvalidPageToken
+		case adapter.ErrResultTooLarge:
+			return ErrResultTooLarge
+		case adapter.ErrPaginationCapacity:
+			return ErrPaginationCapacityExhausted
+		case adapter.ErrConnectionFailed, adapter.ErrStaleConfig, adapter.ErrPoolClosed,
+			adapter.ErrInvalidConfig, adapter.ErrUnsupportedEngine:
+			return ErrConnectionUnavailable
+		case adapter.ErrDatabaseError:
+			// 目标库 rows.Err()/rows.Scan 会把取消/超时包装进 cause（WrapDatabaseError
+			// 保留 cause 链）。先识别 context 语义，再退化通用 database_error。
+			if errors.Is(err, context.DeadlineExceeded) {
+				return ErrQueryTimeout
+			}
+			if errors.Is(err, context.Canceled) {
+				return ErrQueryCancelled
+			}
+			return ErrDatabaseError
 		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrQueryTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }

@@ -410,12 +410,12 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 		{
 			name: "query timeout",
 			err:  &adapter.AdapterError{Code: adapter.ErrQueryTimeout},
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 		{
 			name: "query cancelled",
 			err:  &adapter.AdapterError{Code: adapter.ErrQueryCanceled},
-			want: ErrExecutionCancelled,
+			want: ErrQueryCancelled,
 		},
 		{
 			name: "config conflict",
@@ -430,7 +430,7 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 		{
 			name: "wrapped deadline",
 			err:  errors.Join(errors.New("outer"), context.DeadlineExceeded),
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 	}
 
@@ -517,12 +517,12 @@ func TestMapMembershipErrorPreservesStableClassifications(t *testing.T) {
 		{
 			name: "deadline exceeded",
 			err:  context.DeadlineExceeded,
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 		{
 			name: "cancelled",
 			err:  context.Canceled,
-			want: ErrExecutionCancelled,
+			want: ErrQueryCancelled,
 		},
 		{
 			name: "wrapped not found",

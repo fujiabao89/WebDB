@@ -15,7 +15,15 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/fujiabao89/webdb/internal/adapter"
+	"github.com/fujiabao89/webdb/internal/browse"
+	"github.com/fujiabao89/webdb/internal/browsehttp"
+	"github.com/fujiabao89/webdb/internal/credentials"
+	"github.com/fujiabao89/webdb/internal/execution"
+	"github.com/fujiabao89/webdb/internal/executionhttp"
+	"github.com/fujiabao89/webdb/internal/metadata"
 	"github.com/fujiabao89/webdb/internal/migrate"
+	"github.com/fujiabao89/webdb/internal/sqlpolicy"
 )
 
 const version = "0.2.0"
@@ -50,13 +58,79 @@ func runServe() error {
 		port = "8080"
 	}
 
+	// 可信演示 Principal（D01b，P0-06A §5.2）：配置缺失/非法 → 拒绝启动（fail-closed），
+	// 禁止零值/默认值/客户端身份回退。
+	principal, err := executionhttp.PrincipalFromEnv()
+	if err != nil {
+		return err
+	}
+
+	// 元数据库连接。
+	dsn, err := metaDSN()
+	if err != nil {
+		return err
+	}
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return fmt.Errorf("连接元数据库失败: %w", err)
+	}
+	defer db.Close()
+	store := metadata.NewPGStore(db)
+
+	// 凭证解析（KEK 从环境加载；缺失 → 启动失败，不写明文密钥到任何输出）。
+	kek, err := credentials.NewEnvKEKProvider()
+	if err != nil {
+		return fmt.Errorf("KEK 初始化失败: %w", err)
+	}
+	alarm := execution.NewStderrAlarm()
+	lm := credentials.NewLifecycleManager(store, store, store, kek, alarm)
+
+	// D01b fail-closed 补强：演示 Principal 必须指向存在的 active 成员，否则拒绝启动。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := store.MemberByWorkspaceAndUser(ctx, principal.WorkspaceID, principal.UserID); err != nil {
+		return fmt.Errorf("演示 Principal 未指向存在的 workspace 成员: %w", err)
+	}
+
+	// Adapter + 执行 Pipeline。
+	manager := adapter.NewAdapterManager(adapter.ManagerOptions{AllowInsecureLocalDemo: true})
+	pipeline := execution.NewPipeline(execution.PipelineConfig{
+		Store:       store,
+		PolicyStore: store,
+		Members:     store,
+		Resolver:    lm,
+		Adapter:     execution.NewAdapterClient(manager),
+		MySQLMode:   sqlpolicy.MySQLLexerMode{},
+		Tx:          store,
+		Audit:       store,
+		Alarm:       alarm,
+	})
+	defer pipeline.Close()
+
+	// 浏览服务（WEB-36）+ 执行 HTTP（WEB-35）。
+	browseSvc := browse.NewService(store, store, store, lm, browse.AdapterBrowser{Manager: manager}, browse.DefaultLimits())
+	browseHTTP := browsehttp.NewServer(browseSvc, func(r *http.Request) (browse.Principal, bool) {
+		return executionhttp.PrincipalFromContext(r.Context())
+	})
+	execHTTP := executionhttp.NewServer(principal, pipeline)
+
+	// 统一 /api/v1 传输层：六条已批准路由 + 可信 Principal 注入 + panic recovery。
+	composed := executionhttp.ComposeHandler(browseHTTP, execHTTP)
+	handler := executionhttp.RecoverMiddleware(nil)(executionhttp.PrincipalMiddleware(principal)(composed))
+
 	mux := http.NewServeMux()
+	mux.Handle("/api/v1/", handler)
 	mux.HandleFunc("/health", healthHandler)
 
 	server := &http.Server{
-		Addr:         ":" + port,
-		Handler:      mux,
-		ReadTimeout:  5 * time.Second,
+		Addr:        ":" + port,
+		Handler:     mux,
+		ReadTimeout: 5 * time.Second,
+		// P2-2（审查）文档化限制：WriteTimeout 是响应写出超时，不取消 request context；
+		// 目标库查询超时由 ConnectionPolicy.StatementTimeoutMs（服务端权威）控制。
+		// 若策略超时配置大于 WriteTimeout，连接会先被关闭但查询继续执行（连接/permit
+		// 占用至策略超时）。演示默认 StatementTimeoutMs 较小；生产部署应将
+		// WriteTimeout 对齐策略超时上限，或按文档启用响应写出前的查询取消。
 		WriteTimeout: 5 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}

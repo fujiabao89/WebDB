@@ -646,6 +646,15 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 		return nil, mapAcquireError(err)
 	}
 	defer conn.Release()
+	// 强制只读边界（WEB-35，P0-06A §8.3/§14 R5）：只读设置/验证失败 → fail-closed，
+	// 拒绝执行目标查询（错误折叠为公共 connection_unavailable）。
+	if err := beginReadOnlyPG(ctx, conn); err != nil {
+		return nil, err
+	}
+	// 查询结束（含取消/超时/panic）回滚只读事务，确保连接归还后无事务残留。
+	// 用 WithoutCancel + 独立超时，客户端断开不阻断回滚。
+	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer func() { _ = endReadOnlyPG(rbCtx, conn); rbCancel() }()
 	rows, err := conn.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
@@ -686,6 +695,12 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 	if err := rows.Err(); err != nil {
 		return nil, mapExecError(err)
 	}
+	// 数据已全部读入内存。先关闭结果集再回滚只读事务（与 execMySQL 一致，
+	// 确保连接协议干净后归还）。
+	rows.Close()
+	if err := endReadOnlyPG(rbCtx, conn); err != nil {
+		return nil, mapExecError(err)
+	}
 	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
 }
 func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxFetch, effPage, cumCount, maxPage, maxCell, maxRows int) (*QueryResult, error) {
@@ -700,7 +715,22 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	if err != nil {
 		return nil, mapAcquireError(err)
 	}
-	defer conn.Close()
+	// 归还前统一兜底（Owner P1-1 决策）：回滚只读事务；回滚失败或已标记异常时
+	// 销毁连接（不归还池），确保取消/超时/panic 后连接不携带事务状态复用。
+	discard := false
+	defer func() {
+		rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer rbCancel()
+		if err := endReadOnlyMySQL(rbCtx, conn); err != nil || discard {
+			discardConn(conn)
+		}
+		conn.Close()
+	}()
+	// 强制只读边界（WEB-35，P0-06A §8.3/§14 R5）：只读设置/验证失败 → fail-closed。
+	if err := beginReadOnlyMySQL(ctx, conn); err != nil {
+		discard = true // 只读设置失败：连接状态未知 → 销毁
+		return nil, err
+	}
 	rows, err := conn.QueryContext(ctx, sql, args...)
 	if err != nil {
 		return nil, mapExecError(err)
@@ -758,6 +788,10 @@ func (h *PoolHandle) execMySQL(ctx context.Context, sql string, args []any, maxF
 	if err := rows.Err(); err != nil {
 		return nil, mapExecError(err)
 	}
+	// 数据已全部读入内存；先关闭结果集确保连接协议干净（MySQL 活动结果集上
+	// ROLLBACK 会触发 "commands out of sync" → bad connection），再由统一 defer
+	// 回滚只读事务（回滚失败时销毁连接，Owner P1-1）。
+	rows.Close()
 	return finalizeResult(colInfos, data, rc, effPage, cumCount, maxRows), nil
 }
 func finalizeResult(colInfos []ColumnInfo, data [][]any, rc, effPage, cumCount, maxRows int) *QueryResult {

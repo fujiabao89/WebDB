@@ -11,6 +11,8 @@ import (
 	"github.com/fujiabao89/webdb/internal/adapter"
 	"github.com/fujiabao89/webdb/internal/credentials"
 	"github.com/fujiabao89/webdb/internal/metadata"
+	"github.com/fujiabao89/webdb/internal/pagination"
+	"github.com/fujiabao89/webdb/internal/queryplan"
 	"github.com/google/uuid"
 )
 
@@ -91,6 +93,82 @@ func TestAuditedExecute_ErrorNoCanary(t *testing.T) {
 	if strings.Contains(string(result.ErrorCode), canaryPassword) {
 		t.Fatalf("stable error code contains password: %v", result.ErrorCode)
 	}
+}
+
+// TestAuditedExecute_NextPageAuditNoCanary 验证续页（D11）审计通道的敏感 canary：
+// 首页与续页的 AuditEvent metadata 均不得包含 SQL 明文、密码、token 或 host
+// （P0-06A §11.2 / ADR-017 禁止字段；Owner P2-3 决策：本轮补充实现）。
+func TestAuditedExecute_NextPageAuditNoCanary(t *testing.T) {
+	canarySQL := "SELECT id, password FROM users WHERE password = 'hunter2' ORDER BY id"
+	canaryPassword := "canary-db-password-!@#$%"
+	canaryHost := "canary-db.example.invalid"
+
+	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
+	conn := &metadata.Connection{
+		ID: uuid.New(), WorkspaceID: principal.WorkspaceID, Engine: metadata.EnginePostgreSQL,
+		Host: canaryHost, Port: 5432, Database: "synthetic",
+		SecretRef: uuid.New(), SecretVersion: 1, UpdatedAt: time.Unix(1_700_000_000, 123_000),
+	}
+	policy := &metadata.ConnectionPolicy{
+		WorkspaceID: principal.WorkspaceID, ConnectionID: conn.ID, AllowRead: boolPtr(true),
+		StatementTimeoutMs: 5_000, MaxRows: 500, UpdatedAt: time.Unix(1_700_000_000, 456_000),
+	}
+	resolver := &fakeResolver{payload: credentials.CredentialPayload{User: "synthetic_user", Password: canaryPassword}}
+	handle := &fakeAdapterHandle{
+		result: &adapter.QueryResult{HasMore: true, TotalReturned: 2, ReturnedRows: 2,
+			Columns: []adapter.ColumnInfo{{Name: "id"}}, Rows: [][]any{{int32(1)}, {int32(2)}}},
+		nextResult: &adapter.QueryResult{HasMore: false, TotalReturned: 4, ReturnedRows: 2,
+			Columns: []adapter.ColumnInfo{{Name: "id"}}, Rows: [][]any{{int32(3)}, {int32(4)}}},
+		meta: &queryplan.TableMetadata{Schema: "public", Table: "users",
+			Columns:    []queryplan.Column{{Name: "id", Ordinal: 1, Nullable: false}},
+			PrimaryKey: &queryplan.PrimaryKey{Columns: []string{"id"}}},
+		currentSchema: "public",
+	}
+	auditStore := &fakeAuditStore{}
+	reg := pagination.New(pagination.DefaultConfig())
+	t.Cleanup(reg.Close)
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: policy},
+		Members:     &fakeMemberReader{member: &metadata.WorkspaceMember{WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer}},
+		Resolver:    resolver, Adapter: &fakeAdapterClient{handle: handle},
+		Tx: &fakeTxStore{}, Audit: auditStore, Alarm: &fakeAlarm{}, Pagination: reg,
+	})
+	req := ExecuteRequest{
+		Principal: principal, ConnectionID: conn.ID, SQL: canarySQL, Engine: EnginePostgreSQL,
+		SortKeys: []queryplan.SortKey{{Column: "id", Direction: queryplan.SortAsc}}, PageSize: 2,
+	}
+	res1, err := pipeline.Execute(context.Background(), req)
+	if err != nil || res1.NextPageToken == nil {
+		t.Fatalf("首页应成功并返回 token: err=%v", err)
+	}
+	res2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *res1.NextPageToken})
+	if err != nil {
+		t.Fatalf("续页失败: %v", err)
+	}
+	if len(auditStore.events) < 2 {
+		t.Fatalf("audit events = %d, want >=2（首页+续页各一个）", len(auditStore.events))
+	}
+	for i, ev := range auditStore.events {
+		md := string(ev.Metadata)
+		if strings.Contains(md, canarySQL) {
+			t.Fatalf("audit[%d] metadata contains SQL body: %s", i, md)
+		}
+		if strings.Contains(md, canaryPassword) {
+			t.Fatalf("audit[%d] metadata contains plaintext password: %s", i, md)
+		}
+		if strings.Contains(md, "hunter2") {
+			t.Fatalf("audit[%d] metadata contains canary password fragment: %s", i, md)
+		}
+		if strings.Contains(md, canaryHost) {
+			t.Fatalf("audit[%d] metadata contains host: %s", i, md)
+		}
+		if strings.Contains(md, "SELECT") {
+			t.Fatalf("audit[%d] metadata must not contain SQL keywords: %s", i, md)
+		}
+	}
+	// token 为 opaque handle，不进入审计（audit metadata 无 token 字段；statement_hash 为摘要）。
+	_ = res2
 }
 
 // TestStderrAlarmOutput 验证 $SECURITY_ALERT 输出不含敏感输入且为结构化字段。
