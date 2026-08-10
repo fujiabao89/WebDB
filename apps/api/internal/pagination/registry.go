@@ -258,7 +258,8 @@ func (r *Registry) Claim(handle string) (*Claim, error) {
 	if e.status != statusReady {
 		return nil, newRegistryError(ErrInvalidPageToken, "token already in flight")
 	}
-	if r.now().After(e.expiresAt) {
+	// now >= expiresAt 即拒绝（相等边界同样视为过期，fail-closed，Codex 审查）。
+	if !r.now().Before(e.expiresAt) {
 		r.deleteEntry(d)
 		return nil, newRegistryError(ErrInvalidPageToken, "token expired")
 	}
@@ -289,7 +290,8 @@ func (r *Registry) CleanupExpired() {
 	defer r.mu.Unlock()
 	now := r.now()
 	for d, e := range r.entries {
-		if now.After(e.expiresAt) {
+		// now >= expiresAt 即清理（与 Claim/Rotate 的相等边界语义一致）。
+		if !now.Before(e.expiresAt) {
 			r.deleteEntry(d)
 		}
 	}
@@ -462,7 +464,8 @@ func (c *Claim) Rotate(newState *ContinuationState) (string, error) {
 	if !ok || e.status != statusInFlight || e.version != c.version {
 		return "", newRegistryError(ErrInvalidPageToken, "claim ownership mismatch")
 	}
-	if r.now().After(e.expiresAt) {
+	// now >= expiresAt 即拒绝（相等边界同样视为过期，不允许已过期 claim 创建后继 token）。
+	if !r.now().Before(e.expiresAt) {
 		r.deleteEntry(c.digest)
 		return "", newRegistryError(ErrInvalidPageToken, "token expired")
 	}

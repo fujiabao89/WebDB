@@ -185,6 +185,47 @@ func TestClaimExpiredToken(t *testing.T) {
 	r.mu.Unlock()
 }
 
+// TestClaimExpiredAtExactBoundary 验证 now == expiresAt 的相等边界必须拒绝 claim
+// （fail-closed，Codex 审查：此前仅在 now.After 时拒绝）。
+func TestClaimExpiredAtExactBoundary(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	r := newTestRegistry(t, func(c *Config) {
+		c.Clock = func() time.Time { return now }
+		c.TTL = time.Minute
+	})
+	h, _ := r.Create(testState(t, "u1"))
+	r.mu.Lock()
+	r.cfg.Clock = func() time.Time { return now.Add(time.Minute) } // 恰等于 expiresAt
+	r.mu.Unlock()
+	if _, err := r.Claim(h); err == nil {
+		t.Fatal("claim at exact expiry boundary must be rejected")
+	}
+}
+
+// TestRotateExpiredAtExactBoundary 验证相等边界不允许已过期 claim 创建后继 token。
+func TestRotateExpiredAtExactBoundary(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	r := newTestRegistry(t, func(c *Config) {
+		c.Clock = func() time.Time { return now }
+		c.TTL = time.Minute
+	})
+	h, _ := r.Create(testState(t, "u1"))
+	c, err := r.Claim(h)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	r.cfg.Clock = func() time.Time { return now.Add(time.Minute) } // 恰等于 expiresAt
+	r.mu.Unlock()
+	st := testState(t, "u1")
+	st.CumulativeCount = 101
+	if _, err := c.Rotate(st); err == nil {
+		t.Fatal("rotate at exact expiry boundary must be rejected")
+	}
+}
+
 func TestRotateFailureDeletesOldAndNotRestored(t *testing.T) {
 	t.Parallel()
 	r := newTestRegistry(t, nil)
