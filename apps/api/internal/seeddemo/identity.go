@@ -104,6 +104,16 @@ func ensureWorkspace(ctx context.Context, s identityStore, cfg Config) error {
 		if err := s.createWorkspaceWithID(ctx, newWS); err != nil {
 			return fmt.Errorf("创建演示 workspace 失败: %w", err)
 		}
+		// TOCTOU 复核（CodeRabbit 回归项）：DO NOTHING 可能因并发插入而未实际写入，
+		// 必须回读确认最终值一致，避免静默保留不一致数据。
+		got, err := s.WorkspaceByID(ctx, cfg.WorkspaceID)
+		if err != nil {
+			return fmt.Errorf("创建后复核演示 workspace 失败: %w", err)
+		}
+		if got.Name != demoWorkspaceName {
+			return fmt.Errorf("%w: workspace %s 创建后 name=%q 与演示值不一致（并发写入冲突）",
+				ErrDemoSeedRefused, cfg.WorkspaceID, got.Name)
+		}
 		return nil
 	default:
 		return fmt.Errorf("读取演示 workspace 失败: %w", err)
@@ -133,6 +143,15 @@ func ensureUser(ctx context.Context, s identityStore, cfg Config) error {
 			// 唯一 email 冲突（另一 user 占用演示邮箱）→ 保持 fail-closed。
 			return fmt.Errorf("创建演示 user 失败（可能 email 唯一冲突）: %w", err)
 		}
+		// TOCTOU 复核（CodeRabbit 回归项）：DO NOTHING 可能因并发插入而未写入，
+		// 必须回读确认最终值一致。
+		got, err := s.UserByID(ctx, cfg.UserID)
+		if err != nil {
+			return fmt.Errorf("创建后复核演示 user 失败: %w", err)
+		}
+		if got.Status != metadata.UserStatusActive || !strings.EqualFold(got.Email, demoUserEmail) {
+			return fmt.Errorf("%w: user %s 创建后与演示值不一致（并发写入冲突）", ErrDemoSeedRefused, cfg.UserID)
+		}
 		return nil
 	default:
 		return fmt.Errorf("读取演示 user 失败: %w", err)
@@ -153,6 +172,16 @@ func ensureMember(ctx context.Context, s identityStore, cfg Config) error {
 		nm := &metadata.WorkspaceMember{WorkspaceID: cfg.WorkspaceID, UserID: cfg.UserID, Role: metadata.RoleOwner}
 		if err := s.addMemberIfAbsent(ctx, nm); err != nil {
 			return fmt.Errorf("创建演示 member 失败: %w", err)
+		}
+		// TOCTOU 复核（CodeRabbit 回归项）：DO NOTHING 可能因并发插入而未写入，
+		// 必须回读确认最终值一致。
+		got, err := s.MemberByWorkspaceAndUser(ctx, cfg.WorkspaceID, cfg.UserID)
+		if err != nil {
+			return fmt.Errorf("创建后复核演示 member 失败: %w", err)
+		}
+		if got.Role != metadata.RoleOwner {
+			return fmt.Errorf("%w: member (%s, %s) 创建后 role=%q 与演示值不一致（并发写入冲突）",
+				ErrDemoSeedRefused, cfg.WorkspaceID, cfg.UserID, got.Role)
 		}
 		return nil
 	default:

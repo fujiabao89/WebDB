@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
@@ -157,7 +159,11 @@ func main() {
 	case "seed-demo":
 		// 演示 seed：仅 WEBDB_DEMO_SEED=true 时运行，默认关闭。
 		// 不注册 HTTP API；不影响 serve 与 migrate。
-		err = seeddemo.RunFromEnv(context.Background())
+		// 信号感知 ctx（CodeRabbit 回归项）：SIGINT/SIGTERM 可端到端取消 seed，
+		// 避免中途强杀放大孤立 envelope 失败态。
+		seedCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		err = seeddemo.RunFromEnv(seedCtx)
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n", os.Args[1])
 		os.Exit(1)

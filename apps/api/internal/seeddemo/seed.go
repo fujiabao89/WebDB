@@ -122,17 +122,40 @@ func createDefaultPolicy(ctx context.Context, deps Deps, cfg Config, spec Connec
 
 // verifyExistingConnection 验证已存在连接与演示规格、策略、凭证完全一致。
 // 任一不一致即 fail-closed（不静默覆盖）。
+//
+// 校验顺序（Codex P1 二轮）：连接身份与不可变字段 → 解析并验证凭证 envelope →
+// 确认凭证与当前合成演示配置完全匹配 → 才检查策略并在缺失时补建只读 policy。
+// 凭证验证必须先于任何 policy 写入：否则可能对「凭证已被篡改/轮换/退役」的连接
+// 提前创建 allow_read policy，构成授权扩大。
 func verifyExistingConnection(ctx context.Context, deps Deps, cfg Config, spec ConnectionSpec, conn *metadata.Connection) error {
+	// 1. 连接身份与不可变字段。
 	if !connectionMatches(conn, cfg.WorkspaceID, spec) {
 		return fmt.Errorf("%w: 连接 %s 已存在但字段与演示值不一致（workspace/name/engine/host/port/database/environment）",
 			ErrDemoSeedRefused, spec.ID)
 	}
+
+	// 2. 解析并验证凭证 envelope（经 LifecycleManager/Resolver 解密；缺失/退役/解密失败均 fail-closed）。
+	//    必须先于策略检查：这是防止对不匹配凭证的连接提前授权的关键边界。
+	payload, err := deps.Resolver.ResolveCredential(ctx, cfg.WorkspaceID, conn.SecretRef, conn.SecretVersion)
+	if err != nil {
+		// 脱敏根因进服务端日志（CodeRabbit 回归项）：解析错误不含明文密码/DSN/KEK，
+		// 便于区分 KEK 版本不匹配、信封缺失与退役，而非对调用方暴露。
+		slog.Default().Error("演示凭证解析失败",
+			"connection_id", spec.ID.String(), "error", err)
+		return fmt.Errorf("%w: 连接 %s 的凭证无法解析（KEK/版本不匹配、信封缺失或已退役）", ErrDemoSeedRefused, spec.ID)
+	}
+	// 3. 确认凭证与当前合成演示配置完全匹配。
+	if payload.User != spec.CredentialUser || payload.Password != spec.CredentialPassword {
+		return fmt.Errorf("%w: 连接 %s 的已存在凭证与演示期望不一致", ErrDemoSeedRefused, spec.ID)
+	}
+
+	// 4. 策略检查；缺失时补建（此时凭证已验证匹配，补建不构成授权扩大）。
 	pol, err := deps.PolicyRead.PolicyByConnection(ctx, cfg.WorkspaceID, spec.ID)
 	if err != nil {
 		return fmt.Errorf("读取演示连接策略失败: %w", err)
 	}
 	if pol == nil {
-		// 策略缺失 = 上次 seed 在策略写入前中断（连接已存在、凭证已绑定）。
+		// 策略缺失 = 上次 seed 在策略写入前中断（连接存在、凭证已验证匹配）。
 		// 视为可恢复的不完整 seed 阶段：补建期望策略（Codex P1）。
 		if err := createDefaultPolicy(ctx, deps, cfg, spec); err != nil {
 			return fmt.Errorf("补充创建演示连接策略 %s 失败: %w", spec.ID, err)
@@ -142,13 +165,6 @@ func verifyExistingConnection(ctx context.Context, deps Deps, cfg Config, spec C
 	if !policyMatches(pol) {
 		return fmt.Errorf("%w: 连接 %s 的已存在策略不满足演示安全默认（allow_read=true, allow_write=false, allow_export=false, max_rows=%d, timeout=%dms）",
 			ErrDemoSeedRefused, spec.ID, policyMaxRows, policyStatementTimeoutMs)
-	}
-	payload, err := deps.Resolver.ResolveCredential(ctx, cfg.WorkspaceID, conn.SecretRef, conn.SecretVersion)
-	if err != nil {
-		return fmt.Errorf("%w: 连接 %s 的凭证无法解析（KEK/版本不匹配或信封缺失）", ErrDemoSeedRefused, spec.ID)
-	}
-	if payload.User != spec.CredentialUser || payload.Password != spec.CredentialPassword {
-		return fmt.Errorf("%w: 连接 %s 的已存在凭证与演示期望不一致", ErrDemoSeedRefused, spec.ID)
 	}
 	return nil
 }

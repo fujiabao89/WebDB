@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"time"
 
@@ -31,7 +33,7 @@ func RunFromEnv(ctx context.Context) error {
 		return err
 	}
 
-	db, err := openMetaDB()
+	db, err := openMetaDB(ctx)
 	if err != nil {
 		return err
 	}
@@ -63,10 +65,29 @@ func RunFromEnv(ctx context.Context) error {
 	return Run(ctx, cfg, deps)
 }
 
+// buildMetaDSN 通过标准 URL API 构造 PostgreSQL DSN（安全转义），
+// 复用 migrate 路径（cmd/server main.metaDSN）的 url.UserPassword 语义。
+// 手工拼接 keyword-DSN 会在 password/user/dbname 含空格、引号、反斜杠、@:?#% 等
+// 语法字符时改变或破坏解析结果（Codex P1 二轮）；URL 构造对其统一百分号转义，
+// 且可被当前 pgx driver/config parser 正确还原。
+func buildMetaDSN(host, port, user, password, dbname, sslmode string) string {
+	q := url.Values{}
+	q.Set("sslmode", sslmode)
+	u := &url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(user, password),
+		Host:     net.JoinHostPort(host, port),
+		Path:     dbname,
+		RawQuery: q.Encode(),
+	}
+	return u.String()
+}
+
 // openMetaDB 连接 WebDB 元数据库（seed 写业务表使用运行时账号 META_DB_USER）。
-func openMetaDB() (*sql.DB, error) {
-	dsn := fmt.Sprintf(
-		"host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+// 使用调用方 ctx 派生有界超时（CodeRabbit 回归项：seed 路径端到端可取消上下文，
+// SIGINT/SIGTERM 可中断 PingContext，避免强杀放大孤立 envelope 失败态）。
+func openMetaDB(ctx context.Context) (*sql.DB, error) {
+	dsn := buildMetaDSN(
 		envOr("META_DB_HOST", "webdb-meta"),
 		envOr("META_DB_PORT", "5432"),
 		envOr("META_DB_USER", "webdb"),
@@ -78,9 +99,9 @@ func openMetaDB() (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("连接元数据库失败: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	pingCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
+	if err := db.PingContext(pingCtx); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("元数据库不可达: %w", err)
 	}

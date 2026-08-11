@@ -63,7 +63,9 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 docker compose -f deploy/compose/docker-compose.yml ps
 ```
 
-5 个服务均应显示 `healthy`。
+5 个常驻服务（`webdb-meta`、`demo-pg`、`demo-mysql`、`api`、`web`）均应显示 `healthy`；
+`api-migrate` 与 `demo-seed` 为 one-shot 服务，成功退出后显示 `exited (0)`（这是预期状态，
+不是启动失败）。
 
 ### 4. 健康检查
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -78,6 +79,10 @@ func (c *fakeCredService) Create(_ context.Context, wsID, _ uuid.UUID, payload c
 }
 
 func (c *fakeCredService) ResolveCredential(_ context.Context, _ uuid.UUID, secretRef uuid.UUID, _ int) (credentials.CredentialPayload, error) {
+	// 模拟 LifecycleManager.Resolve：retired envelope 拒绝解析（与生产语义一致）。
+	if env, ok := c.envs[secretRef.String()]; ok && env.RetiredAt != nil {
+		return credentials.CredentialPayload{}, errors.New("credential retired")
+	}
 	p, ok := c.payloads[secretRef.String()]
 	if !ok {
 		return credentials.CredentialPayload{}, sql.ErrNoRows
@@ -347,6 +352,32 @@ func TestLoadConfig_missingPrincipalEnv(t *testing.T) {
 	}
 }
 
+// CodeRabbit P0-06A 回归项：MySQL 演示账号必须是固定只读角色，拒绝 root/任意用户。
+func TestLoadConfig_mysqlUserMustBeReadOnlyRole(t *testing.T) {
+	env := demoEnv()
+	env["DEMO_MYSQL_USER"] = "root"
+	_, err := LoadConfig(envFromMap(env))
+	if err == nil {
+		t.Fatal("DEMO_MYSQL_USER=root 时应拒绝（最小权限边界）")
+	}
+	if !strings.Contains(err.Error(), "DEMO_MYSQL_USER") {
+		t.Errorf("错误应命名 DEMO_MYSQL_USER，实际: %v", err)
+	}
+}
+
+// 默认 demo_reader 与显式 demo_reader 均合法。
+func TestLoadConfig_mysqlUserDefaultAndExplicit(t *testing.T) {
+	env := demoEnv()
+	delete(env, "DEMO_MYSQL_USER") // 缺失 → 默认 demo_reader
+	if _, err := LoadConfig(envFromMap(env)); err != nil {
+		t.Fatalf("缺失 DEMO_MYSQL_USER 时应默认 demo_reader，实际: %v", err)
+	}
+	env["DEMO_MYSQL_USER"] = "demo_reader" // 显式合法
+	if _, err := LoadConfig(envFromMap(env)); err != nil {
+		t.Fatalf("DEMO_MYSQL_USER=demo_reader 应合法，实际: %v", err)
+	}
+}
+
 func TestLoadConfig_missingSecretsNotLeaked(t *testing.T) {
 	env := demoEnv()
 	env["DEMO_PG_READER_PASSWORD"] = "" // 显式空
@@ -505,6 +536,85 @@ func TestRun_policyMissingRecovered(t *testing.T) {
 	}
 	if f.createPolicyCalls != 1 {
 		t.Fatalf("应补建 1 条策略，实际 %d", f.createPolicyCalls)
+	}
+}
+
+// P1（Codex 二轮）：matching connection + missing policy + mismatched credential
+// → 必须先验证凭证再补建 policy；凭证不匹配时 fail-closed，CreatePolicy 调用为 0。
+func TestRun_policyMissingCredentialMismatchNoPolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	// 模拟上次 seed 在策略写入前中断：连接/凭证已存在但策略缺失。
+	delete(f.policies, cfg.Connections[0].ID)
+	// 模拟连接引用的凭证与当前合成演示配置不同（如元数据库被其它实例复用/配置变更）。
+	spec := cfg.Connections[0]
+	conn := f.conns[spec.ID]
+	f.cred.payloads[conn.SecretRef.String()] = credentials.CredentialPayload{
+		User: "demo_reader", Password: "wrong-demo-secret",
+	}
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if !errors.Is(err, ErrDemoSeedRefused) {
+		t.Fatalf("凭证不匹配时 seed 应返回 ErrDemoSeedRefused，实际: %v", err)
+	}
+	if _, ok := f.policies[spec.ID]; ok {
+		t.Fatal("凭证不匹配时不得创建 allow_read policy")
+	}
+	if f.createPolicyCalls != 0 {
+		t.Fatalf("凭证不匹配时 CreatePolicy 调用必须为 0，实际 %d", f.createPolicyCalls)
+	}
+}
+
+// P1（Codex 二轮）：matching connection + missing policy + credential resolve 失败
+// （解密/KEK/信封缺失）→ policy 不创建，CreatePolicy 调用为 0。
+func TestRun_policyMissingCredentialResolveFailNoPolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	spec := cfg.Connections[0]
+	delete(f.policies, spec.ID)
+	// 移除 payload，使 ResolveCredential 返回 ErrNoRows（模拟解密失败/信封缺失）。
+	conn := f.conns[spec.ID]
+	delete(f.cred.payloads, conn.SecretRef.String())
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if !errors.Is(err, ErrDemoSeedRefused) {
+		t.Fatalf("凭证解析失败时 seed 应返回 ErrDemoSeedRefused，实际: %v", err)
+	}
+	if _, ok := f.policies[spec.ID]; ok {
+		t.Fatal("凭证解析失败时不得创建 allow_read policy")
+	}
+	if f.createPolicyCalls != 0 {
+		t.Fatalf("凭证解析失败时 CreatePolicy 调用必须为 0，实际 %d", f.createPolicyCalls)
+	}
+}
+
+// P1（Codex 二轮）：matching connection + missing policy + retired/orphan credential
+// → policy 不创建，CreatePolicy 调用为 0。
+func TestRun_policyMissingCredentialRetiredNoPolicy(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	spec := cfg.Connections[0]
+	delete(f.policies, spec.ID)
+	// 标记该连接引用的 envelope 为 retired（模拟凭证退役后连接仍引用旧版本）。
+	conn := f.conns[spec.ID]
+	now := time.Now().UTC()
+	f.cred.envs[conn.SecretRef.String()].RetiredAt = &now
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if !errors.Is(err, ErrDemoSeedRefused) {
+		t.Fatalf("凭证已退役时 seed 应返回 ErrDemoSeedRefused，实际: %v", err)
+	}
+	if _, ok := f.policies[spec.ID]; ok {
+		t.Fatal("凭证已退役时不得创建 allow_read policy")
+	}
+	if f.createPolicyCalls != 0 {
+		t.Fatalf("凭证已退役时 CreatePolicy 调用必须为 0，实际 %d", f.createPolicyCalls)
 	}
 }
 

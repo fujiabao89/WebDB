@@ -45,6 +45,11 @@ const (
 	// P0 无登录、password_hash 无人校验，使用明确哨兵字符串而非 bcrypt，
 	// 避免被误认为真实凭据；不得用于任何真实认证路径。
 	demoPasswordHash = "!demo-placeholder-password-hash-do-not-use"
+	// demoPGReaderRole / demoMySQLReaderRole 演示目标库固定只读角色。
+	// 由 deploy/compose init 脚本创建；seed 必须绑定该角色，拒绝高权限账号漂移
+	// （CodeRabbit P0-06A 回归项：MySQL 演示账号不能改为 root/任意用户）。
+	demoPGReaderRole    = "demo_reader"
+	demoMySQLReaderRole = "demo_reader"
 )
 
 // ---- 配置结构 -------------------------------------------------------------------
@@ -139,7 +144,7 @@ func loadPostgresSpec(env func(string) string) (ConnectionSpec, error) {
 		Port:               port,
 		Database:           name,
 		Environment:        metadata.EnvDevelopment,
-		CredentialUser:     "demo_reader", // init 脚本固定只读角色名
+		CredentialUser:     demoPGReaderRole, // init 脚本固定只读角色名
 		CredentialPassword: pw,
 	}, nil
 }
@@ -164,7 +169,13 @@ func loadMySQLSpec(env func(string) string) (ConnectionSpec, error) {
 	}
 	user := env("DEMO_MYSQL_USER")
 	if user == "" {
-		user = "demo_reader" // 与 init 脚本默认一致
+		user = demoMySQLReaderRole // 与 init 脚本默认一致
+	}
+	if user != demoMySQLReaderRole {
+		// 与 PG 分支对称：演示连接必须使用 init 脚本创建的固定只读角色，
+		// 拒绝部署方把 DEMO_MYSQL_USER 改为 root 等高权限账号（最小权限边界）。
+		return ConnectionSpec{}, fmt.Errorf("%w: 环境变量 DEMO_MYSQL_USER 必须是固定只读角色 %s",
+			ErrDemoSeedRefused, demoMySQLReaderRole)
 	}
 	return ConnectionSpec{
 		ID:                 demoMySQLConnID,
