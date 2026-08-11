@@ -16,6 +16,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/fujiabao89/webdb/internal/migrate"
+	"github.com/fujiabao89/webdb/internal/seeddemo"
 )
 
 const version = "0.2.0"
@@ -153,6 +154,10 @@ func main() {
 			dir = os.Args[2]
 		}
 		err = runMigrate(dir)
+	case "seed-demo":
+		// 演示 seed：仅 WEBDB_DEMO_SEED=true 时运行，默认关闭。
+		// 不注册 HTTP API；不影响 serve 与 migrate。
+		err = seeddemo.RunFromEnv(context.Background())
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令: %s\n", os.Args[1])
 		os.Exit(1)

@@ -1,0 +1,566 @@
+package seeddemo
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/fujiabao89/webdb/internal/connections"
+	"github.com/fujiabao89/webdb/internal/credentials"
+	"github.com/fujiabao89/webdb/internal/metadata"
+	"github.com/google/uuid"
+)
+
+// ---- 测试配置 ----------------------------------------------------------------
+
+func newTestConfig() Config {
+	return Config{
+		WorkspaceID: demoWorkspaceID,
+		UserID:      demoUserID,
+		Connections: []ConnectionSpec{
+			{
+				ID:                 demoPGConnID,
+				Name:               "demo_reader (PostgreSQL)",
+				Engine:             metadata.EnginePostgreSQL,
+				Host:               "demo-pg",
+				Port:               5432,
+				Database:           "webdb_demo",
+				Environment:        metadata.EnvDevelopment,
+				CredentialUser:     "demo_reader",
+				CredentialPassword: "demo_pg_secret",
+			},
+			{
+				ID:                 demoMySQLConnID,
+				Name:               "demo_reader (MySQL)",
+				Engine:             metadata.EngineMySQL,
+				Host:               "demo-mysql",
+				Port:               3306,
+				Database:           "webdb_demo",
+				Environment:        metadata.EnvDevelopment,
+				CredentialUser:     "demo_reader",
+				CredentialPassword: "demo_mysql_secret",
+			},
+		},
+	}
+}
+
+// ---- fake 凭证服务（credentialCreator + credentialResolver + envelopeReader） --
+
+type fakeCredService struct {
+	envs        map[string]*metadata.CredentialEnvelope
+	payloads    map[string]credentials.CredentialPayload
+	createCalls int
+}
+
+func newFakeCredService() *fakeCredService {
+	return &fakeCredService{
+		envs:     map[string]*metadata.CredentialEnvelope{},
+		payloads: map[string]credentials.CredentialPayload{},
+	}
+}
+
+func (c *fakeCredService) Create(_ context.Context, wsID, _ uuid.UUID, payload credentials.CredentialPayload) (*metadata.CredentialEnvelope, error) {
+	c.createCalls++
+	env := &metadata.CredentialEnvelope{
+		WorkspaceID:   wsID,
+		SecretRef:     uuid.New(),
+		Version:       1,
+		EnvelopeSuite: "AES256GCM-v1",
+		KEKVersion:    1,
+		CreatedAt:     time.Now().UTC(),
+	}
+	c.envs[env.SecretRef.String()] = env
+	c.payloads[env.SecretRef.String()] = payload
+	return env, nil
+}
+
+func (c *fakeCredService) ResolveCredential(_ context.Context, _ uuid.UUID, secretRef uuid.UUID, _ int) (credentials.CredentialPayload, error) {
+	p, ok := c.payloads[secretRef.String()]
+	if !ok {
+		return credentials.CredentialPayload{}, sql.ErrNoRows
+	}
+	return p, nil
+}
+
+func (c *fakeCredService) ListEnvelopes(_ context.Context, wsID uuid.UUID) ([]metadata.CredentialEnvelope, error) {
+	var out []metadata.CredentialEnvelope
+	for _, e := range c.envs {
+		if e.WorkspaceID == wsID {
+			out = append(out, *e)
+		}
+	}
+	return out, nil
+}
+
+// ---- 综合 fake（identity + connection + policy + 读取） ------------------------
+
+type seedFake struct {
+	workspaces map[uuid.UUID]*metadata.Workspace
+	users      map[uuid.UUID]*metadata.User
+	members    map[string]*metadata.WorkspaceMember
+	conns      map[uuid.UUID]*metadata.Connection
+	policies   map[uuid.UUID]*metadata.ConnectionPolicy
+
+	createConnCalls   int
+	createPolicyCalls int
+	connCreateErr     error
+
+	cred *fakeCredService
+}
+
+func newSeedFake() *seedFake {
+	return &seedFake{
+		workspaces: map[uuid.UUID]*metadata.Workspace{},
+		users:      map[uuid.UUID]*metadata.User{},
+		members:    map[string]*metadata.WorkspaceMember{},
+		conns:      map[uuid.UUID]*metadata.Connection{},
+		policies:   map[uuid.UUID]*metadata.ConnectionPolicy{},
+		cred:       newFakeCredService(),
+	}
+}
+
+func (f *seedFake) fakeDeps() Deps {
+	return Deps{
+		Identity:    f,
+		Credentials: f.cred,
+		Connector:   f,
+		Policies:    f,
+		ConnReader:  f,
+		PolicyRead:  f,
+		Envelopes:   f.cred,
+		Resolver:    f.cred,
+	}
+}
+
+// identityStore
+func (f *seedFake) WorkspaceByID(_ context.Context, id uuid.UUID) (*metadata.Workspace, error) {
+	ws, ok := f.workspaces[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return ws, nil
+}
+
+func (f *seedFake) createWorkspaceWithID(_ context.Context, ws *metadata.Workspace) error {
+	now := time.Now().UTC()
+	ws.CreatedAt = now
+	ws.UpdatedAt = now
+	f.workspaces[ws.ID] = ws
+	return nil
+}
+
+func (f *seedFake) UserByID(_ context.Context, id uuid.UUID) (*metadata.User, error) {
+	u, ok := f.users[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return u, nil
+}
+
+func (f *seedFake) createUserWithID(_ context.Context, u *metadata.User) error {
+	now := time.Now().UTC()
+	u.CreatedAt = now
+	u.UpdatedAt = now
+	f.users[u.ID] = u
+	return nil
+}
+
+func (f *seedFake) MemberByWorkspaceAndUser(_ context.Context, wsID, userID uuid.UUID) (*metadata.WorkspaceMember, error) {
+	m, ok := f.members[memberKey(wsID, userID)]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	return m, nil
+}
+
+func (f *seedFake) addMemberIfAbsent(_ context.Context, m *metadata.WorkspaceMember) error {
+	if _, ok := f.members[memberKey(m.WorkspaceID, m.UserID)]; ok {
+		return nil
+	}
+	m.CreatedAt = time.Now().UTC()
+	f.members[memberKey(m.WorkspaceID, m.UserID)] = m
+	return nil
+}
+
+// connectionCreator
+func (f *seedFake) Create(_ context.Context, p connections.Principal, conn *metadata.Connection) (*metadata.Connection, error) {
+	if f.connCreateErr != nil {
+		return nil, f.connCreateErr
+	}
+	f.createConnCalls++
+	conn.WorkspaceID = p.WorkspaceID
+	conn.CreatedBy = p.UserID
+	now := time.Now().UTC()
+	conn.CreatedAt = now
+	conn.UpdatedAt = now
+	f.conns[conn.ID] = conn
+	return conn, nil
+}
+
+// policyWriter
+func (f *seedFake) CreatePolicy(_ context.Context, p *metadata.ConnectionPolicy) error {
+	f.createPolicyCalls++
+	now := time.Now().UTC()
+	p.CreatedAt = now
+	p.UpdatedAt = now
+	f.policies[p.ConnectionID] = p
+	return nil
+}
+
+// connectionReader
+func (f *seedFake) ConnectionByID(_ context.Context, wsID, id uuid.UUID) (*metadata.Connection, error) {
+	c, ok := f.conns[id]
+	if !ok || c.WorkspaceID != wsID {
+		return nil, sql.ErrNoRows
+	}
+	return c, nil
+}
+
+func (f *seedFake) ListConnections(_ context.Context, wsID uuid.UUID) ([]metadata.Connection, error) {
+	var out []metadata.Connection
+	for _, c := range f.conns {
+		if c.WorkspaceID == wsID {
+			out = append(out, *c)
+		}
+	}
+	return out, nil
+}
+
+// policyReader
+func (f *seedFake) PolicyByConnection(_ context.Context, _ uuid.UUID, connID uuid.UUID) (*metadata.ConnectionPolicy, error) {
+	p, ok := f.policies[connID]
+	if !ok {
+		return nil, nil // 缺失策略 → 调用方默认拒绝
+	}
+	return p, nil
+}
+
+func memberKey(wsID, userID uuid.UUID) string { return wsID.String() + ":" + userID.String() }
+
+// ---- helper：预填一致演示数据 -------------------------------------------------
+
+// preseedConsistent 在 fake 中预填与 cfg 完全一致的身份/连接/策略/凭证。
+func preseedConsistent(t *testing.T, f *seedFake, cfg Config) {
+	t.Helper()
+	f.workspaces[cfg.WorkspaceID] = &metadata.Workspace{ID: cfg.WorkspaceID, Name: "Demo Workspace", Settings: json.RawMessage("{}")}
+	f.users[cfg.UserID] = &metadata.User{ID: cfg.UserID, Email: "demo@example.local", Status: metadata.UserStatusActive}
+	f.members[memberKey(cfg.WorkspaceID, cfg.UserID)] = &metadata.WorkspaceMember{WorkspaceID: cfg.WorkspaceID, UserID: cfg.UserID, Role: metadata.RoleOwner}
+	for _, spec := range cfg.Connections {
+		env := &metadata.CredentialEnvelope{
+			WorkspaceID:   cfg.WorkspaceID,
+			SecretRef:     uuid.New(),
+			Version:       1,
+			EnvelopeSuite: "AES256GCM-v1",
+			KEKVersion:    1,
+		}
+		f.cred.envs[env.SecretRef.String()] = env
+		f.cred.payloads[env.SecretRef.String()] = credentials.CredentialPayload{User: spec.CredentialUser, Password: spec.CredentialPassword}
+		conn := &metadata.Connection{
+			ID: spec.ID, WorkspaceID: cfg.WorkspaceID, Name: spec.Name, Engine: spec.Engine,
+			Host: spec.Host, Port: spec.Port, Database: spec.Database, Environment: spec.Environment,
+			SecretRef: env.SecretRef, SecretVersion: env.Version, CreatedBy: cfg.UserID,
+		}
+		f.conns[spec.ID] = conn
+		tr := true
+		f.policies[spec.ID] = &metadata.ConnectionPolicy{
+			WorkspaceID: cfg.WorkspaceID, ConnectionID: spec.ID, AllowRead: &tr,
+			StatementTimeoutMs: policyStatementTimeoutMs, MaxRows: policyMaxRows,
+		}
+	}
+}
+
+// ---- 测试：演示开关门控 --------------------------------------------------------
+
+func TestValidateDemoSwitch(t *testing.T) {
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"缺失", "", true},
+		{"false", "false", true},
+		{"TRUE 大小写", "TRUE", true},
+		{"非法值", "yes", true},
+		{"显式 true", "true", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateDemoSwitch(tc.value)
+			if tc.wantErr && err == nil {
+				t.Fatalf("值 %q 应被拒绝", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("值 %q 应通过，实际错误: %v", tc.value, err)
+			}
+		})
+	}
+}
+
+// ---- 测试：LoadConfig ----------------------------------------------------------
+
+func demoEnv() map[string]string {
+	return map[string]string{
+		"DEMO_PRINCIPAL_WORKSPACE_ID": DemoWorkspaceID,
+		"DEMO_PRINCIPAL_USER_ID":      DemoUserID,
+		"DEMO_PG_HOST":                "demo-pg",
+		"DEMO_PG_PORT":                "5432",
+		"DEMO_PG_NAME":                "webdb_demo",
+		"DEMO_PG_READER_PASSWORD":     "demo_pg_secret",
+		"DEMO_MYSQL_HOST":             "demo-mysql",
+		"DEMO_MYSQL_PORT":             "3306",
+		"DEMO_MYSQL_NAME":             "webdb_demo",
+		"DEMO_MYSQL_USER":             "demo_reader",
+		"DEMO_MYSQL_READER_PASSWORD":  "demo_mysql_secret",
+	}
+}
+
+func envFromMap(m map[string]string) func(string) string {
+	return func(k string) string { return m[k] }
+}
+
+func TestLoadConfig_fixedIDMismatch(t *testing.T) {
+	env := demoEnv()
+	env["DEMO_PRINCIPAL_WORKSPACE_ID"] = "00000000-0000-0000-0000-000000000000"
+	_, err := LoadConfig(envFromMap(env))
+	if err == nil {
+		t.Fatal("固定 workspace UUID 与权威来源不一致时应拒绝")
+	}
+	if !strings.Contains(err.Error(), "DEMO_PRINCIPAL_WORKSPACE_ID") {
+		t.Errorf("错误应命名变量 DEMO_PRINCIPAL_WORKSPACE_ID，实际: %v", err)
+	}
+}
+
+func TestLoadConfig_missingPrincipalEnv(t *testing.T) {
+	env := demoEnv()
+	delete(env, "DEMO_PRINCIPAL_USER_ID")
+	_, err := LoadConfig(envFromMap(env))
+	if err == nil {
+		t.Fatal("缺失 DEMO_PRINCIPAL_USER_ID 时应拒绝")
+	}
+	if !strings.Contains(err.Error(), "DEMO_PRINCIPAL_USER_ID") {
+		t.Errorf("错误应命名缺失变量，实际: %v", err)
+	}
+}
+
+func TestLoadConfig_missingSecretsNotLeaked(t *testing.T) {
+	env := demoEnv()
+	env["DEMO_PG_READER_PASSWORD"] = "" // 显式空
+	_, err := LoadConfig(envFromMap(env))
+	if err == nil {
+		t.Fatal("缺失演示密码时应拒绝")
+	}
+	if !strings.Contains(err.Error(), "DEMO_PG_READER_PASSWORD") {
+		t.Errorf("错误应命名缺失变量 DEMO_PG_READER_PASSWORD，实际: %v", err)
+	}
+	// 错误信息不得泄露任何演示密码值
+	for _, secret := range []string{"demo_pg_secret", "demo_mysql_secret"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("错误信息不得泄露 secret %q，实际: %v", secret, err)
+		}
+	}
+}
+
+func TestLoadConfig_ok(t *testing.T) {
+	cfg, err := LoadConfig(envFromMap(demoEnv()))
+	if err != nil {
+		t.Fatalf("LoadConfig 不应报错: %v", err)
+	}
+	if cfg.WorkspaceID != demoWorkspaceID || cfg.UserID != demoUserID {
+		t.Fatalf("固定 UUID 解析错误: ws=%s user=%s", cfg.WorkspaceID, cfg.UserID)
+	}
+	if len(cfg.Connections) != 2 {
+		t.Fatalf("应有两个演示连接，实际 %d", len(cfg.Connections))
+	}
+	if cfg.Connections[0].Engine != metadata.EnginePostgreSQL || cfg.Connections[1].Engine != metadata.EngineMySQL {
+		t.Fatalf("连接引擎错误: %+v", cfg.Connections)
+	}
+}
+
+// ---- 测试：Run（幂等 / 冲突 / 部分失败） --------------------------------------
+
+func TestRun_freshCreates(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	deps := f.fakeDeps()
+	cfg := newTestConfig()
+
+	if err := Run(ctx, cfg, deps); err != nil {
+		t.Fatalf("首次 seed 不应报错: %v", err)
+	}
+	if len(f.workspaces) != 1 || len(f.users) != 1 || len(f.members) != 1 {
+		t.Fatalf("身份数据数量错误: ws=%d user=%d member=%d", len(f.workspaces), len(f.users), len(f.members))
+	}
+	if f.users[cfg.UserID].Status != metadata.UserStatusActive {
+		t.Fatalf("demo user 必须为 active，实际 %s", f.users[cfg.UserID].Status)
+	}
+	if f.members[memberKey(cfg.WorkspaceID, cfg.UserID)].Role != metadata.RoleOwner {
+		t.Fatalf("demo member 必须为 owner")
+	}
+	if len(f.conns) != 2 {
+		t.Fatalf("应创建两个连接，实际 %d", len(f.conns))
+	}
+	if len(f.policies) != 2 {
+		t.Fatalf("应创建两个策略，实际 %d", len(f.policies))
+	}
+	if len(f.cred.envs) != 2 {
+		t.Fatalf("应创建两个凭证信封，实际 %d", len(f.cred.envs))
+	}
+	if f.cred.createCalls != 2 || f.createConnCalls != 2 || f.createPolicyCalls != 2 {
+		t.Fatalf("创建调用次数异常: cred=%d conn=%d policy=%d", f.cred.createCalls, f.createConnCalls, f.createPolicyCalls)
+	}
+	// 连接的 secret_ref 必须指向实际创建的 envelope
+	for _, c := range f.conns {
+		if _, ok := f.cred.envs[c.SecretRef.String()]; !ok {
+			t.Fatalf("连接 %s 引用了不存在的 envelope %s", c.ID, c.SecretRef)
+		}
+	}
+}
+
+func TestRun_secondRunNoop(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	deps := f.fakeDeps()
+
+	if err := Run(ctx, cfg, deps); err != nil {
+		t.Fatalf("二次 seed（一致数据）不应报错: %v", err)
+	}
+	if f.cred.createCalls != 0 || f.createConnCalls != 0 || f.createPolicyCalls != 0 {
+		t.Fatalf("一致数据应为 no-op，实际新增: cred=%d conn=%d policy=%d", f.cred.createCalls, f.createConnCalls, f.createPolicyCalls)
+	}
+}
+
+func TestRun_workspaceConflict(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	f.workspaces[cfg.WorkspaceID] = &metadata.Workspace{ID: cfg.WorkspaceID, Name: "Other Workspace", Settings: json.RawMessage("{}")}
+	f.users[cfg.UserID] = &metadata.User{ID: cfg.UserID, Email: "demo@example.local", Status: metadata.UserStatusActive}
+	f.members[memberKey(cfg.WorkspaceID, cfg.UserID)] = &metadata.WorkspaceMember{WorkspaceID: cfg.WorkspaceID, UserID: cfg.UserID, Role: metadata.RoleOwner}
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("固定 workspace ID 已存在但 name 不一致时应 fail-closed")
+	}
+	if !strings.Contains(err.Error(), cfg.WorkspaceID.String()) {
+		t.Errorf("错误应引用冲突的 workspace ID %s，实际: %v", cfg.WorkspaceID, err)
+	}
+}
+
+func TestRun_connectionConflict(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	// 预填一致身份，但 PG 连接 host 不一致
+	preseedConsistent(t, f, cfg)
+	pg := f.conns[cfg.Connections[0].ID]
+	pg.Host = "wrong-host"
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("固定连接 ID 已存在但字段不一致时应 fail-closed")
+	}
+	if !strings.Contains(err.Error(), cfg.Connections[0].ID.String()) {
+		t.Errorf("错误应引用冲突的连接 ID %s，实际: %v", cfg.Connections[0].ID, err)
+	}
+}
+
+func TestRun_policyNotReadable(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	fr := false
+	f.policies[cfg.Connections[0].ID] = &metadata.ConnectionPolicy{
+		WorkspaceID: cfg.WorkspaceID, ConnectionID: cfg.Connections[0].ID, AllowRead: &fr,
+		StatementTimeoutMs: policyStatementTimeoutMs, MaxRows: policyMaxRows,
+	}
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("已有策略 allow_read=false 时应 fail-closed")
+	}
+}
+
+func TestRun_orphanEnvelopeRejected(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	// 身份一致、连接缺失；但存在一个未绑定连接的 active envelope（上次 seed 中断遗留）
+	f.workspaces[cfg.WorkspaceID] = &metadata.Workspace{ID: cfg.WorkspaceID, Name: "Demo Workspace", Settings: json.RawMessage("{}")}
+	f.users[cfg.UserID] = &metadata.User{ID: cfg.UserID, Email: "demo@example.local", Status: metadata.UserStatusActive}
+	f.members[memberKey(cfg.WorkspaceID, cfg.UserID)] = &metadata.WorkspaceMember{WorkspaceID: cfg.WorkspaceID, UserID: cfg.UserID, Role: metadata.RoleOwner}
+	f.cred.envs["orphan-1"] = &metadata.CredentialEnvelope{
+		WorkspaceID: cfg.WorkspaceID, SecretRef: uuid.New(), Version: 1,
+		EnvelopeSuite: "AES256GCM-v1", KEKVersion: 1,
+	}
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("检测到未绑定连接的 active 凭证信封时应 fail-closed 拒绝")
+	}
+	if f.cred.createCalls != 0 {
+		t.Fatalf("拒绝时应不创建新凭证，实际调用 %d", f.cred.createCalls)
+	}
+	if !strings.Contains(err.Error(), "凭证信封") {
+		t.Errorf("错误应描述凭证信封冲突，实际: %v", err)
+	}
+}
+
+func TestRun_partialFailureLeavesOrphanThenRefuses(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfig()
+
+	// 第一次运行：连接创建中途失败（模拟 credential 已创建、connection 绑定失败）
+	f := newSeedFake()
+	f.connCreateErr = uerr("simulated connection failure")
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("连接创建失败时 seed 应返回错误")
+	}
+	if len(f.cred.envs) == 0 {
+		t.Fatal("模拟失败应已创建至少一个凭证信封（反映真实中途失败状态）")
+	}
+
+	// 第二次运行：遗留孤立 envelope 被明确拒绝
+	f2 := newSeedFake()
+	for _, e := range f.cred.envs {
+		f2.cred.envs[e.SecretRef.String()] = e
+	}
+	f2.workspaces[cfg.WorkspaceID] = &metadata.Workspace{ID: cfg.WorkspaceID, Name: "Demo Workspace", Settings: json.RawMessage("{}")}
+	f2.users[cfg.UserID] = &metadata.User{ID: cfg.UserID, Email: "demo@example.local", Status: metadata.UserStatusActive}
+	f2.members[memberKey(cfg.WorkspaceID, cfg.UserID)] = &metadata.WorkspaceMember{WorkspaceID: cfg.WorkspaceID, UserID: cfg.UserID, Role: metadata.RoleOwner}
+
+	err = Run(ctx, cfg, f2.fakeDeps())
+	if err == nil {
+		t.Fatal("遗留孤立凭证信封时二次运行应明确拒绝（不可静默恢复）")
+	}
+}
+
+func TestRun_secretNotLeakedOnError(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	// 制造连接冲突
+	f.conns[cfg.Connections[0].ID].Name = "different name"
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if err == nil {
+		t.Fatal("应有错误")
+	}
+	for _, secret := range []string{"demo_pg_secret", "demo_mysql_secret", "change_me"} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("错误信息不得泄露 secret %q，实际: %v", secret, err)
+		}
+	}
+}
+
+// uerr 构造一个简单 error。
+type uerr string
+
+func (e uerr) Error() string { return string(e) }
