@@ -265,6 +265,43 @@ func TestSeedIntegration_orphanEnvelopeRejected(t *testing.T) {
 	}
 }
 
+// P1（Codex）：连接已存在但策略缺失（上次 seed 在策略写入前中断）→ 二次 seed 补建而非拒绝。
+func TestSeedIntegration_policyMissingRecovered(t *testing.T) {
+	db, deps := setupIntegrationDeps(t)
+	ctx := context.Background()
+	cfg := newTestConfig()
+
+	if err := Run(ctx, cfg, deps); err != nil {
+		t.Fatalf("首次 seed 失败: %v", err)
+	}
+	if _, err := db.Exec(`DELETE FROM connection_policies WHERE connection_id=$1`, cfg.Connections[0].ID); err != nil {
+		t.Fatalf("删除策略失败: %v", err)
+	}
+	if err := Run(ctx, cfg, deps); err != nil {
+		t.Fatalf("策略缺失应作为可恢复阶段补建而非拒绝: %v", err)
+	}
+	if n := countQuery(t, db, `SELECT count(*) FROM connection_policies WHERE connection_id=$1`, cfg.Connections[0].ID); n != 1 {
+		t.Fatalf("缺失策略应被补建，实际 %d", n)
+	}
+}
+
+// P2（Codex）：已存在固定 ID 策略开启 allow_write 时二次 seed fail-closed。
+func TestSeedIntegration_policyWriteEnabledRejected(t *testing.T) {
+	db, deps := setupIntegrationDeps(t)
+	ctx := context.Background()
+	cfg := newTestConfig()
+
+	if err := Run(ctx, cfg, deps); err != nil {
+		t.Fatalf("首次 seed 失败: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE connection_policies SET allow_write=true WHERE connection_id=$1`, cfg.Connections[0].ID); err != nil {
+		t.Fatalf("篡改策略失败: %v", err)
+	}
+	if err := Run(ctx, cfg, deps); err == nil {
+		t.Fatal("allow_write=true 的已存在策略应 fail-closed")
+	}
+}
+
 // ---- 测试：门控先于数据库 --------------------------------------------------------
 
 func TestSeedIntegration_switchGateBeforeDB(t *testing.T) {

@@ -94,11 +94,23 @@ func createConnection(ctx context.Context, deps Deps, cfg Config, spec Connectio
 	}
 
 	// 3. 策略（allow_read=true 显式；安全默认；不启用 DML/DDL/export）。
+	if err := createDefaultPolicy(ctx, deps, cfg, spec); err != nil {
+		return err
+	}
+	return nil
+}
+
+// createDefaultPolicy 创建演示连接策略：allow_read=true 显式，allow_write/allow_export
+// 显式 false（DML/DDL/export 禁用，Codex P2），使用已批准 max_rows/timeout。
+func createDefaultPolicy(ctx context.Context, deps Deps, cfg Config, spec ConnectionSpec) error {
 	tr := true
+	fl := false
 	pol := &metadata.ConnectionPolicy{
 		WorkspaceID:        cfg.WorkspaceID,
 		ConnectionID:       spec.ID,
 		AllowRead:          &tr,
+		AllowWrite:         &fl,
+		AllowExport:        &fl,
 		StatementTimeoutMs: policyStatementTimeoutMs,
 		MaxRows:            policyMaxRows,
 	}
@@ -119,8 +131,16 @@ func verifyExistingConnection(ctx context.Context, deps Deps, cfg Config, spec C
 	if err != nil {
 		return fmt.Errorf("读取演示连接策略失败: %w", err)
 	}
+	if pol == nil {
+		// 策略缺失 = 上次 seed 在策略写入前中断（连接已存在、凭证已绑定）。
+		// 视为可恢复的不完整 seed 阶段：补建期望策略（Codex P1）。
+		if err := createDefaultPolicy(ctx, deps, cfg, spec); err != nil {
+			return fmt.Errorf("补充创建演示连接策略 %s 失败: %w", spec.ID, err)
+		}
+		return nil
+	}
 	if !policyMatches(pol) {
-		return fmt.Errorf("%w: 连接 %s 的已存在策略不满足演示安全默认（allow_read=true, max_rows=%d, timeout=%dms）",
+		return fmt.Errorf("%w: 连接 %s 的已存在策略不满足演示安全默认（allow_read=true, allow_write=false, allow_export=false, max_rows=%d, timeout=%dms）",
 			ErrDemoSeedRefused, spec.ID, policyMaxRows, policyStatementTimeoutMs)
 	}
 	payload, err := deps.Resolver.ResolveCredential(ctx, cfg.WorkspaceID, conn.SecretRef, conn.SecretVersion)
@@ -145,10 +165,13 @@ func connectionMatches(c *metadata.Connection, wsID uuid.UUID, spec ConnectionSp
 		c.Environment == spec.Environment
 }
 
-// policyMatches 校验策略为显式 allow_read=true 且使用已批准安全默认。
+// policyMatches 校验策略为显式 allow_read=true、allow_write=false、allow_export=false，
+// 且使用已批准安全默认（Codex P2：拒绝写/导出开启的演示策略，DML/DDL/export 必须禁用）。
 func policyMatches(p *metadata.ConnectionPolicy) bool {
 	return p != nil &&
 		p.AllowRead != nil && *p.AllowRead &&
+		p.AllowWrite != nil && !*p.AllowWrite &&
+		p.AllowExport != nil && !*p.AllowExport &&
 		p.StatementTimeoutMs == policyStatementTimeoutMs &&
 		p.MaxRows == policyMaxRows
 }

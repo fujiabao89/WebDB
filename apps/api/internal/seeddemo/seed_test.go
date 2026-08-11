@@ -265,8 +265,10 @@ func preseedConsistent(t *testing.T, f *seedFake, cfg Config) {
 		}
 		f.conns[spec.ID] = conn
 		tr := true
+		fl := false
 		f.policies[spec.ID] = &metadata.ConnectionPolicy{
 			WorkspaceID: cfg.WorkspaceID, ConnectionID: spec.ID, AllowRead: &tr,
+			AllowWrite: &fl, AllowExport: &fl,
 			StatementTimeoutMs: policyStatementTimeoutMs, MaxRows: policyMaxRows,
 		}
 	}
@@ -483,6 +485,54 @@ func TestRun_policyNotReadable(t *testing.T) {
 	err := Run(ctx, cfg, f.fakeDeps())
 	if err == nil {
 		t.Fatal("已有策略 allow_read=false 时应 fail-closed")
+	}
+}
+
+// P1（Codex）：策略写入失败遗留"连接已存在但策略缺失"时，二次 seed 应补建而非永久拒绝。
+func TestRun_policyMissingRecovered(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	// 模拟上次 seed 在策略写入前中断：连接/凭证已存在但策略缺失。
+	delete(f.policies, cfg.Connections[0].ID)
+
+	if err := Run(ctx, cfg, f.fakeDeps()); err != nil {
+		t.Fatalf("策略缺失应作为可恢复阶段补建而非拒绝: %v", err)
+	}
+	if _, ok := f.policies[cfg.Connections[0].ID]; !ok {
+		t.Fatal("缺失策略应被补建")
+	}
+	if f.createPolicyCalls != 1 {
+		t.Fatalf("应补建 1 条策略，实际 %d", f.createPolicyCalls)
+	}
+}
+
+// P2（Codex）：已存在固定 ID 策略开启 allow_write 时 fail-closed（DML 必须禁用）。
+func TestRun_policyWriteEnabledRejected(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	tr := true
+	f.policies[cfg.Connections[0].ID].AllowWrite = &tr
+
+	if err := Run(ctx, cfg, f.fakeDeps()); err == nil {
+		t.Fatal("已存在策略 allow_write=true 时应 fail-closed")
+	}
+}
+
+// P2（Codex）：已存在固定 ID 策略开启 allow_export 时 fail-closed（导出必须禁用）。
+func TestRun_policyExportEnabledRejected(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	preseedConsistent(t, f, cfg)
+	tr := true
+	f.policies[cfg.Connections[0].ID].AllowExport = &tr
+
+	if err := Run(ctx, cfg, f.fakeDeps()); err == nil {
+		t.Fatal("已存在策略 allow_export=true 时应 fail-closed")
 	}
 }
 
