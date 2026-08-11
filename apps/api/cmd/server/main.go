@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -79,6 +80,15 @@ func runServe() error {
 		return fmt.Errorf("连接元数据库失败: %w", err)
 	}
 	defer db.Close()
+	// 元数据库连接池有界配置（Owner 决策 / Codex Review finding）：
+	// 仅接受显式 env；缺失、非法或 idle > open 时拒绝启动，不回退到无界默认。
+	maxOpen, maxIdle, maxLife, err := metaPoolConfig()
+	if err != nil {
+		return err
+	}
+	db.SetMaxOpenConns(maxOpen)
+	db.SetMaxIdleConns(maxIdle)
+	db.SetConnMaxLifetime(maxLife)
 	store := metadata.NewPGStore(db)
 
 	// 凭证解析（KEK 从环境加载；缺失 → 启动失败，不写明文密钥到任何输出）。
@@ -250,6 +260,60 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// metaPoolConfig 解析元数据库连接池配置（Owner 决策 / Codex Review finding）：
+// 仅接受显式 env（META_DB_MAX_OPEN_CONNS / META_DB_MAX_IDLE_CONNS /
+// META_DB_CONN_MAX_LIFETIME）；任一缺失、非法（非整数/非正/非负）、或
+// idle > open 时返回错误 → 服务拒绝启动。绝不回退到 database/sql 无界默认
+// （MaxOpenConns=0 即无界），也绝不引入未批准的默认值。
+func metaPoolConfig() (maxOpen, maxIdle int, maxLife time.Duration, err error) {
+	maxOpen, err = envPositiveInt("META_DB_MAX_OPEN_CONNS")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	maxIdle, err = envNonNegInt("META_DB_MAX_IDLE_CONNS")
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if maxIdle > maxOpen {
+		return 0, 0, 0, fmt.Errorf("META_DB_MAX_IDLE_CONNS (%d) 不能大于 META_DB_MAX_OPEN_CONNS (%d)", maxIdle, maxOpen)
+	}
+	lifeStr := os.Getenv("META_DB_CONN_MAX_LIFETIME")
+	if lifeStr == "" {
+		return 0, 0, 0, fmt.Errorf("META_DB_CONN_MAX_LIFETIME 必须显式配置")
+	}
+	maxLife, err = time.ParseDuration(lifeStr)
+	if err != nil || maxLife <= 0 {
+		return 0, 0, 0, fmt.Errorf("META_DB_CONN_MAX_LIFETIME 非法: %q（必须为正值时长）", lifeStr)
+	}
+	return maxOpen, maxIdle, maxLife, nil
+}
+
+// envPositiveInt 读取必须为正整数的 env 值；缺失或非法返回错误（fail-closed）。
+func envPositiveInt(name string) (int, error) {
+	s := os.Getenv(name)
+	if s == "" {
+		return 0, fmt.Errorf("%s 必须显式配置", name)
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, fmt.Errorf("%s 非法: %q（必须为正整数）", name, s)
+	}
+	return n, nil
+}
+
+// envNonNegInt 读取必须为非负整数的 env 值；缺失或非法返回错误（fail-closed）。
+func envNonNegInt(name string) (int, error) {
+	s := os.Getenv(name)
+	if s == "" {
+		return 0, fmt.Errorf("%s 必须显式配置", name)
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("%s 非法: %q（必须为非负整数）", name, s)
+	}
+	return n, nil
 }
 
 // allowInsecureLocalDemo 从环境开关 ALLOW_INSECURE_LOCAL_DEMO 严格解析（CodeRabbit #4）：

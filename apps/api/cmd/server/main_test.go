@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHealthHandler_GET(t *testing.T) {
@@ -154,5 +155,62 @@ func TestAllowInsecureLocalDemo_invalidRejected(t *testing.T) {
 	t.Setenv("ALLOW_INSECURE_LOCAL_DEMO", "banana")
 	if _, err := allowInsecureLocalDemo(); err == nil {
 		t.Fatal("非法值必须拒绝启动（fail-closed），不得宽松解析")
+	}
+}
+
+// metaPoolConfig 的 fail-closed 与有界配置测试（Owner 决策 / Codex Review finding）：
+// 缺失、非法、idle > open 均拒绝启动；合法 env 返回有界值。
+
+func TestMetaPoolConfig_missingRejected(t *testing.T) {
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "")
+	if _, _, _, err := metaPoolConfig(); err == nil {
+		t.Fatal("池配置缺失必须拒绝启动（不回退无界默认）")
+	}
+}
+
+func TestMetaPoolConfig_invalidRejected(t *testing.T) {
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "banana")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "2")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "5m")
+	if _, _, _, err := metaPoolConfig(); err == nil {
+		t.Fatal("非法 max_open 必须拒绝启动")
+	}
+
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "10")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "-1")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "5m")
+	if _, _, _, err := metaPoolConfig(); err == nil {
+		t.Fatal("非法 max_idle 必须拒绝启动")
+	}
+
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "10")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "2")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "not-a-duration")
+	if _, _, _, err := metaPoolConfig(); err == nil {
+		t.Fatal("非法 conn_max_lifetime 必须拒绝启动")
+	}
+}
+
+func TestMetaPoolConfig_idleGreaterThanOpenRejected(t *testing.T) {
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "10")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "11")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "5m")
+	if _, _, _, err := metaPoolConfig(); err == nil {
+		t.Fatal("idle > open 必须拒绝启动")
+	}
+}
+
+func TestMetaPoolConfig_validReturnsBounded(t *testing.T) {
+	t.Setenv("META_DB_MAX_OPEN_CONNS", "10")
+	t.Setenv("META_DB_MAX_IDLE_CONNS", "2")
+	t.Setenv("META_DB_CONN_MAX_LIFETIME", "5m")
+	maxOpen, maxIdle, maxLife, err := metaPoolConfig()
+	if err != nil {
+		t.Fatalf("合法配置不应报错: %v", err)
+	}
+	if maxOpen != 10 || maxIdle != 2 || maxLife != 5*time.Minute {
+		t.Fatalf("池配置 = %d/%d/%v, want 10/2/5m", maxOpen, maxIdle, maxLife)
 	}
 }
