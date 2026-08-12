@@ -27,6 +27,43 @@ func TestWireRowLimitCountsEscapedBytes(t *testing.T) {
 	}
 }
 
+// TestWireCellUUIDBytes 验证 PG uuid 解码为 [16]byte 时编码为规范 UUID 字符串（Codex P1）。
+func TestWireCellUUIDBytes(t *testing.T) {
+	u := [16]byte{0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8, 0xbb, 0x6d, 0x6b, 0xb9, 0xbd, 0x38, 0x0a, 0x11}
+	got, _, err := wireCell("uuid", u)
+	if err != nil {
+		t.Fatalf("uuid [16]byte: %v", err)
+	}
+	if got != "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11" {
+		t.Fatalf("uuid = %v, want a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", got)
+	}
+}
+
+// TestWireMySQLTimestampText 验证 MySQL DATETIME/TIMESTAMP 文本规范化为 wire 格式（Codex P2）。
+func TestWireMySQLTimestampText(t *testing.T) {
+	got, _, err := wireCell("timestamp", []byte("2026-08-09 12:34:56"))
+	if err != nil {
+		t.Fatalf("timestamp: %v", err)
+	}
+	if got != "2026-08-09T12:34:56" {
+		t.Fatalf("timestamp = %v, want 2026-08-09T12:34:56", got)
+	}
+}
+
+// TestWireJSONMapCellLimit 验证解码 JSONB map 序列化后超过 256 KiB cell 上限返回
+// result_too_large（Codex P1：copyAndMeasure 对 map 按固定 fallback 计，未查实际大小）。
+func TestWireJSONMapCellLimit(t *testing.T) {
+	big := strings.Repeat("x", 300*1024)
+	qr := &adapter.QueryResult{
+		Columns: []adapter.ColumnInfo{{Name: "j", DataType: "3802"}}, // jsonb
+		Rows:    [][]any{{map[string]interface{}{"data": big}}},
+	}
+	_, err := toWireResult("postgresql", qr)
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("300KiB JSONB map 应触发 result_too_large（>256 KiB cell 上限），实际 err=%v", err)
+	}
+}
+
 // TestWireCellTypes 验证 wire cell 转换契约（P0-06A §13.1 D08）：
 // NULL→null、int/decimal→十进制字符串、bool→boolean、有限 float→number、
 // 时间→规范字符串、binary→Base64、json→透传、text/uuid→string。

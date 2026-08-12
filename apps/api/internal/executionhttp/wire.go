@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/fujiabao89/webdb/internal/adapter"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -34,6 +35,11 @@ const (
 
 // MaxRowBytes 单行字节上限（P0-06A §13.2 D06a：1 MiB，含单元格加总）。
 const MaxRowBytes = 1 << 20
+
+// MaxCellBytes 单单元格字节上限（P0-06A §13.2 D06a：256 KiB）。
+// adapter copyAndMeasure 对 map 等类型按固定 fallback 计，不反映真实大小；
+// wire 层对 JSON 序列化后的单元格做最终校验（Codex P1）。
+const MaxCellBytes = 256 << 10
 
 // WireColumn 结果列 wire 元数据。
 type WireColumn struct {
@@ -237,11 +243,29 @@ func wireCell(wt string, v any) (any, int, error) {
 		// pgx v5 把 PG jsonb 解码为 map[string]interface{} 等 JSON 值（非 string）；
 		// JSON 序列化为字符串透传（浏览器 isWireCell 仅接受 string，Codex P1 #2）。
 		// json.Marshal 输出恒为合法 JSON，无需重复 Valid 校验；len(b) 即编码后长度。
+		// cell 上限（Codex P1）：copyAndMeasure 对 map 按固定 fallback 计未查实际大小，
+		// 此处对序列化结果执行 256 KiB cell 上限。
 		if b, err := json.Marshal(v); err == nil {
-			return string(b), len(b), nil
+			s := string(b)
+			if len(s) > MaxCellBytes {
+				return nil, 0, codef(ErrResultTooLarge, "cell byte limit exceeded")
+			}
+			return s, len(s), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
-	default: // text/uuid
+	case WireUUID:
+		switch t := v.(type) {
+		case string:
+			return t, len(t), nil
+		case []byte:
+			return string(t), len(t), nil
+		case [16]byte:
+			// pgx 把 PG uuid 解码为 [16]byte；格式化为规范 UUID 字符串（Codex P1）。
+			s := uuid.UUID(t).String()
+			return s, len(s), nil
+		}
+		return nil, 0, errUnrepresentable(wt, v)
+	default: // text
 		if s, ok := asString(v); ok {
 			// text 单元格同样按 JSON 编码后长度计（Codex P2，防转义绕过行限）。
 			eb, err := json.Marshal(s)
@@ -371,9 +395,13 @@ func timeString(wt string, v any) (any, int, error) {
 	case time.Time:
 		return formatTime(wt, t), 32, nil
 	case string:
-		return t, len(t), nil
+		// MySQL 时间文本规范化（Codex P2）。
+		ns := normalizeTimeText(wt, t)
+		return ns, len(ns), nil
 	case []byte:
-		return string(t), len(t), nil
+		// MySQL 驱动默认把 DATETIME/TIMESTAMP 解码为 []byte 文本。
+		ns := normalizeTimeText(wt, string(t))
+		return ns, len(ns), nil
 	default:
 		if st, ok := v.(fmt.Stringer); ok {
 			s := st.String()
@@ -381,6 +409,19 @@ func timeString(wt string, v any) (any, int, error) {
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	}
+}
+
+// normalizeTimeText 把数据库驱动返回的时间文本规范化为 wire 格式（Codex P2）。
+// MySQL DATETIME/TIMESTAMP 默认返回 `YYYY-MM-DD HH:MM:SS`，wire 契约用 `T` 分隔
+// （YYYY-MM-DDTHH:MM:SS[.ffffff]）；DATE/TIME 文本已是 wire 形式，原样返回。
+func normalizeTimeText(wt string, s string) string {
+	switch WireType(wt) {
+	case WireTimestamp, WireTimestampz:
+		if len(s) >= 11 && s[10] == ' ' {
+			return s[:10] + "T" + s[11:]
+		}
+	}
+	return s
 }
 
 // formatTime 按 wire 类型格式化 time.Time（保留原语义，不 UTC 归一化，
