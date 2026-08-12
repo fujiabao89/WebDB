@@ -58,16 +58,19 @@ func endReadOnlyPG(ctx context.Context, conn *pgxpool.Conn) error {
 // （@@transaction_read_only 只反映会话默认值，实测 START READ ONLY 后仍为 0），
 // 语句成功即确认只读语义（MySQL 保证 READ ONLY 事务拒绝数据修改语句）。
 func beginReadOnlyMySQL(ctx context.Context, conn *sql.Conn) error {
-	// 同时检查 @@session.in_transaction（Codex P1）：@@autocommit=1 不能证明无活动
-	// 事务——MySQL 8.4 显式 START TRANSACTION 后 autocommit 仍为 1 而 in_transaction=1，
-	// 若放行，下方 START TRANSACTION READ ONLY 会隐式提交该可写事务（CT-22 fail-closed
-	// 失效，可能提交泄漏写入）。
-	var autocommit, inTx int
-	if err := conn.QueryRowContext(ctx, "SELECT @@autocommit, @@session.in_transaction").Scan(&autocommit, &inTx); err != nil {
-		return wrapReadOnly("check transaction state", err)
+	// 检查 @@autocommit（手动事务模式拒绝）。注：Codex P1 建议加查 @@session.in_transaction
+	// 以覆盖"autocommit=1 但已有显式 START TRANSACTION"的活动事务场景；但实测
+	// MySQL 8.4.10（本仓库演示镜像）无 in_transaction 系统变量（Unknown system variable），
+	// 且最小权限 demo_reader 无 PROCESS/perf_schema 权限无法查 innodb_trx 或
+	// events_transactions_current。活动事务残留由 WebDB 每次查询显式
+	// BEGIN READ ONLY + ROLLBACK 及 database/sql 池归还清理保证（待 Owner 决策
+	// 是否授予只读系统状态权限以实现会话级活动事务检测）。
+	var autocommit int
+	if err := conn.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&autocommit); err != nil {
+		return wrapReadOnly("check autocommit", err)
 	}
-	if autocommit != 1 || inTx != 0 {
-		return newError(ErrConnectionFailed, "connection has active transaction", nil)
+	if autocommit != 1 {
+		return newError(ErrConnectionFailed, "connection has manual transaction mode", nil)
 	}
 	if _, err := conn.ExecContext(ctx, "START TRANSACTION READ ONLY"); err != nil {
 		return wrapReadOnly("begin read-only transaction", err)
