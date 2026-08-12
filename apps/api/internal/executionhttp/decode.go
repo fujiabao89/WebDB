@@ -60,6 +60,8 @@ func decodeJSONBody(w http.ResponseWriter, r *http.Request, maxBytes int64, dst 
 }
 
 // codef 构造带稳定错误码的错误（供 handler 内部使用）。
+// %w 包装稳定码（StableErrorCode 实现 error），使 errors.Is/errors.As 可提取
+// （Codex P2 回归：wireCode 用 errors.Is 保留 result_too_large，需错误链可匹配）。
 func codef(code StableErrorCode, format string, a ...any) error {
-	return fmt.Errorf("%s: %s", code, fmt.Sprintf(format, a...))
+	return fmt.Errorf("%w: %s", code, fmt.Sprintf(format, a...))
 }

@@ -223,21 +223,26 @@ func wireCell(wt string, v any) (any, int, error) {
 			// string/number/boolean/null，json.RawMessage（对象/数组）会被客户端丢弃；
 			// 仍校验 JSON 合法，非法/截断 JSON 在写响应前返回 database_error，
 			// 避免透传无效 JSON 产生截断的 200 响应（CodeRabbit #20）。
+			// 字节预算按实际 JSON 编码后长度计（Codex P2）：含换行/控制符/`<` 等
+			// 转义字符时 len(s) 低估 2-6 倍，会绕过 1 MiB 行限。
 			if !json.Valid([]byte(s)) {
 				return nil, 0, codef(ErrDatabaseError, "invalid json value in result")
 			}
-			return s, len(s), nil
+			eb, _ := json.Marshal(s)
+			return s, len(eb), nil
 		}
 		// pgx v5 把 PG jsonb 解码为 map[string]interface{} 等 JSON 值（非 string）；
 		// JSON 序列化为字符串透传（浏览器 isWireCell 仅接受 string，Codex P1 #2）。
-		// json.Marshal 输出恒为合法 JSON，无需重复 Valid 校验。
+		// json.Marshal 输出恒为合法 JSON，无需重复 Valid 校验；len(b) 即编码后长度。
 		if b, err := json.Marshal(v); err == nil {
 			return string(b), len(b), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	default: // text/uuid
 		if s, ok := asString(v); ok {
-			return s, len(s), nil
+			// text 单元格同样按 JSON 编码后长度计（Codex P2，防转义绕过行限）。
+			eb, _ := json.Marshal(s)
+			return s, len(eb), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	}

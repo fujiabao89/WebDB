@@ -873,6 +873,25 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	}
 
 	result.AdapterCalled = true
+	// panic finalizer（Codex P1）：NextPage 接触目标库后 panic 时，现有 defer 仅
+	// abort claim + release handle，auditNextPage 不执行 → 该物理页无独立
+	// Execution/Audit。此处调用 auditNextPage 用独立有界 context（WithoutCancel +
+	// auditWriteTimeout）创建 failed Execution + Audit，再重新抛出由 HTTP middleware
+	// 返回 500；审计失败仅记录安全告警（已尽力），不吞 panic。
+	defer func() {
+		if rec := recover(); rec != nil {
+			claim.Abort()
+			handle.Release()
+			released = true
+			if aErr := p.auditNextPage(ctx, req, state, conn, result, nil, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
+				metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+					TraceID: result.TraceID, WorkspaceID: conn.WorkspaceID,
+					Code: string(ErrInternalError), OccurredAt: p.clock(),
+				})
+			}
+			panic(rec)
+		}
+	}()
 	queryResult, err := handle.NextPage(execCtx, adapter.UserWorkspaceScope{
 		UserID:      req.Principal.UserID.String(),
 		WorkspaceID: req.Principal.WorkspaceID.String(),

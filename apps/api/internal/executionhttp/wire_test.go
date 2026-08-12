@@ -2,6 +2,7 @@ package executionhttp
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
 	"strconv"
 	"strings"
@@ -10,6 +11,21 @@ import (
 
 	"github.com/fujiabao89/webdb/internal/adapter"
 )
+
+// TestWireRowLimitCountsEscapedBytes 验证 text/json 单元格的行限按 JSON 编码后
+// 长度计（Codex P2）：4×256 KiB `<` 字符未转义长度恰为 1 MiB 会通过，但 JSON
+// 编码为 `<` 后约 6 MiB，必须触发 result_too_large（防转义绕过 1 MiB 行限）。
+func TestWireRowLimitCountsEscapedBytes(t *testing.T) {
+	cell := strings.Repeat("<", 256*1024)
+	qr := &adapter.QueryResult{
+		Columns: []adapter.ColumnInfo{{Name: "c", DataType: "25"}}, // text
+		Rows:    [][]any{{cell, cell, cell, cell}},
+	}
+	_, err := toWireResult("postgresql", qr)
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("4×256KiB '<' cells 应触发 result_too_large（JSON 转义后 ~6 MiB > 1 MiB 行限），实际 err=%v", err)
+	}
+}
 
 // TestWireCellTypes 验证 wire cell 转换契约（P0-06A §13.1 D08）：
 // NULL→null、int/decimal→十进制字符串、bool→boolean、有限 float→number、
