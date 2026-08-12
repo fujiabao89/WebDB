@@ -430,6 +430,11 @@ func TestNextPageLoadTableMetadataFailureFinalizes(t *testing.T) {
 	if r2.NextPageToken != nil {
 		t.Fatal("failed page must not return new token")
 	}
+	// 失败路径不得调用 Adapter.NextPage（目标库执行 0 次；LoadTableMetadata 失败在
+	// 执行前收敛，CodeRabbit）。
+	if client.handle.nextCalls != 0 {
+		t.Fatalf("Adapter.NextPage calls = %d, want 0（失败路径不得访问目标库执行）", client.handle.nextCalls)
+	}
 
 	execs := txStore.allUpdatedExecs()
 	if len(execs) == 0 {
