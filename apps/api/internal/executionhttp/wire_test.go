@@ -50,6 +50,21 @@ func TestWireMySQLTimestampText(t *testing.T) {
 	}
 }
 
+// TestWireCellCapCountsEscapedBytes 验证 wire 编码后单单元格超过 256 KiB cell 上限
+// 返回 result_too_large（Codex P2：150 KiB 换行文本 json.Marshal 编码为 \\n 约 2×，
+// adapter copyAndMeasure 按未编码长度放行，wire 层须最终校验）。
+func TestWireCellCapCountsEscapedBytes(t *testing.T) {
+	cell := strings.Repeat("\n", 150*1024)
+	qr := &adapter.QueryResult{
+		Columns: []adapter.ColumnInfo{{Name: "c", DataType: "25"}},
+		Rows:    [][]any{{cell}},
+	}
+	_, err := toWireResult("postgresql", qr)
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("150KiB '\\n' 编码后 ~300KiB 应触发 cell 上限 result_too_large，实际 err=%v", err)
+	}
+}
+
 // TestWireJSONMapCellLimit 验证解码 JSONB map 序列化后超过 256 KiB cell 上限返回
 // result_too_large（Codex P1：copyAndMeasure 对 map 按固定 fallback 计，未查实际大小）。
 func TestWireJSONMapCellLimit(t *testing.T) {

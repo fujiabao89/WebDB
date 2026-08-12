@@ -170,6 +170,13 @@ func toWireResult(engine string, qr *adapter.QueryResult) (*WireResult, error) {
 				return nil, err
 			}
 			dst[i] = cv
+			// cell 上限（Codex P2）：wire 编码后单单元格 >256 KiB 拒绝（转义文本/JSON
+			// map 等，adapter copyAndMeasure 可能按固定大小计）。统一在 wire 层最终校验。
+			// binary 除外：其 cell 上限由 adapter copyAndMeasure 按原始字节保证，
+			// 本层 cb 为 Base64 长度，属行限预算。
+			if cols[i].WireType != string(WireBinary) && cb > MaxCellBytes {
+				return nil, codef(ErrResultTooLarge, "cell byte limit exceeded")
+			}
 			rowBytes += cb
 			if rowBytes > MaxRowBytes {
 				return nil, codef(ErrResultTooLarge, "row byte limit exceeded")
