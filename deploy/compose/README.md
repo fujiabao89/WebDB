@@ -9,8 +9,21 @@
 | `webdb-meta` | WebDB 元数据库（PostgreSQL 16） | `postgres:16-alpine` | `5432:5432` | — |
 | `demo-pg` | 演示 PostgreSQL + 合成数据 + 只读账号 | `postgres:16-alpine` | `5433:5432` | — |
 | `demo-mysql` | 演示 MySQL 8.4 LTS + 合成数据 + 只读账号 | `mysql:8.4`（固定 digest） | `3306:3306` | — |
-| `api` | Go API/执行服务（唯一可连接 DB 的组件） | 本地构建 `apps/api`（dev target） | `8080:8080` | webdb-meta, demo-pg, demo-mysql |
+| `api-migrate` | one-shot 迁移（`api migrate up`，退出即成功） | 本地构建 `apps/api`（dev target） | — | webdb-meta (healthy) |
+| `demo-seed` | one-shot 演示 seed（`WEBDB_DEMO_SEED=true`，退出即成功） | 本地构建 `apps/api`（dev target） | — | api-migrate (completed) |
+| `api` | Go API/执行服务（唯一可连接 DB 的组件） | 本地构建 `apps/api`（dev target） | `8080:8080` | webdb-meta, demo-pg, demo-mysql, api-migrate, demo-seed |
 | `web` | React 前端 Vite 开发服务器 | 本地构建 `apps/web`（dev target） | `3000:5173` | api |
+
+**启动依赖链（fail-closed）：**
+
+```text
+webdb-meta healthy → api-migrate completed → demo-seed completed → api healthy → web healthy
+```
+
+- `api-migrate` 使用独立管理员 `META_MIGRATE_USER/PASSWORD` 执行 `migrate up`；失败时 `demo-seed`/`api`/`web` 均不启动（`service_completed_successfully`）。
+- **待决（Owner）**：元数据库迁移账号与运行时账号是否拆分及各自授权范围。本地 Compose 的 `api-migrate`/`demo-seed` 当前沿用超管 `webdb`（仅限本地演示）；生产最小权限运行时账号 `webdb_app_runtime` 由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）创建、本地 Compose 未挂载，落地（更新 `META_MIGRATE_USER/PASSWORD`、`META_DB_USER`、ADR 与验证步骤）需 Owner 批准后实施。
+- `demo-seed` 仅在 `WEBDB_DEMO_SEED=true` 时执行；生产部署不设置该开关则**绝不自动 seed**。
+- `api`/`web` 依赖 `demo-seed` 成功退出后才启动，保证空卷首次启动即有业务表、演示身份与可授权连接。
 
 Web 与 API 通过 `webdb-frontend` 通信；只有 API 和数据库服务加入 `webdb-backend`。API 是两个网络之间的唯一应用边界，浏览器和 Web 容器不能通过 Compose 后端网络直连数据库。健康检查见各服务定义的 `healthcheck`。
 
@@ -55,7 +68,9 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 docker compose -f deploy/compose/docker-compose.yml ps
 ```
 
-5 个服务均应显示 `healthy`。
+5 个常驻服务（`webdb-meta`、`demo-pg`、`demo-mysql`、`api`、`web`）均应显示 `healthy`；
+`api-migrate` 与 `demo-seed` 为 one-shot 服务，成功退出后显示 `exited (0)`（这是预期状态，
+不是启动失败）。
 
 ### 4. 健康检查
 
@@ -103,12 +118,40 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 
 > `-v` 会删除 `webdb-p0_webdb-meta-data`、`webdb-p0_demo-pg-data`、`webdb-p0_demo-mysql-data` 三个合成数据卷。**未经明确授权不得执行**。
 
+## 演示身份 seed
+
+首次启动时 `demo-seed` 会在元数据库创建以下**固定合成**演示资源（不含真实 PII）：
+
+| 资源 | 固定 UUID | 说明 |
+|------|-----------|------|
+| workspace | `f1160d75-26f7-46e0-b3e0-570ea65c232e` | `Demo Workspace` |
+| user | `73e8c8f0-83e4-4096-8400-15ca15073d6b` | `demo@example.local`，status=active |
+| workspace_member | (workspace, user) | role=owner |
+| connection（PostgreSQL） | `d80a86cb-d4e7-4afb-9ab1-8df572ad9c69` | `demo-pg:5432/webdb_demo`，账号 `demo_reader` |
+| connection（MySQL） | `37760cae-7ddc-408d-b2b0-4505c3ea2243` | `demo-mysql:3306/webdb_demo`，账号 `demo_reader`（固定值） |
+| connection_policy ×2 | — | allow_read=true，max_rows=500，statement_timeout=5000ms |
+| credential_envelope ×2 | 由 LifecycleManager 生成 | 演示只读密码经 Envelope v1 加密（仅存密文） |
+
+**安全说明：**
+
+- 演示数据库密码仅经 `DEMO_PG_READER_PASSWORD` / `DEMO_MYSQL_READER_PASSWORD` 环境变量注入，交由 `LifecycleManager` 加密，**绝不写入 SQL/文件/命令行/日志**。只读账号名固定为 `demo_reader`（`DEMO_MYSQL_USER` 仅接受该值，不参与密码加密）。
+- KEK 使用版本化 `WEBDB_KEK_V1` + `WEBDB_ACTIVE_KEK_VERSION`（见 `env.example`）；缺失/非法时 seed fail-closed，`api`/`web` 不启动。
+- 固定合成 UUID 以 `apps/api/internal/seeddemo/ids.go` 为**唯一权威来源**；`demo-seed` 启动时校验 `DEMO_PRINCIPAL_*` 与其一致，不一致即拒绝（防漂移）。
+
+**幂等与冲突语义：**
+
+- 可重复执行：已存在且一致的数据视为成功（no-op），不重复创建，不新增无界凭证版本。
+- 固定 ID 已存在但字段不一致 → seed 失败（fail-closed），不静默覆盖未知数据。
+- seed 中途失败遗留未绑定连接的凭证信封 → 二次 seed 明确拒绝，需 `down -v` 冷启动或人工检查。
+
+**开关：** `WEBDB_DEMO_SEED` 仅严格接受 `true`；缺失、`false` 或非法值均拒绝。生产部署不设置该开关，因此**绝不自动 seed**。
+
 ## 只读账号
 
 | 数据库 | 用户名 | 密码来源 | 权限 |
 |--------|--------|----------|------|
 | PostgreSQL | `demo_reader` | `DEMO_PG_READER_PASSWORD` 环境变量 | 仅 SELECT（含 TEMPORARY 已撤销） |
-| MySQL | `demo_reader`（可通过 `DEMO_MYSQL_USER` 自定义） | `DEMO_MYSQL_READER_PASSWORD` 环境变量 | 仅 SELECT |
+| MySQL | `demo_reader`（固定值；`DEMO_MYSQL_USER` 仅接受该值，不可自定义） | `DEMO_MYSQL_READER_PASSWORD` 环境变量 | 仅 SELECT |
 
 API 服务使用上述只读账号连接演示数据库，不持有管理员凭证。
 只读账号密码通过初始化脚本安全设置，支持单引号、双引号、空格、反斜杠等特殊字符。

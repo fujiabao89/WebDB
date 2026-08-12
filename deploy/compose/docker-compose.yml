@@ -6,8 +6,15 @@
 #   webdb-meta    WebDB 元数据库 (PostgreSQL)     → 127.0.0.1:5432
 #   demo-pg       演示 PostgreSQL + 合成数据       → 127.0.0.1:5433
 #   demo-mysql    演示 MySQL 8.4 + 合成数据        → 127.0.0.1:3306
+#   api-migrate   one-shot 迁移（api migrate up） → 退出即成功
+#   demo-seed     one-shot 演示 seed（WEBDB_DEMO_SEED=true）→ 退出即成功
 #   api           Go API / 执行服务                → 127.0.0.1:8080
 #   web           React 前端 (Vite 开发服务器)       → 127.0.0.1:3000
+#
+# 启动依赖链（fail-closed）：
+#   webdb-meta healthy → api-migrate completed → demo-seed completed → api healthy → web healthy
+#   api-migrate 失败时 demo-seed/api/web 均不启动；demo-seed 失败时 api/web 均不启动。
+#   demo-seed 仅在 WEBDB_DEMO_SEED=true 时执行，生产部署无此开关则绝不自动 seed。
 
 name: webdb-p0
 
@@ -26,7 +33,9 @@ services:
     volumes:
       - webdb-meta-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U webdb -d webdb_meta"]
+      # 强制 --host=127.0.0.1 走 TCP：PG 首次初始化期间临时服务器仅监听 Unix socket，
+      # 避免 api-migrate 依赖的 TCP 5432 尚未就绪时被误判为 healthy（与 demo-pg 一致）。
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -p 5432 -U webdb -d webdb_meta"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -94,6 +103,75 @@ services:
     restart: unless-stopped
 
   # ============================================================
+  # one-shot 迁移服务 — 空卷元数据库首次启动前执行 migrate up
+  # 使用独立管理员 META_MIGRATE_USER（迁移需 DDL 权限）；
+  # 成功退出（completed_successfully）后 demo-seed 才会运行；
+  # 失败时整条链路（seed/api/web）均不启动，且不会无限重启。
+  # ============================================================
+  api-migrate:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+      target: dev
+    command: ["migrate", "up"]
+    environment:
+      META_DB_HOST: webdb-meta
+      META_DB_PORT: "5432"
+      META_MIGRATE_USER: webdb
+      META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      META_DB_USER: webdb
+      META_DB_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      META_DB_NAME: webdb_meta
+    depends_on:
+      webdb-meta:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - webdb-backend
+
+  # ============================================================
+  # one-shot 演示 seed 服务 — 仅 WEBDB_DEMO_SEED=true 时执行
+  # 创建固定合成 workspace/user/member(owner)、两条演示连接 +
+  # allow_read 策略，以及经 LifecycleManager 加密的演示凭证。
+  # 演示数据库密码与 KEK 仅通过 env 注入，绝不写入 SQL/文件/命令行/日志；
+  # 幂等可重复，固定 ID 冲突 fail-closed。
+  # ============================================================
+  demo-seed:
+    build:
+      context: ../../apps/api
+      dockerfile: Dockerfile
+      target: dev
+    command: ["seed-demo"]
+    environment:
+      WEBDB_DEMO_SEED: "true"
+      DEMO_PRINCIPAL_WORKSPACE_ID: ${DEMO_PRINCIPAL_WORKSPACE_ID:-f1160d75-26f7-46e0-b3e0-570ea65c232e}
+      DEMO_PRINCIPAL_USER_ID: ${DEMO_PRINCIPAL_USER_ID:-73e8c8f0-83e4-4096-8400-15ca15073d6b}
+      META_DB_HOST: webdb-meta
+      META_DB_PORT: "5432"
+      META_DB_USER: webdb
+      META_DB_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      META_DB_NAME: webdb_meta
+      DEMO_PG_HOST: demo-pg
+      DEMO_PG_PORT: "5432"
+      DEMO_PG_NAME: webdb_demo
+      DEMO_PG_READER_PASSWORD: ${DEMO_PG_READER_PASSWORD:-change_me}
+      DEMO_MYSQL_HOST: demo-mysql
+      DEMO_MYSQL_PORT: "3306"
+      DEMO_MYSQL_NAME: webdb_demo
+      DEMO_MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
+      DEMO_MYSQL_READER_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
+      # KEK 仅 env 注入；缺失/非法时 seed fail-closed（不会静默跳过）。
+      # 本地演示请复制 env.example 到 .env 并填入合成 demo KEK。
+      WEBDB_KEK_V1: ${WEBDB_KEK_V1:-}
+      WEBDB_ACTIVE_KEK_VERSION: ${WEBDB_ACTIVE_KEK_VERSION:-1}
+    depends_on:
+      api-migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - webdb-backend
+
+  # ============================================================
   # API 服务 — 唯一可连接目标数据库的组件
   # dev target: golang:1.26-bookworm（含 shell）
   # ============================================================
@@ -130,7 +208,9 @@ services:
       DEMO_MYSQL_USER: ${DEMO_MYSQL_USER:-demo_reader}
       DEMO_MYSQL_PASSWORD: ${DEMO_MYSQL_READER_PASSWORD:-change_me}
       DEMO_MYSQL_NAME: webdb_demo
-      WEBDB_KEK: ${WEBDB_KEK:-change_me}
+      # KEK 仅 env 注入（WEBDB_KEK_V{N}+WEBDB_ACTIVE_KEK_VERSION，非旧的 WEBDB_KEK 单变量）。
+      WEBDB_KEK_V1: ${WEBDB_KEK_V1:-}
+      WEBDB_ACTIVE_KEK_VERSION: ${WEBDB_ACTIVE_KEK_VERSION:-1}
     ports:
       - "127.0.0.1:8080:8080"
     depends_on:
@@ -140,6 +220,10 @@ services:
         condition: service_healthy
       demo-mysql:
         condition: service_healthy
+      api-migrate:
+        condition: service_completed_successfully
+      demo-seed:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
