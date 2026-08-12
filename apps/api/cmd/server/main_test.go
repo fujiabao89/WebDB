@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/fujiabao89/webdb/internal/seeddemo"
 )
 
 func TestHealthHandler_GET(t *testing.T) {
@@ -103,4 +106,28 @@ func TestMetaDSN_partialMigrateCreds(t *testing.T) {
 	if err == nil {
 		t.Fatal("只设 META_MIGRATE_PASSWORD 时应返回错误")
 	}
+}
+
+// seed-demo 命令门控：WEBDB_DEMO_SEED 缺失/false/非法时拒绝且不触碰数据库。
+func TestSeedDemo_switchGate(t *testing.T) {
+	// 不设 META_DB_*：若门控先于 DB 连接，应返回门控错误而非 DB 错误。
+	// 断言错误文本含 WEBDB_DEMO_SEED，避免 validateDemoSwitch 被删时测试假阴性
+	// （CodeRabbit P0-06A 回归项：门控测试只断言"有错误"会产生假阴性）。
+	check := func(want string) {
+		t.Helper()
+		if err := seeddemo.RunFromEnv(context.Background()); err == nil {
+			t.Fatalf("%s 时 seed 应拒绝", want)
+		} else if !strings.Contains(err.Error(), "WEBDB_DEMO_SEED") {
+			t.Fatalf("错误应包含 WEBDB_DEMO_SEED，实际: %v", err)
+		}
+	}
+
+	t.Setenv("WEBDB_DEMO_SEED", "false")
+	check("WEBDB_DEMO_SEED=false")
+
+	t.Setenv("WEBDB_DEMO_SEED", "")
+	check("WEBDB_DEMO_SEED 缺失")
+
+	t.Setenv("WEBDB_DEMO_SEED", "TRUE")
+	check("WEBDB_DEMO_SEED=TRUE（大小写）")
 }
