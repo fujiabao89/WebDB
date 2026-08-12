@@ -254,10 +254,17 @@ func wireCell(wt string, v any) (any, int, error) {
 		// 此处对序列化结果执行 256 KiB cell 上限。
 		if b, err := json.Marshal(v); err == nil {
 			s := string(b)
-			if len(s) > MaxCellBytes {
+			// s 作为 JSON 字符串返回时会被外层编码再次转义（换行/引号/反斜杠），
+			// cell 上限与 cb 必须用外层编码后长度（Codex）；否则 escape-heavy map
+			// 会低估实际输出字节绕过 256 KiB cell 上限。
+			outer, err := json.Marshal(s)
+			if err != nil {
+				return nil, 0, errUnrepresentable(wt, v)
+			}
+			if len(outer) > MaxCellBytes {
 				return nil, 0, codef(ErrResultTooLarge, "cell byte limit exceeded")
 			}
-			return s, len(s), nil
+			return s, len(outer), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	case WireUUID:

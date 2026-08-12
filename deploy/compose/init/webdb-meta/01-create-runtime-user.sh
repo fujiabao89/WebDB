@@ -18,7 +18,17 @@ if [ "$POSTGRES_USER" = "webdb_app_runtime" ]; then
   exit 1
 fi
 
-RUNTIME_PASSWORD="${WEBDB_APP_PASSWORD:-change_me}"
+# 拒绝未设置/为空的 WEBDB_APP_PASSWORD（Codex）：避免默认已知密码 change_me。
+# 仅当显式 insecure-demo 开关（ALLOW_INSECURE_LOCAL_DEMO=true）时允许演示密码；
+# 其余情况终止初始化（fail-closed），由部署方提供真实运行时密码。
+if [ -n "${WEBDB_APP_PASSWORD:-}" ]; then
+  RUNTIME_PASSWORD="$WEBDB_APP_PASSWORD"
+elif [ "${ALLOW_INSECURE_LOCAL_DEMO:-false}" = "true" ]; then
+  RUNTIME_PASSWORD="change_me"
+else
+  echo "错误: WEBDB_APP_PASSWORD 必须显式设置（禁止空/默认已知密码；仅 insecure-demo 允许演示密码）" >&2
+  exit 1
+fi
 # 通过环境变量传递给 psql（\getenv 读取），密码不进 argv、不做 shell 插值
 export RUNTIME_PASSWORD
 

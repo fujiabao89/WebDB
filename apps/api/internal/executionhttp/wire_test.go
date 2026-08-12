@@ -65,6 +65,21 @@ func TestWireCellCapCountsEscapedBytes(t *testing.T) {
 	}
 }
 
+// TestWireJSONMapOuterEncodedCellLimit 验证 escape-heavy JSONB map（换行/引号/反斜杠）
+// 内层+外层 JSON 编码后超过 256 KiB cell 上限返回 result_too_large（Codex：
+// 返回字符串在外层 JSON 编码再次转义，须按外层编码后长度计 cell 上限）。
+func TestWireJSONMapOuterEncodedCellLimit(t *testing.T) {
+	big := strings.Repeat("a\"\\\n", 40*1024)
+	qr := &adapter.QueryResult{
+		Columns: []adapter.ColumnInfo{{Name: "j", DataType: "3802"}}, // jsonb
+		Rows:    [][]any{{map[string]interface{}{"data": big}}},
+	}
+	_, err := toWireResult("postgresql", qr)
+	if !errors.Is(err, ErrResultTooLarge) {
+		t.Fatalf("escape-heavy JSONB map 外层编码后应触发 cell 上限 result_too_large，实际 err=%v", err)
+	}
+}
+
 // TestWireJSONMapCellLimit 验证解码 JSONB map 序列化后超过 256 KiB cell 上限返回
 // result_too_large（Codex P1：copyAndMeasure 对 map 按固定 fallback 计，未查实际大小）。
 func TestWireJSONMapCellLimit(t *testing.T) {

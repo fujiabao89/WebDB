@@ -109,3 +109,49 @@ func TestHasUnboundPlaceholderUnknownDialectError(t *testing.T) {
 		t.Fatalf("err = %T, want error", err)
 	}
 }
+
+// FuzzHasUnboundPlaceholderPG 覆盖 PG 方言词法状态组合（未闭合引号/块注释/美元引号、
+// 反斜杠/方言注释等），复用表驱动用例绕过样本作为 seed corpus（Codex 复审）。
+// 只要求不 panic 且不崩溃（词法扫描 fail-closed）；正常 go test 运行 seed，
+// 随机组合由 `go test -fuzz=FuzzHasUnboundPlaceholderPG` 驱动。
+func FuzzHasUnboundPlaceholderPG(f *testing.F) {
+	for _, s := range []string{
+		`SELECT * FROM t WHERE id = $1`,
+		`SELECT '$1'`,
+		`SELECT /* $1 */ 1`,
+		`SELECT $tag$ $1 $tag$`,
+		`SELECT E'it''s \\'$1'`,
+		`SELECT "a$1b" FROM t`,
+		`SELECT 'unclosed $1`,
+		`SELECT /* unclosed $1`,
+		`SELECT $$unclosed $1`,
+		`SELECT 1 -- $1`,
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, sql string) {
+		_, _ = HasUnboundPlaceholder(DialectPostgreSQL, sql)
+	})
+}
+
+// FuzzHasUnboundPlaceholderMySQL 覆盖 MySQL 方言词法状态组合（未闭合引号/块注释、
+// 反斜杠转义/# 注释等），复用表驱动用例绕过样本作为 seed corpus（Codex 复审）。
+func FuzzHasUnboundPlaceholderMySQL(f *testing.F) {
+	for _, s := range []string{
+		`SELECT * FROM t WHERE id = ?`,
+		`SELECT '?'`,
+		`SELECT /* ? */ 1`,
+		`SELECT a?b FROM t`,
+		`SELECT ` + "`" + `a?b` + "`" + ` FROM t`,
+		`SELECT 'it\\'s ?'`,
+		`SELECT 1 # ?`,
+		`SELECT 1--?`,
+		`SELECT 'unclosed ?`,
+		`SELECT /* unclosed ?`,
+	} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, sql string) {
+		_, _ = HasUnboundPlaceholder(DialectMySQL, sql)
+	})
+}
