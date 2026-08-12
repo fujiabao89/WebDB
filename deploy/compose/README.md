@@ -146,7 +146,7 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 | 数据库 | 用户名 | 密码来源 | 权限 |
 |--------|--------|----------|------|
 | PostgreSQL | `demo_reader` | `DEMO_PG_READER_PASSWORD` 环境变量 | 仅 SELECT（含 TEMPORARY 已撤销） |
-| MySQL | `demo_reader`（可通过 `DEMO_MYSQL_USER` 自定义） | `DEMO_MYSQL_READER_PASSWORD` 环境变量 | 仅 SELECT |
+| MySQL | `demo_reader`（固定值；`DEMO_MYSQL_USER` 仅接受该值，不可自定义） | `DEMO_MYSQL_READER_PASSWORD` 环境变量 | 仅 SELECT |
 
 API 服务使用上述只读账号连接演示数据库，不持有管理员凭证。
 只读账号密码通过初始化脚本安全设置，支持单引号、双引号、空格、反斜杠等特殊字符。

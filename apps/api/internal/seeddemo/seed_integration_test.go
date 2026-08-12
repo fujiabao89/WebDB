@@ -303,8 +303,10 @@ func TestSeedIntegration_policyMissingRecovered(t *testing.T) {
 //
 // 构造：首次 seed 后，经 LifecycleManager 创建与演示配置不同的加密凭证 envelope，
 // 将连接 secret_ref 改指向该新 envelope（模拟元数据库被另一实例复用/配置变更），
-// 再删除 policy（模拟上次 seed 在策略写入前中断）。重跑 seed 必须因凭证不匹配
-// fail-closed，且不得补建 allow_read policy。
+// 退役原 envelope（避免其成为孤立 active envelope，使 rejectOrphanEnvelopes 提前
+// fail-closed 而到不了 verifyExistingConnection），再删除 policy（模拟上次 seed
+// 在策略写入前中断）。重跑 seed 必须因凭证不匹配 fail-closed，且不得补建
+// allow_read policy——证明"凭证校验先于策略补建"。
 func TestSeedIntegration_policyMissingCredentialMismatchNoPolicy(t *testing.T) {
 	db, deps := setupIntegrationDeps(t)
 	ctx := context.Background()
@@ -314,7 +316,8 @@ func TestSeedIntegration_policyMissingCredentialMismatchNoPolicy(t *testing.T) {
 		t.Fatalf("首次 seed 失败: %v", err)
 	}
 	spec := cfg.Connections[0]
-	if _, err := deps.ConnReader.ConnectionByID(ctx, cfg.WorkspaceID, spec.ID); err != nil {
+	origConn, err := deps.ConnReader.ConnectionByID(ctx, cfg.WorkspaceID, spec.ID)
+	if err != nil {
 		t.Fatalf("读取演示连接失败: %v", err)
 	}
 
@@ -333,12 +336,20 @@ func TestSeedIntegration_policyMissingCredentialMismatchNoPolicy(t *testing.T) {
 		mismatchEnv.SecretRef, mismatchEnv.Version, spec.ID); err != nil {
 		t.Fatalf("更新连接 secret_ref 失败: %v", err)
 	}
+	// 退役原 envelope（经 LifecycleManager 退役路径，附 E6 审计）。若原 envelope 保持
+	// active 且无连接引用，rejectOrphanEnvelopes 会先于 verifyExistingConnection 返回
+	// ErrDemoSeedRefused，本用例将只覆盖"孤立检测"而非"凭证校验先于策略补建"。
+	lm, ok := deps.Credentials.(*credentials.LifecycleManager)
+	if !ok {
+		t.Fatalf("deps.Credentials 应为 *credentials.LifecycleManager")
+	}
+	if err := lm.Retire(ctx, cfg.WorkspaceID, cfg.UserID, origConn.SecretRef, origConn.SecretVersion); err != nil {
+		t.Fatalf("退役原 envelope 失败: %v", err)
+	}
 	// 删除 policy，模拟上次 seed 在策略写入前中断。
 	if _, err := db.Exec(`DELETE FROM connection_policies WHERE connection_id=$1`, spec.ID); err != nil {
 		t.Fatalf("删除策略失败: %v", err)
 	}
-	// 原 envelope 未被连接引用，会触发孤立检测 → 必须 fail-closed 且不补建 policy。
-	// 这里不退役原 envelope，断言孤立检测路径同样不会补建 policy（保守）。
 
 	err = Run(ctx, cfg, deps)
 	if err == nil {
