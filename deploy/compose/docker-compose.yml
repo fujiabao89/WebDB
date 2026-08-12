@@ -189,10 +189,11 @@ services:
       META_DB_USER: webdb_app_runtime
       META_DB_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
       META_DB_NAME: webdb_meta
-      # 元数据库连接池有界配置（Owner 批准，2026-08）：缺失/非法/idle>open 时 API 拒绝启动（fail-closed）
-      META_DB_MAX_OPEN_CONNS: "10"
-      META_DB_MAX_IDLE_CONNS: "2"
-      META_DB_CONN_MAX_LIFETIME: 30m
+      # 元数据库连接池有界配置（Owner 批准，2026-08）：缺失/非法/idle>open 时 API 拒绝启动（fail-closed）。
+      # 支持从 deploy/compose/.env 或运行环境覆盖：未设置时回退默认 10 / 2 / 30m。
+      META_DB_MAX_OPEN_CONNS: ${META_DB_MAX_OPEN_CONNS:-10}
+      META_DB_MAX_IDLE_CONNS: ${META_DB_MAX_IDLE_CONNS:-2}
+      META_DB_CONN_MAX_LIFETIME: ${META_DB_CONN_MAX_LIFETIME:-30m}
       META_MIGRATE_USER: webdb
       META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
       # 仅本地演示环境显式启用 TLS disable 的本地演示连接（WebDB 安全约束 #4）：
