@@ -21,6 +21,7 @@ webdb-meta healthy → api-migrate completed → demo-seed completed → api hea
 ```
 
 - `api-migrate` 使用独立管理员 `META_MIGRATE_USER/PASSWORD` 执行 `migrate up`；失败时 `demo-seed`/`api`/`web` 均不启动（`service_completed_successfully`）。
+- **待决（Owner）**：元数据库迁移账号与运行时账号是否拆分及各自授权范围。本地 Compose 的 `api-migrate`/`demo-seed` 当前沿用超管 `webdb`（仅限本地演示）；生产最小权限运行时账号 `webdb_app_runtime` 由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）创建、本地 Compose 未挂载，落地（更新 `META_MIGRATE_USER/PASSWORD`、`META_DB_USER`、ADR 与验证步骤）需 Owner 批准后实施。
 - `demo-seed` 仅在 `WEBDB_DEMO_SEED=true` 时执行；生产部署不设置该开关则**绝不自动 seed**。
 - `api`/`web` 依赖 `demo-seed` 成功退出后才启动，保证空卷首次启动即有业务表、演示身份与可授权连接。
 
@@ -123,13 +124,13 @@ docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 | user | `73e8c8f0-83e4-4096-8400-15ca15073d6b` | `demo@example.local`，status=active |
 | workspace_member | (workspace, user) | role=owner |
 | connection（PostgreSQL） | `d80a86cb-d4e7-4afb-9ab1-8df572ad9c69` | `demo-pg:5432/webdb_demo`，账号 `demo_reader` |
-| connection（MySQL） | `37760cae-7ddc-408d-b2b0-4505c3ea2243` | `demo-mysql:3306/webdb_demo`，账号 `DEMO_MYSQL_USER` |
+| connection（MySQL） | `37760cae-7ddc-408d-b2b0-4505c3ea2243` | `demo-mysql:3306/webdb_demo`，账号 `demo_reader`（固定值） |
 | connection_policy ×2 | — | allow_read=true，max_rows=500，statement_timeout=5000ms |
 | credential_envelope ×2 | 由 LifecycleManager 生成 | 演示只读密码经 Envelope v1 加密（仅存密文） |
 
 **安全说明：**
 
-- 演示数据库密码仅经 `DEMO_PG_READER_PASSWORD` / `DEMO_MYSQL_READER_PASSWORD` / `DEMO_MYSQL_USER` 环境变量注入，交由 `LifecycleManager` 加密，**绝不写入 SQL/文件/命令行/日志**。
+- 演示数据库密码仅经 `DEMO_PG_READER_PASSWORD` / `DEMO_MYSQL_READER_PASSWORD` 环境变量注入，交由 `LifecycleManager` 加密，**绝不写入 SQL/文件/命令行/日志**。只读账号名固定为 `demo_reader`（`DEMO_MYSQL_USER` 仅接受该值，不参与密码加密）。
 - KEK 使用版本化 `WEBDB_KEK_V1` + `WEBDB_ACTIVE_KEK_VERSION`（见 `env.example`）；缺失/非法时 seed fail-closed，`api`/`web` 不启动。
 - 固定合成 UUID 以 `apps/api/internal/seeddemo/ids.go` 为**唯一权威来源**；`demo-seed` 启动时校验 `DEMO_PRINCIPAL_*` 与其一致，不一致即拒绝（防漂移）。
 
