@@ -434,6 +434,16 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 	exec.Status = metadata.ExecStatusRunning
+	// panic recovery（Codex P1 #5）：adapter/执行阶段 panic 时，execution 已持久化
+	// running。HTTP 层 RecoverMiddleware 无 execution ID 无法终结；此处用独立有界
+	// context 终结 execution（failed + internal_error）并追加失败审计，再重新抛出
+	// 由 middleware 返回 500。终结失败仅记录安全告警（已尽力），不吞 panic。
+	defer func() {
+		if rec := recover(); rec != nil {
+			p.finalizePanic(ctx, conn, exec, traceID, p.clock())
+			panic(rec)
+		}
+	}()
 	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
 		mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
@@ -1356,6 +1366,54 @@ func (p *Pipeline) recordPostExecution(
 	result.Outcome = outcome
 	result.AuditState = auditStateForOutcome(outcome)
 	return nil
+}
+
+// finalizePanic 在 adapter/执行阶段 panic 时终结 execution（failed + internal_error）
+// 并追加失败审计（Codex P1 #5）。HTTP 层 RecoverMiddleware 无 execution ID 无法终结，
+// 本方法在 Execute 的 panic recovery 中调用。
+// 使用独立有界 context（WithoutCancel + auditWriteTimeout），确保客户端取消/长查询
+// 不阻断终态持久化；任一失败仅记录安全告警（已尽力），不再次 panic。
+func (p *Pipeline) finalizePanic(ctx context.Context, conn *metadata.Connection, exec *metadata.Execution, traceID string, now time.Time) {
+	code := string(ErrInternalError)
+	exec.Status = metadata.ExecStatusFailed
+	exec.ErrorCode = &code
+	finished := now
+	exec.FinishedAt = &finished
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+	alarm := func() {
+		metadata.EmitAlarm(p.alarm, fctx, SecurityAlertEvent{TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: code, OccurredAt: now})
+	}
+	mtx, err := p.txs.Begin(fctx)
+	if err != nil {
+		alarm()
+		return
+	}
+	if err := mtx.UpdateExecution(fctx, conn.WorkspaceID, exec); err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	md := metadata.AuditMetadata{
+		StatementHash: &exec.StatementHash,
+		ErrorCode:     strPtr(code),
+		Engine:        strPtr(string(conn.Engine)),
+	}
+	event, err := newAuditEvent(conn.WorkspaceID, metadata.ActorTypeUser, &exec.ActorID, &conn.ID, &exec.ID,
+		metadata.ActionSQLExecute, "execution", exec.ID.String(), metadata.OutcomeFailed, md, traceID, now)
+	if err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	if err := mtx.AppendAudit(fctx, event); err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	if err := mtx.Commit(); err != nil {
+		alarm()
+	}
 }
 
 // auditStateForOutcome 把审计 outcome 映射为公共 receipt 的 state（P0-06A §11.2）。

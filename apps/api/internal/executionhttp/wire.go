@@ -3,6 +3,7 @@ package executionhttp
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -126,10 +127,14 @@ func mysqlWireType(dt string) WireType {
 }
 
 // wireCode 返回 wire 转换错误的稳定错误码。
-// 非有限浮点 / 无法表示的值 → database_error（脱敏，不泄露值）。
+// 确定性结果超限保留 result_too_large（422，Codex P1：与数据库失败可区分）；
+// 其余表示性失败折叠为 database_error（脱敏，不泄露值）。
 func wireCode(err error) StableErrorCode {
 	if err == nil {
 		return ""
+	}
+	if errors.Is(err, ErrResultTooLarge) {
+		return ErrResultTooLarge
 	}
 	return ErrDatabaseError
 }
@@ -214,12 +219,20 @@ func wireCell(wt string, v any) (any, int, error) {
 		return nil, 0, errUnrepresentable(wt, v)
 	case WireJSONText:
 		if s, ok := asString(v); ok {
-			// 合法 JSON 透传；非法/截断 JSON 在写响应前返回 database_error，
-			// 避免 json.RawMessage 透传无效 JSON 产生截断的 200 响应（CodeRabbit #20）。
+			// 合法 JSON 以字符串返回（Codex P1）：浏览器契约 isWireCell 仅接受
+			// string/number/boolean/null，json.RawMessage（对象/数组）会被客户端丢弃；
+			// 仍校验 JSON 合法，非法/截断 JSON 在写响应前返回 database_error，
+			// 避免透传无效 JSON 产生截断的 200 响应（CodeRabbit #20）。
 			if !json.Valid([]byte(s)) {
 				return nil, 0, codef(ErrDatabaseError, "invalid json value in result")
 			}
-			return json.RawMessage(s), len(s), nil
+			return s, len(s), nil
+		}
+		// pgx v5 把 PG jsonb 解码为 map[string]interface{} 等 JSON 值（非 string）；
+		// JSON 序列化为字符串透传（浏览器 isWireCell 仅接受 string，Codex P1 #2）。
+		// json.Marshal 输出恒为合法 JSON，无需重复 Valid 校验。
+		if b, err := json.Marshal(v); err == nil {
+			return string(b), len(b), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	default: // text/uuid

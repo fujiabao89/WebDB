@@ -654,13 +654,15 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 	// 查询结束（含取消/超时/panic）回滚只读事务，确保连接归还后无事务残留。
 	// 成功路径显式回滚（rolledBack=true 后 defer 不再重复 ROLLBACK，CodeRabbit #7）；
 	// defer 仅作为取消/超时/panic/早退错误路径的兜底，与显式回滚互斥。
+	// 回滚 context 不在查询前创建（Codex P1）：查询可能远长于 10s 回滚预算，
+	// 预建 context 会在查询完成后已过期，导致回滚失败。defer 与显式回滚均在查询后新建。
 	rolledBack := false
-	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer func() {
 		if !rolledBack {
+			rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer rbCancel()
 			_ = endReadOnlyPG(rbCtx, conn)
 		}
-		rbCancel()
 	}()
 	rows, err := conn.Query(ctx, sql, args...)
 	if err != nil {
@@ -707,6 +709,9 @@ func (h *PoolHandle) execPG(ctx context.Context, sql string, args []any, maxFetc
 	// connection_unavailable，不返回已读入的成功结果（与 execMySQL 公共语义一致，
 	// CodeRabbit #7）。
 	rows.Close()
+	// 查询已结束：新建有界回滚 context（Codex P1，避免预建 context 因长查询已过期）。
+	rbCtx, rbCancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer rbCancel()
 	if err := endReadOnlyPG(rbCtx, conn); err != nil {
 		rolledBack = true
 		discardPGConn(rbCtx, conn)

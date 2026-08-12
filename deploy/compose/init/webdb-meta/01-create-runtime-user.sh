@@ -53,4 +53,9 @@ ALTER DEFAULT PRIVILEGES FOR ROLE webdb IN SCHEMA public
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO webdb_app_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE webdb IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO webdb_app_runtime;
+-- 已有对象授权（Codex P1）：api-bootstrap 在 api-migrate 建表之后运行，
+-- ALTER DEFAULT PRIVILEGES 只影响未来对象；此处 GRANT ON ALL TABLES/SEQUENCES
+-- 覆盖已有元数据库卷升级场景（空卷 init 无表时幂等 no-op）。
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO webdb_app_runtime;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO webdb_app_runtime;
 EOSQL

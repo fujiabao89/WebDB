@@ -35,7 +35,8 @@ func TestWireCellTypes(t *testing.T) {
 		{"timestamp", "timestamp", time.Date(2024, 1, 2, 3, 4, 5, 0, time.FixedZone("X", 8*3600)), `"2024-01-02T03:04:05.000000"`},
 		{"timestamptz", "timestamptz", time.Date(2024, 1, 2, 3, 4, 5, 0, time.FixedZone("X", 8*3600)), `"2024-01-01T19:04:05Z"`},
 		{"binary", "binary", []byte{0xde, 0xad, 0xbe, 0xef}, `"3q2+7w=="`},
-		{"json text", "json_text", `{"a":1}`, `{"a":1}`},
+		// json_text 以合法 JSON 字符串返回（Codex P1：浏览器 isWireCell 仅接受 string/number/boolean/null）。
+		{"json text", "json_text", `{"a":1}`, `"{\"a\":1}"`},
 		{"text", "text", "hello", `"hello"`},
 		{"uuid", "uuid", "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11", `"a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"`},
 	}
@@ -130,7 +131,8 @@ func TestToWireResultBinaryBudgetUsesBase64Length(t *testing.T) {
 }
 
 // TestWireCellRejectsInvalidJSON 验证 json_text 透传前必须校验合法 JSON：非法/截断
-// JSON 返回 database_error，避免产生截断的 200 响应（CodeRabbit #20）；合法 JSON 保持透传。
+// JSON 返回 database_error，避免产生截断的 200 响应（CodeRabbit #20）；合法 JSON
+// 以字符串透传（Codex P1：浏览器 isWireCell 仅接受 string/number/boolean/null）。
 func TestWireCellRejectsInvalidJSON(t *testing.T) {
 	for _, s := range []string{`{"a":`, `not json`, `{"a":1`} {
 		if _, _, err := wireCell("json_text", s); err == nil {
@@ -141,8 +143,8 @@ func TestWireCellRejectsInvalidJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("合法 JSON 应透传: %v", err)
 	}
-	if string(got.(json.RawMessage)) != `{"a":1}` {
-		t.Fatalf("合法 JSON 透传值 = %v, want {\"a\":1}", got)
+	if s, ok := got.(string); !ok || s != `{"a":1}` {
+		t.Fatalf("合法 JSON 透传值 = %#v, want string {\"a\":1}", got)
 	}
 }
 
