@@ -807,6 +807,18 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
+	// 续页 Execution 在任何目标数据库操作前持久化（Codex P1）：LoadTableMetadata/
+	// NextPage 访问目标库前创建 running Execution，元数据不可用时目标库不被未审计
+	// 访问；进程退出有记录；started_at/duration 含元数据与查询时间。
+	exec, traceID, now, err := p.beginContinuationExecution(ctx, req, state, conn)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrAuditFailed
+		return p.auditFailed(ctx, result, "", conn.WorkspaceID, ErrAuditFailed)
+	}
+	result.ExecutionID = &exec.ID
+	result.TraceID = traceID
+
 	configRevision, err := connectionConfigRevision(conn)
 	if err != nil {
 		claim.Abort()
@@ -831,6 +843,9 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = mapAdapterError(err)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	released := false
@@ -840,19 +855,27 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		}
 	}()
 
-	// pool generation 变化 → token 失效。
+	// pool generation 变化 → token 失效（已访问目标库前的元数据校验，终态 + 审计）。
 	if handle.PoolGeneration() != state.PoolGeneration {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	// schema generation 重新校验：重新加载可信元数据并与 state 对比。
+	// 失败路径 finalize（Codex P1）：LoadTableMetadata 已访问目标库，须终结该页
+	// Execution + AuditEvent（失败终态），不得只 Abort token。
 	meta, err := handle.LoadTableMetadata(execCtx, state.TableSchema, state.TableName)
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 	snap, err := queryplan.NewSchemaSnapshot(
 		state.ConnectionID,
@@ -863,7 +886,10 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil || snap.SchemaGeneration != state.SchemaGeneration {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	// 构造不可伪造的 VerifiedNextPagePlan（SQL/Args 来自 state，不来自客户端）。
@@ -874,20 +900,13 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	result.AdapterCalled = true
-	// 续页 Execution 在访问目标库前持久化（Codex P1）：元数据不可用时目标库不被
-	// 未审计访问；进程退出有记录；started_at/duration 含查询时间。
-	exec, traceID, now, err := p.beginContinuationExecution(ctx, req, state, conn)
-	if err != nil {
-		claim.Abort()
-		result.ErrorCode = ErrAuditFailed
-		return p.auditFailed(ctx, result, "", conn.WorkspaceID, ErrAuditFailed)
-	}
-	result.ExecutionID = &exec.ID
-	result.TraceID = traceID
 	// panic finalizer（Codex P1）：NextPage 接触目标库后 panic 时，现有 defer 仅
 	// abort claim + release handle，finalize 不执行 → 该物理页无终态审计。
 	// 此处用已创建的 exec 终结 failed + Audit，再重新抛出由 HTTP middleware
@@ -1035,15 +1054,19 @@ func (p *Pipeline) finalizeContinuationExecution(
 	// 必须用 WithoutCancel + auditWriteTimeout 终结 Execution 并写审计（D13 义务 3/4）。
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
 	defer cancel()
-	// 按 queryErr 设置 ErrorCode，交 recordPostExecution 决定终态。
+	// 按 queryErr 设置 ErrorCode（若调用方已设如 invalid_page_token 则保留），
+	// 交 recordPostExecution 决定终态。
 	if queryErr != nil {
-		result.ErrorCode = mapAdapterError(queryErr)
+		if result.ErrorCode == "" {
+			result.ErrorCode = mapAdapterError(queryErr)
+		}
 		if err := p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash); err != nil {
 			return fmt.Errorf("%w: failed page audit persistence failed (original: %s)", err, result.ErrorCode)
 		}
 		return nil
 	}
-	result.ErrorCode = ""
+	// queryErr nil：调用方可能已设 ErrorCode（如 invalid_page_token 失败终态），
+	// 未设时视为成功（recordPostExecution 按 result.ErrorCode 判定 succeeded）。
 	return p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
 }
 

@@ -374,3 +374,112 @@ func TestNextPageAdapterErrorAbortsToken(t *testing.T) {
 	}
 	_ = r2
 }
+
+// paginationAuditSetup 类似 paginationSetup，但返回可断言的 fakeTxStore/fakeAuditStore
+// （供续页失败终态审计断言，Codex P1）。
+func paginationAuditSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *fakeTxStore, *fakeAuditStore, *fakeAdapterClient) {
+	t.Helper()
+	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
+	conn := &metadata.Connection{
+		ID:            uuid.New(),
+		WorkspaceID:   principal.WorkspaceID,
+		Engine:        metadata.EnginePostgreSQL,
+		Host:          "db.example.invalid",
+		Port:          5432,
+		Database:      "synthetic",
+		SecretRef:     uuid.New(),
+		SecretVersion: 1,
+		UpdatedAt:     time.Unix(1_700_000_000, 123_000),
+	}
+	policy := &metadata.ConnectionPolicy{
+		WorkspaceID:        principal.WorkspaceID,
+		ConnectionID:       conn.ID,
+		AllowRead:          boolPtr(true),
+		StatementTimeoutMs: 5_000,
+		MaxRows:            500,
+		UpdatedAt:          time.Unix(1_700_000_000, 456_000),
+	}
+	resolver := &fakeResolver{
+		payload: credentials.CredentialPayload{User: "synthetic_user", Password: "synthetic_password"},
+	}
+	handle := &fakeAdapterHandle{
+		result: &adapter.QueryResult{HasMore: true, TotalReturned: 2, ReturnedRows: 2,
+			Columns: []adapter.ColumnInfo{{Name: "id"}},
+			Rows:    [][]any{{int32(1)}, {int32(2)}},
+		},
+		nextResult: &adapter.QueryResult{HasMore: false, TotalReturned: 3, ReturnedRows: 1,
+			Columns: []adapter.ColumnInfo{{Name: "id"}},
+			Rows:    [][]any{{int32(3)}},
+		},
+		meta: &queryplan.TableMetadata{
+			Schema: "public", Table: "employees",
+			Columns:    []queryplan.Column{{Name: "id", Ordinal: 1, Nullable: false}},
+			PrimaryKey: &queryplan.PrimaryKey{Columns: []string{"id"}},
+		},
+		currentSchema: "public",
+	}
+	client := &fakeAdapterClient{handle: handle}
+	txStore := &fakeTxStore{}
+	auditStore := &fakeAuditStore{}
+	alarm := &fakeAlarm{}
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: policy},
+		Members: &fakeMemberReader{member: &metadata.WorkspaceMember{
+			WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer}},
+		Resolver: resolver,
+		Adapter:  client,
+		Tx:       txStore,
+		Audit:    auditStore,
+		Alarm:    alarm,
+	})
+	return pipeline, principal, conn, txStore, auditStore, client
+}
+
+// TestNextPageLoadTableMetadataFailureFinalizes 验证续页在 LoadTableMetadata 访问
+// 目标库后失败时（Codex P1/D11）：Execution 已创建且为 failed 终态、AuditEvent 已追加、
+// token 不可复用、不返回结果或新 token。
+func TestNextPageLoadTableMetadataFailureFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, auditStore, client := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	// 注入 LoadTableMetadata 失败（续页目标库访问后失败）。
+	client.handle.metaErr = errors.New("injected schema load failure")
+
+	r2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	if err == nil || r2.ErrorCode != ErrInvalidPageToken {
+		t.Fatalf("ExecuteNextPage err=%v code=%q, want invalid_page_token", err, r2.ErrorCode)
+	}
+	if r2.Result != nil {
+		t.Fatal("failed page must not return result")
+	}
+	if r2.NextPageToken != nil {
+		t.Fatal("failed page must not return new token")
+	}
+
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("continuation execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+
+	if len(auditStore.events) == 0 {
+		t.Fatal("continuation audit event must be appended")
+	}
+	if ev := auditStore.events[len(auditStore.events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
+	}
+
+	// token 不可复用（claim 后失败不恢复）。
+	if _, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken}); err == nil {
+		t.Fatal("replay after failure should be rejected")
+	}
+}
