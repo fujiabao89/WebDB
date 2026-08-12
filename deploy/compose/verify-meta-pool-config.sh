@@ -36,9 +36,10 @@ get_env_var() {
 }
 
 # 场景 1：未设置插值变量 → 应回退默认 10 / 2 / 30m
+# --env-file /dev/null 隔离 deploy/compose/.env，确保其同名变量不影响默认值验证（CodeRabbit P2）。
 echo "▶ 场景 1：未设置插值变量 → 回退默认 10 / 2 / 30m"
 rendered_default=$(env -u META_DB_MAX_OPEN_CONNS -u META_DB_MAX_IDLE_CONNS -u META_DB_CONN_MAX_LIFETIME \
-  docker compose -f "${REPO_ROOT}/${COMPOSE_FILE}" config)
+  docker compose --env-file /dev/null -f "${REPO_ROOT}/${COMPOSE_FILE}" config)
 got_open=$(printf '%s\n' "$rendered_default" | get_env_var META_DB_MAX_OPEN_CONNS)
 got_idle=$(printf '%s\n' "$rendered_default" | get_env_var META_DB_MAX_IDLE_CONNS)
 got_life=$(printf '%s\n' "$rendered_default" | get_env_var META_DB_CONN_MAX_LIFETIME)
@@ -61,10 +62,10 @@ else
   fail "自定义渲染 open=$got_open idle=$got_idle lifetime=$got_life（want 25 / 5 / 45m）"
 fi
 
-# 场景 3：未提供变量时 compose config 语法有效
+# 场景 3：未提供变量时 compose config 语法有效（同样隔离 .env）
 echo "▶ 场景 3：compose config 语法校验"
 if env -u META_DB_MAX_OPEN_CONNS -u META_DB_MAX_IDLE_CONNS -u META_DB_CONN_MAX_LIFETIME \
-  docker compose -f "${REPO_ROOT}/${COMPOSE_FILE}" config --quiet 2>/dev/null; then
+  docker compose --env-file /dev/null -f "${REPO_ROOT}/${COMPOSE_FILE}" config --quiet 2>/dev/null; then
   pass "docker compose config --quiet 通过"
 else
   fail "docker compose config --quiet 失败"

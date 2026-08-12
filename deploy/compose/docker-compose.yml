@@ -176,6 +176,33 @@ services:
       - webdb-backend
 
   # ============================================================
+  # one-shot 运行时账号 bootstrap — 确保 webdb_app_runtime 存在
+  # 升级/已有 webdb-meta-data 卷时 /docker-entrypoint-initdb.d 不会重跑，
+  # 本服务幂等创建运行时角色/密码/授权（复用 init 脚本，POSTGRES_HOST 远程连接）；
+  # 任一失败则 api 不启动（fail-closed，CodeRabbit P1 升级场景前向修复）。
+  # ============================================================
+  api-bootstrap:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_HOST: webdb-meta
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: webdb
+      POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      POSTGRES_DB: webdb_meta
+      WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
+    volumes:
+      - ./init/webdb-meta/01-create-runtime-user.sh:/01-create-runtime-user.sh:ro
+    entrypoint: ["bash", "/01-create-runtime-user.sh"]
+    depends_on:
+      webdb-meta:
+        condition: service_healthy
+      api-migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - webdb-backend
+
+  # ============================================================
   # API 服务 — 唯一可连接目标数据库的组件
   # dev target: golang:1.26-bookworm（含 shell）
   # ============================================================
@@ -188,8 +215,8 @@ services:
       API_PORT: "8080"
       META_DB_HOST: webdb-meta
       META_DB_PORT: "5432"
-      # 运行时连接使用非超级用户 webdb_app_runtime（PR37 检定：生产 API 不得用超管 webdb）；
-      # 迁移需 DDL 权限，用独立的 META_MIGRATE_USER（管理员 webdb）。
+      # 运行时连接使用非超级用户 webdb_app_runtime（PR37 检定：生产 API 不得用超管 webdb）。
+      # 迁移管理员凭据 META_MIGRATE_* 仅注入 api-migrate；API 进程不持有 DDL 凭据（CodeRabbit P1）。
       META_DB_USER: webdb_app_runtime
       META_DB_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
       META_DB_NAME: webdb_meta
@@ -198,8 +225,6 @@ services:
       META_DB_MAX_OPEN_CONNS: ${META_DB_MAX_OPEN_CONNS:-10}
       META_DB_MAX_IDLE_CONNS: ${META_DB_MAX_IDLE_CONNS:-2}
       META_DB_CONN_MAX_LIFETIME: ${META_DB_CONN_MAX_LIFETIME:-30m}
-      META_MIGRATE_USER: webdb
-      META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
       # 可信演示 Principal（D01b）：必须与 demo-seed 权威 UUID 一致；
       # 缺失/非法时 API 拒绝启动（fail-closed），浏览器不自报身份。
       DEMO_PRINCIPAL_WORKSPACE_ID: ${DEMO_PRINCIPAL_WORKSPACE_ID:-f1160d75-26f7-46e0-b3e0-570ea65c232e}
@@ -232,6 +257,8 @@ services:
       api-migrate:
         condition: service_completed_successfully
       demo-seed:
+        condition: service_completed_successfully
+      api-bootstrap:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]

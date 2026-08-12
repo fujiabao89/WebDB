@@ -24,8 +24,15 @@ export RUNTIME_PASSWORD
 
 export PGPASSWORD="$POSTGRES_PASSWORD"
 
+# 支持远程连接：本脚本既用于 webdb-meta 首次初始化（本地 socket），
+# 也被 api-bootstrap one-shot 服务复用（POSTGRES_HOST 指向 webdb-meta，升级/已有卷场景）。
+PSQL_OPTS=(-v ON_ERROR_STOP=1)
+if [ -n "${POSTGRES_HOST:-}" ]; then
+  PSQL_OPTS+=(-h "$POSTGRES_HOST" -p "${POSTGRES_PORT:-5432}")
+fi
+
 # 第一步：创建角色并设置密码（幂等；CREATE 仅不存在时执行，ALTER 仅已存在时执行）
-psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
+psql "${PSQL_OPTS[@]}" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 \getenv runtime_password RUNTIME_PASSWORD
 SELECT format('CREATE ROLE webdb_app_runtime WITH LOGIN PASSWORD %L', :'runtime_password')
 WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'webdb_app_runtime')
@@ -38,7 +45,7 @@ EOSQL
 # 第二步：基础授权 + 默认权限（无需变量替换）
 # 显式安全属性：非 SUPERUSER、非 BYPASSRLS、非创建者
 # 默认权限针对 webdb（migrate 以该角色建表），后续迁移创建的表/序列自动授予运行时账号
-psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
+psql "${PSQL_OPTS[@]}" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 ALTER ROLE webdb_app_runtime NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT CONNECT ON DATABASE webdb_meta TO webdb_app_runtime;
 GRANT USAGE ON SCHEMA public TO webdb_app_runtime;
