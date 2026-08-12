@@ -823,6 +823,10 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInternalError
+		// 匹配 adapter.Get 失败路径：exec 已创建，须终结为 failed + 审计（Codex）。
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	cfg := adapter.ConnectConfig{

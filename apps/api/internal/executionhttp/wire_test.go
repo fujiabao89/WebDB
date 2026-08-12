@@ -69,12 +69,29 @@ func TestWireCellCapCountsEscapedBytes(t *testing.T) {
 // 内层+外层 JSON 编码后超过 256 KiB cell 上限返回 result_too_large（Codex：
 // 返回字符串在外层 JSON 编码再次转义，须按外层编码后长度计 cell 上限）。
 func TestWireJSONMapOuterEncodedCellLimit(t *testing.T) {
-	big := strings.Repeat("a\"\\\n", 40*1024)
+	// 内层编码（map→JSON）不超过 MaxCellBytes，外层编码（字符串→JSON）超过——
+	// 确保仅外层字符串编码触发 cell 上限（Codex）。
+	big := strings.Repeat("\n", 100*1024)
+	inner, err := json.Marshal(map[string]interface{}{"data": big})
+	if err != nil {
+		t.Fatalf("inner marshal: %v", err)
+	}
+	if len(inner) > MaxCellBytes {
+		t.Fatalf("inner encoded len=%d must not exceed MaxCellBytes=%d", len(inner), MaxCellBytes)
+	}
+	outer, err := json.Marshal(string(inner))
+	if err != nil {
+		t.Fatalf("outer marshal: %v", err)
+	}
+	if len(outer) <= MaxCellBytes {
+		t.Fatalf("outer encoded len=%d must exceed MaxCellBytes=%d", len(outer), MaxCellBytes)
+	}
+
 	qr := &adapter.QueryResult{
 		Columns: []adapter.ColumnInfo{{Name: "j", DataType: "3802"}}, // jsonb
 		Rows:    [][]any{{map[string]interface{}{"data": big}}},
 	}
-	_, err := toWireResult("postgresql", qr)
+	_, err = toWireResult("postgresql", qr)
 	if !errors.Is(err, ErrResultTooLarge) {
 		t.Fatalf("escape-heavy JSONB map 外层编码后应触发 cell 上限 result_too_large，实际 err=%v", err)
 	}

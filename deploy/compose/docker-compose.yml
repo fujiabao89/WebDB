@@ -30,6 +30,9 @@ services:
       POSTGRES_DB: webdb_meta
       # 运行时最小权限账号密码（与 api 服务 WEBDB_APP_PASSWORD 一致）；仅本地合成值。
       WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
+      # 本地演示显式启用 insecure-demo（Codex）：允许默认 change_me 演示密码；
+      # 非演示/生产不得设置。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
@@ -190,6 +193,8 @@ services:
       POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
       POSTGRES_DB: webdb_meta
       WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
+      # 本地演示显式启用 insecure-demo（Codex）：允许默认 change_me 演示密码。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
     volumes:
       - ./init/webdb-meta/01-create-runtime-user.sh:/01-create-runtime-user.sh:ro
     entrypoint: ["bash", "/01-create-runtime-user.sh"]

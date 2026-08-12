@@ -15,8 +15,9 @@ import (
 )
 
 // paginationSetup 构造启用分页的 Pipeline 与 fakes。
-func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeAdapterClient, *fakeResolver) {
-	t.Helper()
+// paginationFixture 构造分页测试的公共 fixture（principal/conn/policy/resolver/client）。
+// paginationSetup 与 paginationAuditSetup 共用，避免复制漂移（CodeRabbit 复审）。
+func paginationFixture() (AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeResolver, *fakeAdapterClient) {
 	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
 	conn := &metadata.Connection{
 		ID:            uuid.New(),
@@ -57,6 +58,12 @@ func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata
 		currentSchema: "public",
 	}
 	client := &fakeAdapterClient{handle: handle}
+	return principal, conn, policy, resolver, client
+}
+
+func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeAdapterClient, *fakeResolver) {
+	t.Helper()
+	principal, conn, policy, resolver, client := paginationFixture()
 	pipeline := testPipeline(
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
@@ -379,46 +386,7 @@ func TestNextPageAdapterErrorAbortsToken(t *testing.T) {
 // （供续页失败终态审计断言，Codex P1）。
 func paginationAuditSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *fakeTxStore, *fakeAuditStore, *fakeAdapterClient) {
 	t.Helper()
-	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
-	conn := &metadata.Connection{
-		ID:            uuid.New(),
-		WorkspaceID:   principal.WorkspaceID,
-		Engine:        metadata.EnginePostgreSQL,
-		Host:          "db.example.invalid",
-		Port:          5432,
-		Database:      "synthetic",
-		SecretRef:     uuid.New(),
-		SecretVersion: 1,
-		UpdatedAt:     time.Unix(1_700_000_000, 123_000),
-	}
-	policy := &metadata.ConnectionPolicy{
-		WorkspaceID:        principal.WorkspaceID,
-		ConnectionID:       conn.ID,
-		AllowRead:          boolPtr(true),
-		StatementTimeoutMs: 5_000,
-		MaxRows:            500,
-		UpdatedAt:          time.Unix(1_700_000_000, 456_000),
-	}
-	resolver := &fakeResolver{
-		payload: credentials.CredentialPayload{User: "synthetic_user", Password: "synthetic_password"},
-	}
-	handle := &fakeAdapterHandle{
-		result: &adapter.QueryResult{HasMore: true, TotalReturned: 2, ReturnedRows: 2,
-			Columns: []adapter.ColumnInfo{{Name: "id"}},
-			Rows:    [][]any{{int32(1)}, {int32(2)}},
-		},
-		nextResult: &adapter.QueryResult{HasMore: false, TotalReturned: 3, ReturnedRows: 1,
-			Columns: []adapter.ColumnInfo{{Name: "id"}},
-			Rows:    [][]any{{int32(3)}},
-		},
-		meta: &queryplan.TableMetadata{
-			Schema: "public", Table: "employees",
-			Columns:    []queryplan.Column{{Name: "id", Ordinal: 1, Nullable: false}},
-			PrimaryKey: &queryplan.PrimaryKey{Columns: []string{"id"}},
-		},
-		currentSchema: "public",
-	}
-	client := &fakeAdapterClient{handle: handle}
+	principal, conn, policy, resolver, client := paginationFixture()
 	txStore := &fakeTxStore{}
 	auditStore := &fakeAuditStore{}
 	alarm := &fakeAlarm{}
