@@ -440,15 +440,20 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// 由 middleware 返回 500。终结失败仅记录安全告警（已尽力），不吞 panic。
 	defer func() {
 		if rec := recover(); rec != nil {
+			// 先回滚进行中的 mtx 事务，避免 finalizePanic（独立事务）期间原事务
+			// 悬空/审计状态不一致（Codex P1）。事务已提交后 Rollback 为无害 no-op。
+			_ = mtx.Rollback()
 			p.finalizePanic(ctx, conn, exec, traceID, p.clock())
 			panic(rec)
 		}
 	}()
 	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
-		mtx.Rollback()
+		_ = mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 	if err := mtx.Commit(); err != nil {
+		// Commit 失败：事务可能仍活跃，显式回滚避免连接/审计状态残留（Codex P1）。
+		_ = mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 

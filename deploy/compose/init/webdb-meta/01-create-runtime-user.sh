@@ -49,13 +49,37 @@ psql "${PSQL_OPTS[@]}" -U "$POSTGRES_USER" -d "$POSTGRES_DB" <<'EOSQL'
 ALTER ROLE webdb_app_runtime NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE NOREPLICATION;
 GRANT CONNECT ON DATABASE webdb_meta TO webdb_app_runtime;
 GRANT USAGE ON SCHEMA public TO webdb_app_runtime;
+-- 最小权限（Codex P3）：默认权限只给未来表 SELECT（只读）；具体写权限
+-- 由下方按表显式授予（audit_events 仅 INSERT、executions INSERT/UPDATE）。
 ALTER DEFAULT PRIVILEGES FOR ROLE webdb IN SCHEMA public
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO webdb_app_runtime;
+  GRANT SELECT ON TABLES TO webdb_app_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE webdb IN SCHEMA public
   GRANT USAGE, SELECT ON SEQUENCES TO webdb_app_runtime;
 -- 已有对象授权（Codex P1）：api-bootstrap 在 api-migrate 建表之后运行，
--- ALTER DEFAULT PRIVILEGES 只影响未来对象；此处 GRANT ON ALL TABLES/SEQUENCES
--- 覆盖已有元数据库卷升级场景（空卷 init 无表时幂等 no-op）。
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO webdb_app_runtime;
+-- ALTER DEFAULT PRIVILEGES 只影响未来对象；此处按表最小权限覆盖已有元数据库卷
+-- 升级场景（空卷 init 无表时幂等 no-op）。
+-- 先收敛旧宽权限（Codex P3）：撤销历史 GRANT ALL 残留的 INSERT/UPDATE/DELETE/TRUNCATE，
+-- 再按表授予最小权限（否则升级卷上残留权限使回归断言失败）。
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA public FROM webdb_app_runtime;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO webdb_app_runtime;
+-- executions（API 创建/更新执行状态）/audit_events（仅追加 INSERT）写权限：
+-- 仅表存在时授予（空卷 init 时 migrate 尚未建表）。
+SELECT format('GRANT INSERT, UPDATE ON %I TO webdb_app_runtime', 'executions')
+WHERE EXISTS (SELECT FROM information_schema.tables WHERE table_schema='public' AND table_name='executions')
+\gexec
+SELECT format('GRANT INSERT ON %I TO webdb_app_runtime', 'audit_events')
+WHERE EXISTS (SELECT FROM information_schema.tables WHERE table_schema='public' AND table_name='audit_events')
+\gexec
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO webdb_app_runtime;
+-- 回归检查（Codex P3）：webdb_app_runtime 不得对 audit_events 有 UPDATE/DELETE/TRUNCATE。
+DO $$
+BEGIN
+  IF EXISTS (SELECT FROM information_schema.tables WHERE table_schema='public' AND table_name='audit_events')
+     AND (has_table_privilege('webdb_app_runtime', 'audit_events', 'UPDATE')
+          OR has_table_privilege('webdb_app_runtime', 'audit_events', 'DELETE')
+          OR has_table_privilege('webdb_app_runtime', 'audit_events', 'TRUNCATE')) THEN
+    RAISE EXCEPTION 'webdb_app_runtime 不得对 audit_events 有 UPDATE/DELETE/TRUNCATE';
+  END IF;
+END
+$$;
 EOSQL

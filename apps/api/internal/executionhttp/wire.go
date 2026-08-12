@@ -228,7 +228,10 @@ func wireCell(wt string, v any) (any, int, error) {
 			if !json.Valid([]byte(s)) {
 				return nil, 0, codef(ErrDatabaseError, "invalid json value in result")
 			}
-			eb, _ := json.Marshal(s)
+			eb, err := json.Marshal(s)
+			if err != nil {
+				return nil, 0, errUnrepresentable(wt, v)
+			}
 			return s, len(eb), nil
 		}
 		// pgx v5 把 PG jsonb 解码为 map[string]interface{} 等 JSON 值（非 string）；
@@ -241,7 +244,10 @@ func wireCell(wt string, v any) (any, int, error) {
 	default: // text/uuid
 		if s, ok := asString(v); ok {
 			// text 单元格同样按 JSON 编码后长度计（Codex P2，防转义绕过行限）。
-			eb, _ := json.Marshal(s)
+			eb, err := json.Marshal(s)
+			if err != nil {
+				return nil, 0, errUnrepresentable(wt, v)
+			}
 			return s, len(eb), nil
 		}
 		return nil, 0, errUnrepresentable(wt, v)
