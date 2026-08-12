@@ -52,6 +52,11 @@ func TestHasUnboundPlaceholderMySQL(t *testing.T) {
 		{"string literal", "SELECT '?'", false},
 		// MySQL `$` 是合法标识符字符，不得当美元引号跳过区间内 ? 占位符（CodeRabbit 新 #6）。
 		{"dollar-like identifier with placeholder", "SELECT a$b$c FROM t WHERE id = ?", true},
+		// MySQL/SQL 标准：`--` 注释须后跟空白或控制字符。`SELECT 1--?` 是 `1 - - ?`
+		// 而非注释，`?` 为未绑定占位符 → 拒绝（fail-closed，CodeRabbit 复审）；
+		// `-- ?` 后跟空白才是注释，`?` 放行。
+		{"dash-dash no-space placeholder", "SELECT 1--?", true},
+		{"dash-dash space comment", "SELECT 1 -- ?", false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

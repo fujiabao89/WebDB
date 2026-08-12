@@ -28,7 +28,7 @@ func HasUnboundPlaceholder(dialect Dialect, sql string) (bool, error) {
 }
 
 func hasPGPlaceholder(sql string) (bool, error) {
-	return scanPlaceholder(sql, false, false, true, func(sql string, i int) bool {
+	return scanPlaceholder(sql, false, false, true, false, func(sql string, i int) bool {
 		if i+1 >= len(sql) {
 			return false
 		}
@@ -38,7 +38,7 @@ func hasPGPlaceholder(sql string) (bool, error) {
 }
 
 func hasMySQLPlaceholder(sql string) (bool, error) {
-	return scanPlaceholder(sql, true, true, false, func(sql string, i int) bool {
+	return scanPlaceholder(sql, true, true, false, true, func(sql string, i int) bool {
 		return sql[i] == '?'
 	})
 }
@@ -52,10 +52,13 @@ func hasMySQLPlaceholder(sql string) (bool, error) {
 //   - dollarQuotes 仅 PostgreSQL 启用（美元引号 `$tag$...$tag$` 仅 PG 语法；MySQL
 //     中 `$` 是合法标识符字符，若把 `$...$` 当美元引号跳过会吞掉区间内的 `?`
 //     占位符 → fail-open，CodeRabbit 新 #6）。
+//   - dashDashSpace 仅 MySQL 启用（SQL 标准/MySQL：`--` 注释须后跟空白或控制字符；
+//     `SELECT 1--?` 中 `--?` 是 `1 - - ?` 而非注释，`?` 为未绑定占位符须继续扫描，
+//     fail-closed。PG 把 `--` 无条件当行注释，传 false）。
 //
 // 任何未闭合的词法结构（字符串/块注释/引号标识符/美元引号）返回 error
 // （fail-closed，CodeRabbit #21），不得静默按"无占位符"放行。
-func scanPlaceholder(sql string, hashComment, backslashEscapes, dollarQuotes bool, isPlaceholder func(sql string, i int) bool) (bool, error) {
+func scanPlaceholder(sql string, hashComment, backslashEscapes, dollarQuotes, dashDashSpace bool, isPlaceholder func(sql string, i int) bool) (bool, error) {
 	for i := 0; i < len(sql); {
 		c := sql[i]
 		switch {
@@ -77,7 +80,7 @@ func scanPlaceholder(sql string, hashComment, backslashEscapes, dollarQuotes boo
 				return false, fmt.Errorf("unclosed backtick identifier")
 			}
 			i = next
-		case c == '-' && i+1 < len(sql) && sql[i+1] == '-':
+		case c == '-' && i+1 < len(sql) && sql[i+1] == '-' && (!dashDashSpace || isDashDashComment(sql, i)):
 			i = skipLineComment(sql, i)
 		case c == '#' && hashComment:
 			i = skipLineComment(sql, i)
@@ -211,6 +214,16 @@ func skipBacktick(sql string, i int) (int, bool) {
 		i++
 	}
 	return i, false
+}
+
+// isDashDashComment 判断 `--` 是否为行注释开始（SQL 标准/MySQL：`--` 后须跟空白或
+// 控制字符，否则是减号运算）。如 `SELECT 1--?` 中 `--?` 非注释，`?` 为未绑定占位符
+// 须继续扫描（fail-closed）；`--` 到行尾/EOF 视为注释。
+func isDashDashComment(sql string, i int) bool {
+	if i+2 >= len(sql) {
+		return true
+	}
+	return sql[i+2] <= ' '
 }
 
 // skipLineComment 跳过 -- 或 # 单行注释到行尾。行注释在行尾/EOF 自然闭合，恒为 closed。
