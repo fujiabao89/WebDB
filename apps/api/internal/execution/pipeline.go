@@ -819,6 +819,25 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	result.ExecutionID = &exec.ID
 	result.TraceID = traceID
 
+	// begin 后立即注册统一 panic finalizer（CodeRabbit P1）：覆盖预检
+	//（configRevision/Get/pool generation/LoadTableMetadata/schema/nextPlan）与
+	// NextPage 任意 panic——终结 running Execution（failed + 内部错误）+ 追加失败
+	// AuditEvent，再 re-panic 由 HTTP middleware 返回 500；审计失败仅记录告警。
+	// handle 的释放由 Get 后的 defer（released 标志）处理，不在此重复。
+	defer func() {
+		if rec := recover(); rec != nil {
+			claim.Abort()
+			result.ErrorCode = ErrInternalError
+			if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
+				metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+					TraceID: traceID, WorkspaceID: conn.WorkspaceID,
+					Code: string(ErrInternalError), OccurredAt: p.clock(),
+				})
+			}
+			panic(rec)
+		}
+	}()
+
 	configRevision, err := connectionConfigRevision(conn)
 	if err != nil {
 		claim.Abort()
@@ -911,24 +930,6 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	}
 
 	result.AdapterCalled = true
-	// panic finalizer（Codex P1）：NextPage 接触目标库后 panic 时，现有 defer 仅
-	// abort claim + release handle，finalize 不执行 → 该物理页无终态审计。
-	// 此处用已创建的 exec 终结 failed + Audit，再重新抛出由 HTTP middleware
-	// 返回 500；审计失败仅记录安全告警（已尽力），不吞 panic。
-	defer func() {
-		if rec := recover(); rec != nil {
-			claim.Abort()
-			handle.Release()
-			released = true
-			if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
-				metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
-					TraceID: traceID, WorkspaceID: conn.WorkspaceID,
-					Code: string(ErrInternalError), OccurredAt: p.clock(),
-				})
-			}
-			panic(rec)
-		}
-	}()
 	queryResult, err := handle.NextPage(execCtx, adapter.UserWorkspaceScope{
 		UserID:      req.Principal.UserID.String(),
 		WorkspaceID: req.Principal.WorkspaceID.String(),

@@ -102,6 +102,7 @@ type fakeAdapterHandle struct {
 	currentSchemaErr error
 	poolGeneration   int64
 	panicNextPage    bool // 注入 NextPage panic，验证 claim 的 panic 兜底
+	panicMeta        bool // 注入 LoadTableMetadata panic（CodeRabbit P1：预检 panic finalizer）
 }
 
 func (f *fakeAdapterHandle) Query(_ context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error) {
@@ -120,6 +121,9 @@ func (f *fakeAdapterHandle) NextPage(_ context.Context, _ adapter.UserWorkspaceS
 }
 
 func (f *fakeAdapterHandle) LoadTableMetadata(_ context.Context, schema, table string) (*queryplan.TableMetadata, error) {
+	if f.panicMeta {
+		panic("injected panic in LoadTableMetadata")
+	}
 	f.metaSchema = schema
 	f.metaTable = table
 	if f.meta != nil && f.metaErr == nil {
