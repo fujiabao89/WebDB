@@ -327,6 +327,21 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// 不跨越 PolicyByConnection / ResolveCredential，避免长事务占用连接。
 	result.ExecutionID = &exec.ID
 
+	// pending 提交后立即注册统一 panic finalizer（Codex P1）：覆盖 PolicyByConnection、
+	// ResolveCredential、configRevision、running 更新及 adapter 阶段任意 panic——
+	// 终结 pending/running Execution（failed + internal_error）+ 追加失败 AuditEvent，
+	// 再 re-panic 由 HTTP middleware 返回 500。mtx 在阶段 B 已声明；running 更新
+	// 事务（阶段 D-0）未提交时 Rollback，已提交则无害 no-op。
+	defer func() {
+		if rec := recover(); rec != nil {
+			if mtx != nil {
+				_ = mtx.Rollback()
+			}
+			p.finalizePanic(ctx, conn, exec, traceID, p.clock())
+			panic(rec)
+		}
+	}()
+
 	// 阶段 C 拒绝：Execution=failed + Audit(sql.execute, denied)，Adapter 调用 0 次。
 	if !decision.Allowed {
 		result.ErrorCode = code
@@ -434,19 +449,6 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 	exec.Status = metadata.ExecStatusRunning
-	// panic recovery（Codex P1 #5）：adapter/执行阶段 panic 时，execution 已持久化
-	// running。HTTP 层 RecoverMiddleware 无 execution ID 无法终结；此处用独立有界
-	// context 终结 execution（failed + internal_error）并追加失败审计，再重新抛出
-	// 由 middleware 返回 500。终结失败仅记录安全告警（已尽力），不吞 panic。
-	defer func() {
-		if rec := recover(); rec != nil {
-			// 先回滚进行中的 mtx 事务，避免 finalizePanic（独立事务）期间原事务
-			// 悬空/审计状态不一致（Codex P1）。事务已提交后 Rollback 为无害 no-op。
-			_ = mtx.Rollback()
-			p.finalizePanic(ctx, conn, exec, traceID, p.clock())
-			panic(rec)
-		}
-	}()
 	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
 		_ = mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)

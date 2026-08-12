@@ -37,12 +37,16 @@ func (f *fakeConnectionReader) ConnectionByID(context.Context, uuid.UUID, uuid.U
 }
 
 type fakePolicyReader struct {
-	policy *metadata.ConnectionPolicy
-	err    error
-	calls  int
+	policy      *metadata.ConnectionPolicy
+	err         error
+	calls       int
+	panicPolicy bool // 注入 PolicyByConnection panic（Codex P1：首页预检 panic finalizer）
 }
 
 func (f *fakePolicyReader) PolicyByConnection(context.Context, uuid.UUID, uuid.UUID) (*metadata.ConnectionPolicy, error) {
+	if f.panicPolicy {
+		panic("injected panic in PolicyByConnection")
+	}
 	f.calls++
 	return f.policy, f.err
 }

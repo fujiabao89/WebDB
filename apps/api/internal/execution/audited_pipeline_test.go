@@ -1037,3 +1037,42 @@ func TestAuditedExecute_AlarmFailureDoesNotPanic(t *testing.T) {
 		t.Fatal("audit failure must not return query result")
 	}
 }
+
+// TestExecutePolicyPanicFinalizesPending 验证首页 PolicyByConnection panic 后
+// （Codex P1）：统一 panic finalizer 终结 pending Execution（failed）+ 追加失败
+// AuditEvent，panic 向上传播。
+func TestExecutePolicyPanicFinalizesPending(t *testing.T) {
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	polReader := &fakePolicyReader{policy: policy, panicPolicy: true}
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		polReader,
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, realClock(),
+	)
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("PolicyByConnection panic 应向上传播")
+			}
+		}()
+		_, _ = pipeline.Execute(context.Background(), ExecuteRequest{
+			Principal: principal, ConnectionID: conn.ID, SQL: "SELECT 1", Engine: EnginePostgreSQL,
+		})
+	}()
+
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+	events := txStore.allAuditEvents()
+	if len(events) == 0 {
+		t.Fatal("audit event must be appended")
+	}
+	if ev := events[len(events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
+	}
+}
