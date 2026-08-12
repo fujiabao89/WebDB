@@ -30,6 +30,7 @@ type Pipeline struct {
 	resolver  credentials.CredentialResolver
 	adapter   AdapterClient
 	mysqlMode sqlpolicy.MySQLLexerMode
+	tlsMode   adapter.TLSMode // 目标库连接 TLS 模式（默认 TLSRequire，生产安全）
 
 	txs               metadata.TxStore
 	audit             metadata.AuditEventStore
@@ -101,6 +102,9 @@ type PipelineConfig struct {
 	Resolver    credentials.CredentialResolver
 	Adapter     AdapterClient
 	MySQLMode   sqlpolicy.MySQLLexerMode
+	// TLSMode 目标库连接 TLS 模式。默认 TLSRequire（生产安全）；本地演示环境由
+	// 调用方按 ALLOW_INSECURE_LOCAL_DEMO 显式传入 TLSDisable（非客户端输入）。
+	TLSMode adapter.TLSMode
 
 	// WEB-23：审计感知管线。Tx 与 Audit 需同时配置；nil 时保持无审计旧行为。
 	Tx                metadata.TxStore
@@ -142,6 +146,11 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		reg = pagination.New(pagination.DefaultConfig())
 		ownRegistry = true
 	}
+	// TLS 模式安全默认：未配置（零值）时回退 TLSRequire，绝不因客户端/缺省宽松。
+	tlsMode := cfg.TLSMode
+	if tlsMode == "" {
+		tlsMode = adapter.TLSRequire
+	}
 	return &Pipeline{
 		store:             cfg.Store,
 		policyStore:       cfg.PolicyStore,
@@ -149,6 +158,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		resolver:          cfg.Resolver,
 		adapter:           cfg.Adapter,
 		mysqlMode:         cfg.MySQLMode,
+		tlsMode:           tlsMode,
 		txs:               cfg.Tx,
 		audit:             cfg.Audit,
 		alarm:             alarm,
@@ -443,7 +453,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		User:           payload.User,
 		Password:       payload.Password,
 		Database:       conn.Database,
-		TLS:            adapter.TLSRequire,
+		TLS:            p.tlsMode,
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(policy.StatementTimeoutMs)*time.Millisecond)
@@ -798,7 +808,7 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		User:           payload.User,
 		Password:       payload.Password,
 		Database:       conn.Database,
-		TLS:            adapter.TLSRequire,
+		TLS:            p.tlsMode,
 	}
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveTimeout)*time.Millisecond)
 	defer cancel()
@@ -1263,9 +1273,11 @@ func (p *Pipeline) recordPostExecution(
 	case ErrUnsupportedQuery:
 		// unsupported_query：需要分页但缺少/无法验证唯一性证明，执行前拒绝
 		// （PAGE-01：Execution failed，Audit denied）。
+		// denied 结果不得携带 error_code（validateAuditRequired 互斥），
+		// 且 sql.execute denied 必填 reason_code → 用 ReasonCode 表达拒绝原因。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeDenied
-		md.ErrorCode = strPtr(string(result.ErrorCode))
+		md.ReasonCode = strPtr(string(result.ErrorCode))
 		md.Environment = strPtr(string(conn.Environment))
 	case "":
 		// E10 succeeded：矩阵要求 environment。

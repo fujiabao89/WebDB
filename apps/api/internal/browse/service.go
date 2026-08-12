@@ -98,6 +98,16 @@ type Service struct {
 	logger   *slog.Logger
 }
 
+// Option 配置 Service。
+type Option func(*Service)
+
+// WithTLSMode 设置目标库连接 TLS 模式（默认 TLSRequire 生产安全）。
+// 本地演示环境由调用方（cmd/server 按 ALLOW_INSECURE_LOCAL_DEMO）显式传入 TLSDisable；
+// 未调用时保持安全默认，不随客户端输入派生。
+func WithTLSMode(mode adapter.TLSMode) Option {
+	return func(s *Service) { s.tlsMode = mode }
+}
+
 // NewService 创建授权读取服务。
 func NewService(
 	members MemberReader,
@@ -106,6 +116,7 @@ func NewService(
 	resolver credentials.CredentialResolver,
 	browser MetadataBrowser,
 	limits Limits,
+	opts ...Option,
 ) *Service {
 	if limits.MaxConnections <= 0 {
 		limits.MaxConnections = 200
@@ -113,7 +124,7 @@ func NewService(
 	if limits.MaxEntries <= 0 {
 		limits.MaxEntries = 1000
 	}
-	return &Service{
+	s := &Service{
 		members:  members,
 		conns:    conns,
 		policies: policies,
@@ -123,6 +134,10 @@ func NewService(
 		tlsMode:  adapter.TLSRequire,
 		logger:   slog.Default(),
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // ListConnections 返回已授权连接的安全 DTO 列表（P0-06A §6）。

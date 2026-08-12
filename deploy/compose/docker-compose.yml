@@ -28,10 +28,14 @@ services:
       POSTGRES_USER: webdb
       POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
       POSTGRES_DB: webdb_meta
+      # 运行时最小权限账号密码（与 api 服务 WEBDB_APP_PASSWORD 一致）；仅本地合成值。
+      WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - webdb-meta-data:/var/lib/postgresql/data
+      # 首次初始化创建运行时最小权限账号 webdb_app_runtime（WEB-40 runtime/migration 分离）
+      - ./init/webdb-meta:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # 强制 --host=127.0.0.1 走 TCP：PG 首次初始化期间临时服务器仅监听 Unix socket，
       # 避免 api-migrate 依赖的 TCP 5432 尚未就绪时被误判为 healthy（与 demo-pg 一致）。
@@ -196,6 +200,10 @@ services:
       META_DB_CONN_MAX_LIFETIME: ${META_DB_CONN_MAX_LIFETIME:-30m}
       META_MIGRATE_USER: webdb
       META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      # 可信演示 Principal（D01b）：必须与 demo-seed 权威 UUID 一致；
+      # 缺失/非法时 API 拒绝启动（fail-closed），浏览器不自报身份。
+      DEMO_PRINCIPAL_WORKSPACE_ID: ${DEMO_PRINCIPAL_WORKSPACE_ID:-f1160d75-26f7-46e0-b3e0-570ea65c232e}
+      DEMO_PRINCIPAL_USER_ID: ${DEMO_PRINCIPAL_USER_ID:-73e8c8f0-83e4-4096-8400-15ca15073d6b}
       # 仅本地演示环境显式启用 TLS disable 的本地演示连接（WebDB 安全约束 #4）：
       # 默认关闭；非演示/生产不得设置。
       ALLOW_INSECURE_LOCAL_DEMO: "true"

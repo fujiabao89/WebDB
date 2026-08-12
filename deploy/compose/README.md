@@ -21,7 +21,7 @@ webdb-meta healthy → api-migrate completed → demo-seed completed → api hea
 ```
 
 - `api-migrate` 使用独立管理员 `META_MIGRATE_USER/PASSWORD` 执行 `migrate up`；失败时 `demo-seed`/`api`/`web` 均不启动（`service_completed_successfully`）。
-- **待决（Owner）**：元数据库迁移账号与运行时账号是否拆分及各自授权范围。本地 Compose 的 `api-migrate`/`demo-seed` 当前沿用超管 `webdb`（仅限本地演示）；生产最小权限运行时账号 `webdb_app_runtime` 由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）创建、本地 Compose 未挂载，落地（更新 `META_MIGRATE_USER/PASSWORD`、`META_DB_USER`、ADR 与验证步骤）需 Owner 批准后实施。
+- **运行时账号分离**：`api` 用非超级用户 `webdb_app_runtime`（WEB-40 runtime/migration 分离），由 `webdb-meta` 的 `init/webdb-meta/01-create-runtime-user.sh` 在首次初始化时创建（幂等，仅本地演示的最小可用权限：默认 PRIVILEGES 授权给 `webdb` 迁移所建表）。生产环境的最小权限收敛（REVOKE 多余权限、ownership 校验）仍由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）负责，本地 Compose 未挂载该收敛脚本；生产角色拆分落地需 Owner 批准后实施。
 - `demo-seed` 仅在 `WEBDB_DEMO_SEED=true` 时执行；生产部署不设置该开关则**绝不自动 seed**。
 - `api`/`web` 依赖 `demo-seed` 成功退出后才启动，保证空卷首次启动即有业务表、演示身份与可授权连接。
 

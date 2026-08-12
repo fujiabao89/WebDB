@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fujiabao89/webdb/internal/adapter"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // WireType 稳定 wire 类型（P0-06A §13.1 D08 已批准；对齐 WEB-37 contracts.ts）。
@@ -248,6 +250,9 @@ func decimalString(v any) (any, int, error) {
 	case uint64:
 		s := strconv.FormatUint(t, 10)
 		return s, len(s), nil
+	case []byte:
+		// MySQL DECIMAL 等驱动默认返回 []byte（文本字节），按 UTF-8 文本转十进制字符串。
+		return string(t), len(t), nil
 	case string:
 		return t, len(t), nil
 	case json.Number:
@@ -258,6 +263,14 @@ func decimalString(v any) (any, int, error) {
 		}
 		s := strconv.FormatFloat(t, 'f', -1, 64)
 		return s, len(s), nil
+	case pgtype.Numeric:
+		// pgx 把 PG numeric 解码为 pgtype.Numeric 结构（不实现 fmt.Stringer），
+		// 必须显式转为十进制字符串（D08：防精度丢失），不得把驱动私有类型序列化到响应。
+		s, ok := pgNumericString(t)
+		if !ok {
+			return nil, 0, errUnrepresentable("int/decimal", v)
+		}
+		return s, len(s), nil
 	default:
 		if st, ok := v.(fmt.Stringer); ok {
 			s := st.String()
@@ -265,6 +278,51 @@ func decimalString(v any) (any, int, error) {
 		}
 		return nil, 0, errUnrepresentable("int/decimal", v)
 	}
+}
+
+// pgNumericString 把 pgx 的 pgtype.Numeric 结构转为十进制字符串（D08 十进制字符串语义）。
+// 处理 NaN / Infinity / 整数指数 / 负指数（插入小数点）；非法（Invalid 或空系数）返回 false。
+func pgNumericString(n pgtype.Numeric) (string, bool) {
+	if !n.Valid {
+		return "", false
+	}
+	if n.NaN {
+		return "NaN", true
+	}
+	switch n.InfinityModifier {
+	case pgtype.NegativeInfinity:
+		return "-Infinity", true
+	case pgtype.Infinity:
+		return "Infinity", true
+	}
+	if n.Int == nil {
+		return "", false
+	}
+	if n.Exp == 0 {
+		return n.Int.String(), true
+	}
+	s := n.Int.String()
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	switch {
+	case n.Exp > 0:
+		// 整数部分后补零（Int × 10^Exp）
+		s += strings.Repeat("0", int(n.Exp))
+	default: // n.Exp < 0：插入小数点
+		exp := -int(n.Exp)
+		if exp >= len(s) {
+			s = "0." + strings.Repeat("0", exp-len(s)) + s
+		} else {
+			idx := len(s) - exp
+			s = s[:idx] + "." + s[idx:]
+		}
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s, true
 }
 
 // asFloat 把值转为 float64。

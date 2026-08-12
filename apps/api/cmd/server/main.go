@@ -129,6 +129,12 @@ func runServe() error {
 			log.Printf("AdapterManager 关闭未能在超时内完成: %v", err)
 		}
 	}()
+	// 目标库连接 TLS 模式：ALLOW_INSECURE_LOCAL_DEMO=true 时本地演示用 TLSDisable，
+	// 否则保持生产安全默认 TLSRequire。browse 与 execution 共用同一派生值（非客户端输入）。
+	tlsMode := adapter.TLSRequire
+	if allowInsecure {
+		tlsMode = adapter.TLSDisable
+	}
 	pipeline := execution.NewPipeline(execution.PipelineConfig{
 		Store:       store,
 		PolicyStore: store,
@@ -136,6 +142,7 @@ func runServe() error {
 		Resolver:    lm,
 		Adapter:     execution.NewAdapterClient(manager),
 		MySQLMode:   sqlpolicy.MySQLLexerMode{},
+		TLSMode:     tlsMode,
 		Tx:          store,
 		Audit:       store,
 		Alarm:       alarm,
@@ -143,7 +150,7 @@ func runServe() error {
 	defer pipeline.Close()
 
 	// 浏览服务（WEB-36）+ 执行 HTTP（WEB-35）。
-	browseSvc := browse.NewService(store, store, store, lm, browse.AdapterBrowser{Manager: manager}, browse.DefaultLimits())
+	browseSvc := browse.NewService(store, store, store, lm, browse.AdapterBrowser{Manager: manager}, browse.DefaultLimits(), browse.WithTLSMode(tlsMode))
 	browseHTTP := browsehttp.NewServer(browseSvc, func(r *http.Request) (browse.Principal, bool) {
 		return executionhttp.PrincipalFromContext(r.Context())
 	})
