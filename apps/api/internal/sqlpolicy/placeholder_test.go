@@ -21,6 +21,9 @@ func TestHasUnboundPlaceholderPG(t *testing.T) {
 		{"dollar quoted $1 inside", "SELECT $$hello $1$$", false},
 		{"tagged dollar quoted", "SELECT $tag$x$tag$", false},
 		{"string literal", "SELECT 'it''s $1'", false},
+		{"uppercase escape string literal", "SELECT E'it\\'s $1'", false},
+		{"lowercase escape string literal", "SELECT e'it\\'s $1'", false},
+		{"escape string then unbound $1", "SELECT E'it\\'s' WHERE id = $1", true},
 		// PG `#` 不是注释：`#>` 后 $1 必须识别（CodeRabbit #21）。
 		{"jsonb #> then $1", "SELECT j #> $1 FROM t", true},
 	}
