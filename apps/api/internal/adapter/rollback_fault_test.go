@@ -16,11 +16,12 @@ import (
 // 按语句内容返回 canned 响应，ROLLBACK 可注入失败。测试真实 execMySQL 代码路径
 // （beginReadOnlyMySQL → QueryContext → 显式回滚 → fail-closed），非手工构造 AdapterError 自证。
 type fakeMySQLDriver struct {
-	rollbackErr     error
-	autocommitErr   error
-	autocommitValue int64 // 默认 1（autocommit on）
-	queryErr        error // 目标只读查询注入错误（取消/超时等）
-	conns           []*fakeMySQLDriverConn
+	rollbackErr        error
+	autocommitErr      error
+	autocommitValue    int64 // 默认 1（autocommit on）
+	inTransactionValue int64 // 默认 0（无活动事务；Codex P1：显式 START TRANSACTION 后为 1）
+	queryErr           error // 目标只读查询注入错误（取消/超时等）
+	conns              []*fakeMySQLDriverConn
 }
 
 func (d *fakeMySQLDriver) Open(string) (driver.Conn, error) {
@@ -54,7 +55,9 @@ func (c *fakeMySQLDriverConn) QueryContext(_ context.Context, query string, _ []
 		if c.d.autocommitErr != nil {
 			return nil, c.d.autocommitErr
 		}
-		return &fakeMySQLRows{cols: []string{"@@autocommit"}, rows: [][]driver.Value{{c.d.autocommitValue}}}, nil
+		// beginReadOnlyMySQL 现查询 @@autocommit + @@session.in_transaction（Codex P1）。
+		return &fakeMySQLRows{cols: []string{"@@autocommit", "@@session.in_transaction"},
+			rows: [][]driver.Value{{c.d.autocommitValue, c.d.inTransactionValue}}}, nil
 	}
 	// 目标只读查询：可注入错误（取消/超时），否则返回单行 id=1。
 	if c.d.queryErr != nil {
@@ -264,5 +267,18 @@ func TestExecMySQLCancelThenReuse(t *testing.T) {
 	}
 	if fd.conns[0].closed {
 		t.Fatal("取消路径（回滚成功）不应销毁连接")
+	}
+}
+
+// TestExecMySQLActiveTransactionRejected 验证显式 START TRANSACTION 后（autocommit 仍 1
+// 但 @@session.in_transaction=1）beginReadOnlyMySQL 拒绝（Codex P1：避免 START TRANSACTION
+// READ ONLY 隐式提交活动可写事务，CT-22 fail-closed）。
+func TestExecMySQLActiveTransactionRejected(t *testing.T) {
+	fd := &fakeMySQLDriver{autocommitValue: 1, inTransactionValue: 1}
+	handle := fakeMySQLHandle(fd)
+	_, err := handle.execQuery(context.Background(), "SELECT id FROM t", nil, 2, 1, 0, 100)
+	var ae *AdapterError
+	if !errors.As(err, &ae) || ae.Code != ErrConnectionFailed {
+		t.Fatalf("活动事务下应 fail-closed 为 connection_failed，实际 err=%v", err)
 	}
 }

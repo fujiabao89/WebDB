@@ -878,19 +878,28 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	}
 
 	result.AdapterCalled = true
+	// 续页 Execution 在访问目标库前持久化（Codex P1）：元数据不可用时目标库不被
+	// 未审计访问；进程退出有记录；started_at/duration 含查询时间。
+	exec, traceID, now, err := p.beginContinuationExecution(ctx, req, state, conn)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrAuditFailed
+		return p.auditFailed(ctx, result, "", conn.WorkspaceID, ErrAuditFailed)
+	}
+	result.ExecutionID = &exec.ID
+	result.TraceID = traceID
 	// panic finalizer（Codex P1）：NextPage 接触目标库后 panic 时，现有 defer 仅
-	// abort claim + release handle，auditNextPage 不执行 → 该物理页无独立
-	// Execution/Audit。此处调用 auditNextPage 用独立有界 context（WithoutCancel +
-	// auditWriteTimeout）创建 failed Execution + Audit，再重新抛出由 HTTP middleware
+	// abort claim + release handle，finalize 不执行 → 该物理页无终态审计。
+	// 此处用已创建的 exec 终结 failed + Audit，再重新抛出由 HTTP middleware
 	// 返回 500；审计失败仅记录安全告警（已尽力），不吞 panic。
 	defer func() {
 		if rec := recover(); rec != nil {
 			claim.Abort()
 			handle.Release()
 			released = true
-			if aErr := p.auditNextPage(ctx, req, state, conn, result, nil, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
+			if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
 				metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
-					TraceID: result.TraceID, WorkspaceID: conn.WorkspaceID,
+					TraceID: traceID, WorkspaceID: conn.WorkspaceID,
 					Code: string(ErrInternalError), OccurredAt: p.clock(),
 				})
 			}
@@ -911,8 +920,8 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		// 失败必须 fail-closed（ADR-017 / §11.2）：返回 audit_failed、触发告警、
 		// 不静默声称 query_cancelled 已完整审计，也不遗留已提交的 pending Execution
 		// 而无终态（Greptile P1 / CodeRabbit #10）。
-		if aErr := p.auditNextPage(ctx, req, state, conn, result, nil, err); aErr != nil {
-			return p.auditFailed(ctx, result, result.TraceID, conn.WorkspaceID, origCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, origCode)
 		}
 		return result, fmt.Errorf("%w", origCode)
 	}
@@ -922,9 +931,9 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 
 	// D11（P0-06A §9.4）：每个物理页创建独立 Execution，并在返回页面前持久化
 	// AuditEvent。审计失败 → audit_failed（$SECURITY_ALERT），扣留结果，旧 token 不恢复。
-	if err := p.auditNextPage(ctx, req, state, conn, result, queryResult, nil); err != nil {
+	if err := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); err != nil {
 		claim.Abort()
-		return p.auditFailed(ctx, result, result.TraceID, conn.WorkspaceID, result.ErrorCode)
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
 	}
 
 	// Rotate/Complete：旧 token 永不恢复。
@@ -972,68 +981,69 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	return result, nil
 }
 
-// auditNextPage 为续页创建独立 Execution 并持久化 AuditEvent（D11，P0-06A §9.4）。
-// 每个实际访问目标库的续页请求都创建独立 Execution，并在返回页面前持久化
-// 对应 AuditEvent；statementHash 从服务端 ContinuationState 恢复（不来自客户端）。
-// 失败页写 failed 审计；成功页写 succeeded 审计。任何审计失败返回错误
-// （调用方返回 audit_failed 并扣留结果；token 不恢复）。
-func (p *Pipeline) auditNextPage(
+// beginContinuationExecution 在 handle.NextPage 访问目标库前持久化续页 Execution
+// （pending→running，Codex P1）：元数据不可用时目标库不被未审计访问；进程退出时有
+// 记录；started_at/duration 含查询时间。返回 exec/traceID/now 供后续 finalize 复用。
+func (p *Pipeline) beginContinuationExecution(
 	ctx context.Context,
 	req NextPageRequest,
 	state *pagination.ContinuationState,
 	conn *metadata.Connection,
-	result *ExecuteResult,
-	queryResult *adapter.QueryResult,
-	queryErr error,
-) error {
-	// 独立有界审计 context：客户端断开（transport abort）后 request ctx 已取消，
-	// 必须用 WithoutCancel + auditWriteTimeout 终结 Execution 并写审计（D13 义务 3/4）。
-	// 否则 pending Execution 永不终结、E13 丢失（P1-2 审查修复）。
+) (*metadata.Execution, string, time.Time, error) {
 	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
 	defer cancel()
-
 	traceID := p.newTrace()
-	result.TraceID = traceID
 	now := p.clock()
-
-	// 创建独立 Execution（pending），短事务提交（findings 2/3 语义）。
 	mtx, err := p.txs.Begin(auditCtx)
 	if err != nil {
-		return err
+		return nil, "", time.Time{}, err
 	}
 	exec := &metadata.Execution{
 		WorkspaceID:   conn.WorkspaceID,
 		ConnectionID:  conn.ID,
 		ActorID:       req.Principal.UserID,
 		StatementHash: state.StatementHash,
-		Status:        metadata.ExecStatusPending,
+		Status:        metadata.ExecStatusRunning,
 		TraceID:       traceID,
+		StartedAt:     now,
 	}
 	if err := mtx.CreateExecution(auditCtx, exec); err != nil {
 		mtx.Rollback()
-		return err
+		return nil, "", time.Time{}, err
 	}
 	if err := mtx.Commit(); err != nil {
-		return err
+		return nil, "", time.Time{}, err
 	}
-	result.ExecutionID = &exec.ID
+	return exec, traceID, now, nil
+}
 
-	// 按 queryErr 设置 ErrorCode，交 recordPostExecution 决定终态：
-	// query_cancelled → cancelled + E13；其他失败 → failed + E11；成功 → completed + E10。
+// finalizeContinuationExecution 为续页终结 Execution 并持久化 AuditEvent（D11，P0-06A §9.4）。
+// Execution 已由 beginContinuationExecution 在访问目标库前创建（running）；
+// 本方法按 queryErr 决定终态（failed/succeeded）并写审计。任何审计失败返回错误
+// （调用方返回 audit_failed 并扣留结果；token 不恢复）。
+func (p *Pipeline) finalizeContinuationExecution(
+	ctx context.Context,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	state *pagination.ContinuationState,
+	queryErr error,
+) error {
+	// 独立有界审计 context：客户端断开（transport abort）后 request ctx 已取消，
+	// 必须用 WithoutCancel + auditWriteTimeout 终结 Execution 并写审计（D13 义务 3/4）。
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+	// 按 queryErr 设置 ErrorCode，交 recordPostExecution 决定终态。
 	if queryErr != nil {
 		result.ErrorCode = mapAdapterError(queryErr)
-		// 失败页（查询已失败、无数据泄露）：审计必须持久化（ADR-017 fail-closed）。
-		// recordPostExecution（终态更新 + AuditEvent append）失败时返回错误，
-		// 调用方 fail-closed 为 audit_failed，不得静默声称 query_cancelled 已完整审计，
-		// 也不得遗留已提交的 pending Execution 而无终态（Greptile P1 / CodeRabbit #10）。
 		if err := p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash); err != nil {
 			return fmt.Errorf("%w: failed page audit persistence failed (original: %s)", err, result.ErrorCode)
 		}
 		return nil
 	}
 	result.ErrorCode = ""
-	// 成功页：审计失败必须返回错误，调用方扣留结果/token 并返回 audit_failed
-	//（ADR-017 §6 / P0-06A §11.2，P1-R1 修复：state=recorded 只能在持久化后返回）。
 	return p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
 }
 

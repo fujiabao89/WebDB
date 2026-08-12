@@ -58,12 +58,16 @@ func endReadOnlyPG(ctx context.Context, conn *pgxpool.Conn) error {
 // （@@transaction_read_only 只反映会话默认值，实测 START READ ONLY 后仍为 0），
 // 语句成功即确认只读语义（MySQL 保证 READ ONLY 事务拒绝数据修改语句）。
 func beginReadOnlyMySQL(ctx context.Context, conn *sql.Conn) error {
-	var autocommit int
-	if err := conn.QueryRowContext(ctx, "SELECT @@autocommit").Scan(&autocommit); err != nil {
-		return wrapReadOnly("check autocommit", err)
+	// 同时检查 @@session.in_transaction（Codex P1）：@@autocommit=1 不能证明无活动
+	// 事务——MySQL 8.4 显式 START TRANSACTION 后 autocommit 仍为 1 而 in_transaction=1，
+	// 若放行，下方 START TRANSACTION READ ONLY 会隐式提交该可写事务（CT-22 fail-closed
+	// 失效，可能提交泄漏写入）。
+	var autocommit, inTx int
+	if err := conn.QueryRowContext(ctx, "SELECT @@autocommit, @@session.in_transaction").Scan(&autocommit, &inTx); err != nil {
+		return wrapReadOnly("check transaction state", err)
 	}
-	if autocommit != 1 {
-		return newError(ErrConnectionFailed, "connection has manual transaction mode", nil)
+	if autocommit != 1 || inTx != 0 {
+		return newError(ErrConnectionFailed, "connection has active transaction", nil)
 	}
 	if _, err := conn.ExecContext(ctx, "START TRANSACTION READ ONLY"); err != nil {
 		return wrapReadOnly("begin read-only transaction", err)
