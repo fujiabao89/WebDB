@@ -62,6 +62,7 @@ jobs:
             local name="$1"
             local value
             value="$(openssl rand -hex 24)"
+            printf '::add-mask::%s\n' "$value"
             printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
             printf '%s\n' "$value" >> "$values_file"
           }
@@ -74,9 +75,12 @@ jobs:
           write_hex_value DEMO_MYSQL_READER_PASSWORD
 
           kek="$(openssl rand -base64 32 | tr -d '\r\n')"
+          printf '::add-mask::%s\n' "$kek"
           printf 'WEBDB_KEK_V1=%s\n' "$kek" >> "$GITHUB_ENV"
           printf '%s\n' "$kek" >> "$values_file"
-          printf '%s\n' "webdb-artifact-canary-$(openssl rand -hex 24)" >> "$values_file"
+          canary="webdb-artifact-canary-$(openssl rand -hex 24)"
+          printf '::add-mask::%s\n' "$canary"
+          printf '%s\n' "$canary" >> "$values_file"
           printf 'WEBDB_SENSITIVE_VALUES_FILE=%s\n' "$values_file" >> "$GITHUB_ENV"
 
       - name: Verify artifact safety gate
