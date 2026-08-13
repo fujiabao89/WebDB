@@ -52,7 +52,7 @@ jobs:
       - name: Prove Markdown canary blocks with the production Action inputs
         id: markdown_canary
         # This is the only intentional expected-failure step. The following
-        # assertions require this scan to fail and the cleanup rescan to pass.
+        # assertions require an exact canary finding and the cleanup rescan to pass.
         continue-on-error: true
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -62,27 +62,37 @@ jobs:
           scan-ref: .
           scanners: secret
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
-          format: table
+          format: json
+          output: ${{ runner.temp }}/secret-canary.json
           exit-code: "1"
 
-      - name: Assert the canary failed and remove only its files
+      - name: Assert the exact canary finding and remove only its files
         env:
           CANARY_OUTCOME: ${{ steps.markdown_canary.outcome }}
+          CANARY_REPORT: ${{ runner.temp }}/secret-canary.json
         shell: bash
         run: |
           set -euo pipefail
           canary_dir=.trivy-canary
           canary_file="$canary_dir/markdown-secret-canary.md"
-          if [[ "$CANARY_OUTCOME" != failure ]]; then
-            rm -f -- "$canary_file"
+          cleanup_canary() {
+            rm -f -- "$CANARY_REPORT" "$canary_file"
             if [[ -d "$canary_dir" ]]; then
-              rmdir -- "$canary_dir" 2>/dev/null
+              rmdir -- "$canary_dir"
             fi
+          }
+          trap cleanup_canary EXIT
+          if [[ "$CANARY_OUTCOME" != failure ]]; then
             echo "Markdown secret canary did not trigger the gate" >&2
             exit 1
           fi
-          rm -- "$canary_file"
-          rmdir -- "$canary_dir"
+          jq -e '
+            any(
+              .Results[]?;
+              .Target == ".trivy-canary/markdown-secret-canary.md"
+              and any(.Secrets[]?; .RuleID == "github-pat")
+            )
+          ' "$CANARY_REPORT" >/dev/null
 
       - name: Prove the same scan passes after exact canary cleanup
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -200,7 +210,7 @@ jobs:
           output: ${{ runner.temp }}/license-contracts.json
           exit-code: "0"
 
-      - name: Assert all license targets and known production dependencies
+      - name: Assert license targets and emit sanitized finding summaries
         env:
           API_REPORT: ${{ runner.temp }}/license-api.json
           WEB_REPORT: ${{ runner.temp }}/license-web.json
@@ -215,6 +225,19 @@ jobs:
           jq -e 'any(.Results[]?.Licenses[]?; .PkgName == "react")' "$WEB_REPORT" >/dev/null
           for report in "$API_REPORT" "$WEB_REPORT" "$CONTRACTS_REPORT"; do
             jq -r '[.ArtifactName, ([.Results[]?.Licenses[]?] | length)] | @tsv' "$report"
+            jq -c '
+              .ArtifactName as $artifact
+              | .Results[]?.Licenses[]?
+              | {
+                  kind: "license",
+                  artifact: $artifact,
+                  package: (.PkgName // ""),
+                  license: (.Name // ""),
+                  category: (.Category // "unknown"),
+                  severity: (.Severity // "UNKNOWN"),
+                  confidence: (.Confidence // null)
+                }
+            ' "$report"
           done
           rm -- "$API_REPORT" "$WEB_REPORT" "$CONTRACTS_REPORT"
 
@@ -353,6 +376,38 @@ jobs:
             jq -r --arg image "$image" \
               '[ $image, ([.Results[]? | select(.Class == "secret")] | length), ([.Results[]? | select(.Class == "config" and .Type == "dockerfile")] | length) ] | @tsv' \
               "$report"
+            jq -c --arg image "$image" '
+              .Results[]?
+              | select(.Vulnerabilities != null)
+              | .Target as $target
+              | .Vulnerabilities[]?
+              | {
+                  kind: "vulnerability",
+                  image: $image,
+                  target: $target,
+                  id: (.VulnerabilityID // ""),
+                  package: (.PkgName // ""),
+                  installedVersion: (.InstalledVersion // ""),
+                  fixedVersion: (.FixedVersion // ""),
+                  severity: (.Severity // "UNKNOWN"),
+                  status: (.Status // "")
+                }
+            ' "$report"
+            jq -c --arg image "$image" '
+              .Results[]?
+              | select(.Misconfigurations != null)
+              | .Target as $target
+              | .Misconfigurations[]?
+              | {
+                  kind: "misconfiguration",
+                  image: $image,
+                  target: $target,
+                  id: (.ID // ""),
+                  title: (.Title // ""),
+                  severity: (.Severity // "UNKNOWN"),
+                  status: (.Status // "")
+                }
+            ' "$report"
           }
           assert_image_report "$API_IMAGE" "$API_REPORT"
           assert_image_report "$WEB_IMAGE" "$WEB_REPORT"

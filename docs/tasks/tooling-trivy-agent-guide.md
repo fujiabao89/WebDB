@@ -229,6 +229,7 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 | `go -C apps/api mod download` | `0` | 填充 module cache；未执行 tidy，`go.mod/go.sum` 未改变 |
 | `trivy fs --config trivy.yaml --scanners secret --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --format table --exit-code 1 .` | `0` | 当前 checkout 无 Secret finding |
 | 上述同一命令 + 未跟踪的普通文本与 Markdown 合成 canary | `1`（预期） | 两个目标各命中 `github-pat`；输出仅显示掩码；随后只删除两个精确临时文件和空目录 |
+| 同版本 Secret scan 输出临时 JSON + workflow 等价的精确 target/rule 断言 | scanner `1`（预期），断言 `0` | JSON 可解析，精确 target 为 `.trivy-canary/markdown-secret-canary.md`、RuleID 为 `github-pat`；未读取或输出匹配内容，随后精确删除报告与 fixture |
 | 上述同一命令（canary 精确清理后） | `0` | 证明清理后恢复绿灯且未批量清理工作区 |
 | `trivy fs --config trivy.yaml .` | `0` | 阶段 A 报告模式完成 vuln/misconfig/secret/license 全扫描，扫描器未报错 |
 | 三个依赖入口分别执行 `trivy fs --config trivy.yaml --scanners license --format json --exit-code 0 <target>` | 均 `0` | ArtifactName 分别为 API go.mod、Web package-lock、Contracts package-lock；Go 14 个生产许可证记录（含 `github.com/google/uuid`），Web 7 个（含 `react`），Contracts 仅有 devDependency 因而生产记录为 0 |
@@ -237,9 +238,18 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 | `docker build --target prod -t webdb-api:trivy-test apps/api` | `0` | API `prod` target 构建成功 |
 | `docker build --target prod -t webdb-web:trivy-test apps/web` | `0` | Web `prod` target 构建成功 |
 | 两个 `prod` target 以动态合成 label（不推送）重新构建，再分别执行 `trivy image --config trivy.yaml --scanners vuln,secret,misconfig --format json --exit-code 0 <image>` | 均 `0` | API/Web ArtifactName 分离；每份报告均有 1 个 image-config Secret target 和 1 个 converted Dockerfile `config/dockerfile` target；JSON 位于临时目录且验证后删除 |
+| 现有 license/image JSON 执行 allow-listed summary schema 验证 | `0` | 21 条 license、113 条 image vulnerability、4 条 misconfiguration 可映射到约定字段；workflow 只有精确 canary 断言读取 `.Secrets[]?`，未读取 `.Code`/`Code.Lines`/license raw `Text` |
 | `docker compose ... config --images` + 精确引用断言 | `0` | 确认 `postgres:16-alpine` 与 digest-pinned MySQL 均为当前 Compose 第三方运行时镜像 |
 | GitHub Actions `Trivy security baseline` [run 31686191786](https://github.com/fujiabao89/WebDB/actions/runs/31686191786) | `success` | PR #51：Repository secret gate、repository vuln/config/license、API/Web prod image 三个 PR job 全部成功；runtime image job 按设计仅在 main/schedule/manual 运行，因此本次 PR event 为 skipped |
 | GitHub Actions `PR policy` [run 31686494619](https://github.com/fujiabao89/WebDB/actions/runs/31686494619) | `success` | PR 标题、分支、Linear ID 与模板必填章节契约通过 |
+
+### 独立审查修复（2026-08-13）
+
+- 独立 Codex review 针对 commit `9515b5fcfddb612448583b97c83c49b9197cac41` 提出两项 P1：预期失败 canary 只判断 Action outcome，无法区分 finding 与扫描器错误；license/prod image JSON 删除前只输出计数，无法支撑人工基线复核。
+- 修改行为前运行 review 契约检查，exit `1`，原始缺失项为 machine-readable canary report、精确 `github-pat`/Markdown target 断言、image vulnerability/misconfiguration 摘要；实现后同一检查 exit `0`、`review_contract=PASS`。
+- Canary Action 改为输出 `${{ runner.temp }}/secret-canary.json`；后续步骤同时要求 Action outcome 为 `failure`，且 JSON 可解析并包含精确 `.trivy-canary/markdown-secret-canary.md` target 与 `github-pat` RuleID。报告缺失、格式错误或 finding 不匹配均由 `jq -e` 使 job 失败；EXIT trap 只清理该报告、fixture 和空目录；清理后的相同 Action 扫描仍必须成功。
+- License 摘要只输出 allow-listed `artifact/package/license/category/severity/confidence` 紧凑 JSON；prod image 摘要只输出 vulnerability 与 misconfiguration 的 target、ID、package/title、版本、severity/status。两处均不读取或输出 `.Secrets`、匹配代码、合成 token 或任意未列入白名单的字段，原始 JSON 随后仍精确删除且不上传 artifact。
+- 本节修复推送后的真实 GitHub Actions 与独立复审结论尚待补充；在此之前两条 review thread 保持未解决，实施 Agent 不自行回复、resolve、批准或合并。
 
 ### 阶段 A 发现与人工分诊
 
@@ -252,7 +262,7 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 
 ### 待补证据与前向处理
 
-- PR [#51](https://github.com/fujiabao89/WebDB/pull/51) 已转为 Ready；最新已完成的真实 Trivy PR run `31686191786` 结论为 `success`。独立安全语义审查仍未完成：CodeRabbit 在 Ready 后因 review limit 暂停约 115 分钟，Qodo 因试用结束暂停，GitHub `reviewDecision` 仍为 `REVIEW_REQUIRED`。实施 Agent 不得用自审替代该门槛，也不自行批准或合并。
+- PR [#51](https://github.com/fujiabao89/WebDB/pull/51) 已转为 Ready；独立 Codex review 已产出两项 P1，当前修复等待真实 CI 与未参与实现者复审。实施 Agent 不得用自审替代该门槛，也不自行批准或合并。
 - 已创建关联整改 Task `WEB-45`，由 Owner 在 `2026-08-18`（阶段 A 第 5 天）前复核漏洞/镜像/misconfiguration 基线；required check、阶段 B 门禁、依赖或基础镜像升级均在独立管理/修复 Task 中处理。
 - 回滚仅删除 `.github/workflows/trivy.yml`、`trivy.yaml`、`trivy-secret.yaml` 及本节交接记录；如未来发现真实 Secret，必须先轮换/撤销凭证，删除扫描器不能恢复安全性。
 
