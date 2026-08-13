@@ -1,6 +1,6 @@
 # Trivy 配置任务：MVP 发布前安全基线
 
-> 状态：In Progress｜Linear Task：`WEB-42`｜风险：High｜分支：`chore/WEB-42-trivy-baseline`｜独立审查：未参与实现的安全 Reviewer
+> 状态：In Review｜Linear Task：`WEB-42`｜风险：High｜分支：`chore/WEB-42-trivy-baseline`｜独立审查：待未参与实现的安全 Reviewer
 
 ## 任务定位
 
@@ -238,6 +238,8 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 | `docker build --target prod -t webdb-web:trivy-test apps/web` | `0` | Web `prod` target 构建成功 |
 | 两个 `prod` target 以动态合成 label（不推送）重新构建，再分别执行 `trivy image --config trivy.yaml --scanners vuln,secret,misconfig --format json --exit-code 0 <image>` | 均 `0` | API/Web ArtifactName 分离；每份报告均有 1 个 image-config Secret target 和 1 个 converted Dockerfile `config/dockerfile` target；JSON 位于临时目录且验证后删除 |
 | `docker compose ... config --images` + 精确引用断言 | `0` | 确认 `postgres:16-alpine` 与 digest-pinned MySQL 均为当前 Compose 第三方运行时镜像 |
+| GitHub Actions `Trivy security baseline` [run 31685916152](https://github.com/fujiabao89/WebDB/actions/runs/31685916152) | `success` | PR #51 / commit `04918011129d62c8194d2628d2f17dfd9aa1313b`：Repository secret gate、repository vuln/config/license、API/Web prod image 三个 PR job 全部成功；runtime image job 按设计仅在 main/schedule/manual 运行，因此本次 PR event 为 skipped |
+| GitHub Actions `PR policy` [run 31686079479](https://github.com/fujiabao89/WebDB/actions/runs/31686079479) | `success` | PR 标题、分支、Linear ID 与模板必填章节契约通过 |
 
 ### 阶段 A 发现与人工分诊
 
@@ -250,7 +252,7 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 
 ### 待补证据与前向处理
 
-- Draft PR 创建后必须完成一次真实 GitHub Actions 全量运行；在此之前 CI 验收项保持“证据不足”，不得宣称完成。
+- Draft PR [#51](https://github.com/fujiabao89/WebDB/pull/51) 已创建；真实 PR Actions run `31685916152` 完成且结论为 `success`。独立安全语义审查仍未完成，PR 保持 Draft，实施 Agent 不自行批准或合并。
 - 已创建关联整改 Task `WEB-45`，由 Owner 在 `2026-08-18`（阶段 A 第 5 天）前复核漏洞/镜像/misconfiguration 基线；required check、阶段 B 门禁、依赖或基础镜像升级均在独立管理/修复 Task 中处理。
 - 回滚仅删除 `.github/workflows/trivy.yml`、`trivy.yaml`、`trivy-secret.yaml` 及本节交接记录；如未来发现真实 Secret，必须先轮换/撤销凭证，删除扫描器不能恢复安全性。
 
