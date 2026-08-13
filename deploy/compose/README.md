@@ -111,6 +111,10 @@ docker compose -f deploy/compose/docker-compose.yml logs demo-pg
 docker compose -f deploy/compose/docker-compose.yml down
 ```
 
+`api` 的 `stop_grace_period` 为 90 秒：覆盖最多 5 秒请求读入、60 秒请求执行、
+5 秒脱离请求上下文的审计收尾、5 秒响应写出以及最多 10 秒的连接池关闭，并保留调度余量。
+停止期间不要以额外的强制终止信号提前中断容器，否则无法保证正在收尾的审计和目标库连接释放完成。
+
 默认**不删除**持久化卷（合成数据保留）。
 
 ### 8. 重建纯合成测试环境

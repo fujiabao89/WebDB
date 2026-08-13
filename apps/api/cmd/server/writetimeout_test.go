@@ -13,12 +13,13 @@ import (
 )
 
 // TestServerWriteTimeoutBudgetRelationship 验证 WriteTimeout 的单一时间预算关系
-// （Greptile P1 修复）：WriteTimeout 必须 ≥ 允许的最长查询 context（handler 兜底超时），
-// 否则写截止会先于查询完成而断开客户端且不取消查询。
+// （Greptile P1 修复）：WriteTimeout 必须覆盖读入、最长请求 context、请求超时后
+// 独立运行的审计收尾以及响应写出；否则审计成功后仍可能因写截止对客户端 EOF。
 func TestServerWriteTimeoutBudgetRelationship(t *testing.T) {
-	if serverWriteTimeout() < executionhttp.DefaultRequestTimeout {
-		t.Fatalf("serverWriteTimeout=%v 必须 >= DefaultRequestTimeout=%v（写超时不得早于最长查询）",
-			serverWriteTimeout(), executionhttp.DefaultRequestTimeout)
+	minimum := 5*time.Second + executionhttp.DefaultRequestTimeout + 5*time.Second + responseWriteBudget
+	if serverWriteTimeout() < minimum {
+		t.Fatalf("serverWriteTimeout=%v 必须 >= %v（读入+最长请求+审计收尾+响应写出）",
+			serverWriteTimeout(), minimum)
 	}
 	if serverWriteTimeout() <= 0 {
 		t.Fatal("WriteTimeout 必须有界且为正")
@@ -67,6 +68,63 @@ func TestServerWriteTimeoutAllowsFullQueryBudget(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed < 5*time.Second {
 		t.Fatalf("响应在 %v 返回，早于查询耗时 6s——WriteTimeout 仍会提前切断查询", elapsed)
+	}
+}
+
+// TestServerWriteTimeoutAllowsDetachedAuditFinalization uses a scaled real TCP
+// server to verify the path where request work reaches its deadline and a
+// detached, bounded audit finalizer still has to complete before the response.
+func TestServerWriteTimeoutAllowsDetachedAuditFinalization(t *testing.T) {
+	const (
+		readBudget     = 25 * time.Millisecond
+		requestBudget  = 250 * time.Millisecond
+		auditBudget    = 100 * time.Millisecond
+		responseBudget = 100 * time.Millisecond
+	)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCtx, cancelRequest := context.WithTimeout(r.Context(), requestBudget)
+		defer cancelRequest()
+		<-requestCtx.Done()
+
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(requestCtx), auditBudget)
+		defer cancelAudit()
+		select {
+		case <-time.After(auditBudget - 20*time.Millisecond):
+		case <-auditCtx.Done():
+			http.Error(w, "audit canceled", http.StatusInternalServerError)
+			return
+		}
+		time.Sleep(responseBudget - 20*time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &http.Server{
+		Handler:      handler,
+		ReadTimeout:  readBudget,
+		WriteTimeout: serverTimeoutBudget(readBudget, requestBudget, auditBudget, responseBudget),
+	}
+	defer srv.Close()
+	go func() { _ = srv.Serve(ln) }()
+
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get("http://" + ln.Addr().String() + "/")
+	if err != nil {
+		t.Fatalf("GET failed after detached audit finalization: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestServerShutdownTimeoutCoversRequestLifecycle(t *testing.T) {
+	if serverShutdownTimeout() < serverWriteTimeout() {
+		t.Fatalf("serverShutdownTimeout=%v must cover serverWriteTimeout=%v", serverShutdownTimeout(), serverWriteTimeout())
 	}
 }
 

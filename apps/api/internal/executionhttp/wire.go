@@ -408,6 +408,11 @@ func timeString(wt string, v any) (any, int, error) {
 	switch t := v.(type) {
 	case time.Time:
 		return formatTime(wt, t), 32, nil
+	case pgtype.Time:
+		if !t.Valid {
+			return nil, 0, nil
+		}
+		return formatPGTime(t)
 	case string:
 		// MySQL 时间文本规范化（Codex P2）。
 		ns := normalizeTimeText(wt, t)
@@ -423,6 +428,21 @@ func timeString(wt string, v any) (any, int, error) {
 		}
 		return nil, 0, errUnrepresentable(wt, v)
 	}
+}
+
+// formatPGTime preserves PostgreSQL's 24:00:00 value, which time.Time
+// normalizes to the following day and therefore cannot represent.
+func formatPGTime(t pgtype.Time) (any, int, error) {
+	const microsPerDay = 24 * 60 * 60 * 1_000_000
+	if t.Microseconds < 0 || t.Microseconds > microsPerDay {
+		return nil, 0, errUnrepresentable(string(WireTime), t)
+	}
+
+	hours := t.Microseconds / (60 * 60 * 1_000_000)
+	minutes := (t.Microseconds / (60 * 1_000_000)) % 60
+	seconds := (t.Microseconds / 1_000_000) % 60
+	micros := t.Microseconds % 1_000_000
+	return fmt.Sprintf("%02d:%02d:%02d.%06d", hours, minutes, seconds, micros), 32, nil
 }
 
 // normalizeTimeText 把数据库驱动返回的时间文本规范化为 wire 格式（Codex P2）。

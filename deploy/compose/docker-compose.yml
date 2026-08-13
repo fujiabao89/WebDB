@@ -274,6 +274,9 @@ services:
     networks:
       - webdb-frontend
       - webdb-backend
+    # 必须覆盖 API 的 75s 请求排空和最多 10s 的 Pipeline/AdapterManager 关闭；
+    # 90s 保留 5s 调度余量，避免 SIGKILL 截断 detached 审计或目标库连接释放。
+    stop_grace_period: 90s
     restart: unless-stopped
 
   # ============================================================

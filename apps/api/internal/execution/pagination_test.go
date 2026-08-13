@@ -457,6 +457,52 @@ func TestNextPageLoadTableMetadataFailureFinalizes(t *testing.T) {
 	}
 }
 
+// TestNextPageCredentialFailureFinalizes verifies that re-authentication
+// failures are fail-closed: they consume the continuation, create a failed
+// execution, and append the credential audit event even after client cancel.
+func TestNextPageCredentialFailureFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, _, client := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	pipeline.resolver.(*fakeResolver).err = credentials.ErrCredentialRetired
+	txStore.rejectCanceledContext = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r2, err := pipeline.ExecuteNextPage(ctx, NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	if err == nil || r2.ErrorCode != StableErrorCode(credentials.ErrCredentialRetired) {
+		t.Fatalf("ExecuteNextPage err=%v code=%q, want credential_retired", err, r2.ErrorCode)
+	}
+	if r2.Result != nil || r2.NextPageToken != nil {
+		t.Fatal("credential failure must not return a result or continuation token")
+	}
+	if client.handle.nextCalls != 0 {
+		t.Fatalf("Adapter.NextPage calls = %d, want 0", client.handle.nextCalls)
+	}
+
+	updates := txStore.allUpdatedExecs()
+	if len(updates) == 0 || updates[len(updates)-1].Status != metadata.ExecStatusFailed {
+		t.Fatal("credential failure must finalize its continuation execution as failed")
+	}
+	events := txStore.allAuditEvents()
+	if len(events) == 0 {
+		t.Fatal("credential failure must append an audit event")
+	}
+	last := events[len(events)-1]
+	if last.Action != metadata.ActionCredentialLookup || last.Outcome != metadata.OutcomeFailed || last.ActorType != metadata.ActorTypeSystem || last.ExecutionID != nil {
+		t.Fatalf("credential audit = %#v, want failed system credential.lookup without execution ID", last)
+	}
+
+	if _, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken}); err == nil {
+		t.Fatal("replay after credential failure should be rejected")
+	}
+}
+
 // TestNextPageLoadTableMetadataPanicFinalizes 验证续页预检 LoadTableMetadata panic 后
 // （CodeRabbit P1）：统一 panic finalizer 终结 Execution（failed）+ 追加失败 AuditEvent，
 // token 不可复用。

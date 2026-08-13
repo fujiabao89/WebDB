@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/fujiabao89/webdb/internal/adapter"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
 // TestWireRowLimitCountsEscapedBytes 验证 text/json 单元格的行限按 JSON 编码后
@@ -154,6 +155,18 @@ func TestWireCellTypes(t *testing.T) {
 				t.Errorf("wireCell(%q) = %s, want %s", c.wt, b, c.wantJSON)
 			}
 		})
+	}
+}
+
+// TestWireCellPostgreSQLTime verifies that the native pgx TIME representation
+// is emitted using the approved HH:MM:SS[.ffffff] wire format.
+func TestWireCellPostgreSQLTime(t *testing.T) {
+	got, _, err := wireCell("time", pgtype.Time{Microseconds: 45_296_123_456, Valid: true})
+	if err != nil {
+		t.Fatalf("wireCell(pgtype.Time): %v", err)
+	}
+	if got != "12:34:56.123456" {
+		t.Fatalf("wireCell(pgtype.Time) = %v, want 12:34:56.123456", got)
 	}
 }
 

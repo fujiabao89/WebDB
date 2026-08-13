@@ -16,18 +16,22 @@ import (
 // ---- mocks（审计感知管线）---------------------------------------------------
 
 type fakeMetadataTx struct {
-	createdExecs []*metadata.Execution
-	updatedExecs []*metadata.Execution
-	auditEvents  []*metadata.AuditEvent
-	failUpdate   error
-	failAudit    error
-	failCommit   error
-	committed    bool
-	rolledBack   bool
-	store        *fakeTxStore // 语义化 failUpdateN 计数（CodeRabbit 新 #4）
+	createdExecs          []*metadata.Execution
+	updatedExecs          []*metadata.Execution
+	auditEvents           []*metadata.AuditEvent
+	rejectCanceledContext bool
+	failUpdate            error
+	failAudit             error
+	failCommit            error
+	committed             bool
+	rolledBack            bool
+	store                 *fakeTxStore // 语义化 failUpdateN 计数（CodeRabbit 新 #4）
 }
 
-func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Execution) error {
+func (t *fakeMetadataTx) CreateExecution(ctx context.Context, e *metadata.Execution) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	e.ID = uuid.New()
 	now := time.Now()
 	e.StartedAt = now
@@ -36,7 +40,10 @@ func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Executio
 	return nil
 }
 
-func (t *fakeMetadataTx) UpdateExecution(_ context.Context, _ uuid.UUID, e *metadata.Execution) error {
+func (t *fakeMetadataTx) UpdateExecution(ctx context.Context, _ uuid.UUID, e *metadata.Execution) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	// failUpdateN：按 UpdateExecution 调用次数注入失败（语义定位而非事务序号，
 	// 增删非更新事务不会漂移注入点，CodeRabbit 新 #4）。
 	if t.store != nil && t.store.failUpdateN > 0 {
@@ -52,7 +59,10 @@ func (t *fakeMetadataTx) UpdateExecution(_ context.Context, _ uuid.UUID, e *meta
 	return nil
 }
 
-func (t *fakeMetadataTx) AppendAudit(_ context.Context, e *metadata.AuditEvent) error {
+func (t *fakeMetadataTx) AppendAudit(ctx context.Context, e *metadata.AuditEvent) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if t.failAudit != nil {
 		return t.failAudit
 	}
@@ -71,18 +81,22 @@ func (t *fakeMetadataTx) Commit() error {
 func (t *fakeMetadataTx) Rollback() error { t.rolledBack = true; return nil }
 
 type fakeTxStore struct {
-	txs            []*fakeMetadataTx
-	failBegin      error
-	failAudit      error
-	failUpdate     error
-	failCommit     error
-	failCommitTxID int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
-	failUpdateTxID int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
-	failUpdateN    int // 从 1 开始：仅第 N 次 UpdateExecution 调用失败（语义定位，按调用计数而非事务序号，CodeRabbit 新 #4）
-	updateCount    int // 已执行的 UpdateExecution 调用次数
+	txs                   []*fakeMetadataTx
+	rejectCanceledContext bool
+	failBegin             error
+	failAudit             error
+	failUpdate            error
+	failCommit            error
+	failCommitTxID        int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
+	failUpdateTxID        int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
+	failUpdateN           int // 从 1 开始：仅第 N 次 UpdateExecution 调用失败（语义定位，按调用计数而非事务序号，CodeRabbit 新 #4）
+	updateCount           int // 已执行的 UpdateExecution 调用次数
 }
 
-func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
+func (f *fakeTxStore) Begin(ctx context.Context) (metadata.MetadataTx, error) {
+	if f.rejectCanceledContext && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if f.failBegin != nil {
 		return nil, f.failBegin
 	}
@@ -97,7 +111,7 @@ func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failUpdate != nil && (f.failUpdateTxID == 0 || f.failUpdateTxID == idx) {
 		fu = f.failUpdate
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc, store: f}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc, rejectCanceledContext: f.rejectCanceledContext, store: f}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }

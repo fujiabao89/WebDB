@@ -123,7 +123,7 @@ func runServe() error {
 	manager := adapter.NewAdapterManager(adapter.ManagerOptions{AllowInsecureLocalDemo: allowInsecure})
 	defer func() {
 		// 排空目标库连接池（CodeRabbit #5）：进程退出前主动关闭，不依赖 GC/OS 清理。
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), resourceCloseTimeout)
 		defer cancel()
 		if err := manager.Close(ctx); err != nil {
 			log.Printf("AdapterManager 关闭未能在超时内完成: %v", err)
@@ -146,6 +146,9 @@ func runServe() error {
 		Tx:          store,
 		Audit:       store,
 		Alarm:       alarm,
+		// 与 HTTP 写出/关停预算共用同一显式值，避免 Pipeline 默认值变更后
+		// server 的外层 deadline 早于脱离请求 context 的审计收尾。
+		AuditWriteTimeout: auditFinalizationBudget,
 	})
 	defer pipeline.Close()
 
@@ -169,12 +172,9 @@ func runServe() error {
 	server := &http.Server{
 		Addr:        ":" + port,
 		Handler:     mux,
-		ReadTimeout: 5 * time.Second,
-		// P1 审查修复（Greptile P1）：原 WriteTimeout=5s 会先于最长 60s 查询截止并
-		// 断开客户端，而查询不被取消（Go 的 WriteTimeout 是写截止，不取消 request
-		// context）。现按单一时间预算对齐：WriteTimeout = 最大查询预算
-		//（executionhttp.DefaultRequestTimeout）+ 响应写出余量，保证写超时不早于
-		// 允许的最长查询；客户端断开经 request context 取消查询（D13 transport abort）。
+		ReadTimeout: serverReadTimeout,
+		// WriteTimeout 覆盖读入、请求上限、请求超时后独立运行的审计收尾和响应写出。
+		// 否则最长请求即使已成功审计，也可能在写响应前被 server EOF 截断。
 		WriteTimeout: serverWriteTimeout(),
 		IdleTimeout:  30 * time.Second,
 	}
@@ -197,7 +197,7 @@ func runServe() error {
 		}
 		return nil
 	case <-sigCh:
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout())
 		defer cancel()
 		if err := server.Shutdown(ctx); err != nil {
 			return fmt.Errorf("优雅关闭未能在超时内完成: %w", err)
@@ -206,15 +206,33 @@ func runServe() error {
 	}
 }
 
-// responseWriteBudget 响应序列化与写出余量：给服务端在查询完成后写出成功/安全错误
-// 响应的时间。固定有界（Greptile P1 修复的单一时间预算组成之一）。
-const responseWriteBudget = 5 * time.Second
+const (
+	// serverReadTimeout 覆盖请求头与 body 的读入；计入写入和关停的端到端预算，
+	// 避免慢 body 消耗后续请求的全部写出时间。
+	serverReadTimeout = 5 * time.Second
+	// auditFinalizationBudget 用于 Pipeline 在 request context 到期/取消后独立完成
+	// Execution 与 AuditEvent 的持久化。
+	auditFinalizationBudget = 5 * time.Second
+	// responseWriteBudget 给结果 DTO 序列化及成功/安全错误响应写出预留时间。
+	responseWriteBudget = 5 * time.Second
+	// resourceCloseTimeout 是 HTTP handler 排空后关闭 Pipeline/目标库连接池的上限。
+	resourceCloseTimeout = 10 * time.Second
+)
 
-// serverWriteTimeout 返回 http.Server.WriteTimeout 的单一、可解释、可测试时间预算：
-// 最大查询预算 + 响应写出余量。保证 WriteTimeout 不早于允许的最长查询 context，
-// WriteTimeout 触发时查询已完成；客户端断开经 request context 取消查询。
+// serverWriteTimeout 返回 http.Server.WriteTimeout 的单一、可解释、可测试时间预算。
+// detached audit 在 DefaultRequestTimeout 后仍可能运行，因此必须显式计入。
 func serverWriteTimeout() time.Duration {
-	return executionhttp.DefaultRequestTimeout + responseWriteBudget
+	return serverTimeoutBudget(serverReadTimeout, executionhttp.DefaultRequestTimeout, auditFinalizationBudget, responseWriteBudget)
+}
+
+func serverTimeoutBudget(read, request, audit, response time.Duration) time.Duration {
+	return read + request + audit + response
+}
+
+// serverShutdownTimeout 等待已接收请求完成其完整生命周期；返回后再由 defer
+// 使用 resourceCloseTimeout 关闭 Pipeline 和 AdapterManager。
+func serverShutdownTimeout() time.Duration {
+	return serverWriteTimeout()
 }
 
 // ---- migrate --------------------------------------------------------------

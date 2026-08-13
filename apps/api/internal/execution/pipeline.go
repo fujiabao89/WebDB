@@ -801,17 +801,8 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		effectiveTimeout = state.TimeoutMs
 	}
 
-	// 凭证（重新解析，不信任 token 中的任何旧凭据）。
-	payload, err := p.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
-	if err != nil {
-		claim.Abort()
-		result.ErrorCode = mapCredentialError(err)
-		return result, fmt.Errorf("%w", result.ErrorCode)
-	}
-
-	// 续页 Execution 在任何目标数据库操作前持久化（Codex P1）：LoadTableMetadata/
-	// NextPage 访问目标库前创建 running Execution，元数据不可用时目标库不被未审计
-	// 访问；进程退出有记录；started_at/duration 含元数据与查询时间。
+	// 续页 Execution 在重新解析凭证前持久化：凭证失败本身也必须留下 failed
+	// Execution 和 E14-E16 审计，且仍不访问目标数据库。
 	exec, traceID, now, err := p.beginContinuationExecution(ctx, req, state, conn)
 	if err != nil {
 		claim.Abort()
@@ -839,6 +830,25 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 			panic(rec)
 		}
 	}()
+
+	// 凭证（重新解析，不信任 token 中的任何旧凭据）。
+	payload, err := p.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = mapCredentialError(err)
+		credErr := err
+		// 客户端断开后仍需完成 credential failure 的 Execution/E14-E16 审计。
+		// 使用独立、有界 context，避免将已取消 request context 传给元数据事务。
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+		defer cancelAudit()
+		if r, e := p.failExecutionWith(auditCtx, exec, result, conn, traceID, now,
+			func(mtx metadata.MetadataTx) error {
+				return p.recordCredentialFailure(auditCtx, mtx, exec, result, conn, traceID, now, credErr)
+			}, result.ErrorCode); e != nil {
+			return r, e
+		}
+		return result, fmt.Errorf("%w", result.ErrorCode)
+	}
 
 	configRevision, err := connectionConfigRevision(conn)
 	if err != nil {
