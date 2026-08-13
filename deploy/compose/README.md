@@ -11,19 +11,20 @@
 | `demo-mysql` | 演示 MySQL 8.4 LTS + 合成数据 + 只读账号 | `mysql:8.4`（固定 digest） | `3306:3306` | — |
 | `api-migrate` | one-shot 迁移（`api migrate up`，退出即成功） | 本地构建 `apps/api`（dev target） | — | webdb-meta (healthy) |
 | `demo-seed` | one-shot 演示 seed（`WEBDB_DEMO_SEED=true`，退出即成功） | 本地构建 `apps/api`（dev target） | — | api-migrate (completed) |
-| `api` | Go API/执行服务（唯一可连接 DB 的组件） | 本地构建 `apps/api`（dev target） | `8080:8080` | webdb-meta, demo-pg, demo-mysql, api-migrate, demo-seed |
+| `api-bootstrap` | one-shot 运行时账号 bootstrap（确保 `webdb_app_runtime` 存在，退出即成功） | `postgres:16-alpine` | — | webdb-meta (healthy), api-migrate (completed) |
+| `api` | Go API/执行服务（唯一可连接 DB 的组件） | 本地构建 `apps/api`（dev target） | `8080:8080` | webdb-meta, demo-pg, demo-mysql, api-migrate, demo-seed, api-bootstrap |
 | `web` | React 前端 Vite 开发服务器 | 本地构建 `apps/web`（dev target） | `3000:5173` | api |
 
 **启动依赖链（fail-closed）：**
 
 ```text
-webdb-meta healthy → api-migrate completed → demo-seed completed → api healthy → web healthy
+webdb-meta healthy → api-migrate completed → demo-seed completed → api-bootstrap completed → api healthy → web healthy
 ```
 
 - `api-migrate` 使用独立管理员 `META_MIGRATE_USER/PASSWORD` 执行 `migrate up`；失败时 `demo-seed`/`api`/`web` 均不启动（`service_completed_successfully`）。
-- **待决（Owner）**：元数据库迁移账号与运行时账号是否拆分及各自授权范围。本地 Compose 的 `api-migrate`/`demo-seed` 当前沿用超管 `webdb`（仅限本地演示）；生产最小权限运行时账号 `webdb_app_runtime` 由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）创建、本地 Compose 未挂载，落地（更新 `META_MIGRATE_USER/PASSWORD`、`META_DB_USER`、ADR 与验证步骤）需 Owner 批准后实施。
+- **运行时账号分离**：`api` 用非超级用户 `webdb_app_runtime`（WEB-40 runtime/migration 分离），由 `webdb-meta` 的 `init/webdb-meta/01-create-runtime-user.sh` 在首次初始化时创建；`api-bootstrap` one-shot 服务在每个启动链复用同一脚本（幂等），覆盖已有 `webdb-meta-data` 卷的升级场景（`/docker-entrypoint-initdb.d` 不会重跑）。生产环境的最小权限收敛（REVOKE 多余权限、ownership 校验）仍由 `init/prod-roles/01-create-prod-roles.sh`（ADR-018）负责，本地 Compose 未挂载该收敛脚本；生产角色拆分落地需 Owner 批准后实施。
 - `demo-seed` 仅在 `WEBDB_DEMO_SEED=true` 时执行；生产部署不设置该开关则**绝不自动 seed**。
-- `api`/`web` 依赖 `demo-seed` 成功退出后才启动，保证空卷首次启动即有业务表、演示身份与可授权连接。
+- `api`/`web` 依赖 `demo-seed` 与 `api-bootstrap` 成功退出后才启动，保证空卷/已有卷启动均有业务表、演示身份与运行时账号。
 
 Web 与 API 通过 `webdb-frontend` 通信；只有 API 和数据库服务加入 `webdb-backend`。API 是两个网络之间的唯一应用边界，浏览器和 Web 容器不能通过 Compose 后端网络直连数据库。健康检查见各服务定义的 `healthcheck`。
 
@@ -49,6 +50,15 @@ Copy-Item deploy/compose/env.example deploy/compose/.env
 ```
 
 默认值可满足本地开发。需要自定义时编辑 `.env` 文件。
+
+> **元数据库连接池配置**（`META_DB_MAX_OPEN_CONNS` / `META_DB_MAX_IDLE_CONNS` /
+> `META_DB_CONN_MAX_LIFETIME`）：`docker-compose.yml` 使用 `${VAR:-default}` 插值，
+> 未在 `.env` 设置时回退默认 `10` / `2` / `30m`；显式设置时按 `.env` 值传入 API。
+> 非法值（非整数 / 非正时长）或 `idle > open` 时 API 拒绝启动（fail-closed），
+> 不回退到无界连接池默认。验证脚本：`bash deploy/compose/verify-meta-pool-config.sh`。
+> **安全开关 `ALLOW_INSECURE_LOCAL_DEMO`**：本地演示环境由 `docker-compose.yml`
+> 显式设置为 `true`（允许 TLS disable 的本地演示连接）。WebDB 安全约束要求默认关闭；
+> 非演示/生产部署不得设置该变量。
 
 ### 2. 启动
 
@@ -100,6 +110,10 @@ docker compose -f deploy/compose/docker-compose.yml logs demo-pg
 ```bash
 docker compose -f deploy/compose/docker-compose.yml down
 ```
+
+`api` 的 `stop_grace_period` 为 90 秒：覆盖最多 5 秒请求读入、60 秒请求执行、
+5 秒脱离请求上下文的审计收尾、5 秒响应写出以及最多 10 秒的连接池关闭，并保留调度余量。
+停止期间不要以额外的强制终止信号提前中断容器，否则无法保证正在收尾的审计和目标库连接释放完成。
 
 默认**不删除**持久化卷（合成数据保留）。
 

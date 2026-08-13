@@ -37,12 +37,16 @@ func (f *fakeConnectionReader) ConnectionByID(context.Context, uuid.UUID, uuid.U
 }
 
 type fakePolicyReader struct {
-	policy *metadata.ConnectionPolicy
-	err    error
-	calls  int
+	policy      *metadata.ConnectionPolicy
+	err         error
+	calls       int
+	panicPolicy bool // 注入 PolicyByConnection panic（Codex P1：首页预检 panic finalizer）
 }
 
 func (f *fakePolicyReader) PolicyByConnection(context.Context, uuid.UUID, uuid.UUID) (*metadata.ConnectionPolicy, error) {
+	if f.panicPolicy {
+		panic("injected panic in PolicyByConnection")
+	}
 	f.calls++
 	return f.policy, f.err
 }
@@ -102,6 +106,7 @@ type fakeAdapterHandle struct {
 	currentSchemaErr error
 	poolGeneration   int64
 	panicNextPage    bool // 注入 NextPage panic，验证 claim 的 panic 兜底
+	panicMeta        bool // 注入 LoadTableMetadata panic（CodeRabbit P1：预检 panic finalizer）
 }
 
 func (f *fakeAdapterHandle) Query(_ context.Context, req adapter.FirstPageRequest) (*adapter.QueryResult, error) {
@@ -120,6 +125,9 @@ func (f *fakeAdapterHandle) NextPage(_ context.Context, _ adapter.UserWorkspaceS
 }
 
 func (f *fakeAdapterHandle) LoadTableMetadata(_ context.Context, schema, table string) (*queryplan.TableMetadata, error) {
+	if f.panicMeta {
+		panic("injected panic in LoadTableMetadata")
+	}
 	f.metaSchema = schema
 	f.metaTable = table
 	if f.meta != nil && f.metaErr == nil {
@@ -410,12 +418,12 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 		{
 			name: "query timeout",
 			err:  &adapter.AdapterError{Code: adapter.ErrQueryTimeout},
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 		{
 			name: "query cancelled",
 			err:  &adapter.AdapterError{Code: adapter.ErrQueryCanceled},
-			want: ErrExecutionCancelled,
+			want: ErrQueryCancelled,
 		},
 		{
 			name: "config conflict",
@@ -430,7 +438,7 @@ func TestMapAdapterErrorPreservesStableAdapterClassifications(t *testing.T) {
 		{
 			name: "wrapped deadline",
 			err:  errors.Join(errors.New("outer"), context.DeadlineExceeded),
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 	}
 
@@ -517,12 +525,12 @@ func TestMapMembershipErrorPreservesStableClassifications(t *testing.T) {
 		{
 			name: "deadline exceeded",
 			err:  context.DeadlineExceeded,
-			want: ErrExecutionTimeout,
+			want: ErrQueryTimeout,
 		},
 		{
 			name: "cancelled",
 			err:  context.Canceled,
-			want: ErrExecutionCancelled,
+			want: ErrQueryCancelled,
 		},
 		{
 			name: "wrapped not found",

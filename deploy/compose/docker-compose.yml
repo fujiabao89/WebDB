@@ -28,10 +28,17 @@ services:
       POSTGRES_USER: webdb
       POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
       POSTGRES_DB: webdb_meta
+      # 运行时最小权限账号密码（与 api 服务 WEBDB_APP_PASSWORD 一致）；仅本地合成值。
+      WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
+      # 本地演示显式启用 insecure-demo（Codex）：允许默认 change_me 演示密码；
+      # 非演示/生产不得设置。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
     ports:
       - "127.0.0.1:5432:5432"
     volumes:
       - webdb-meta-data:/var/lib/postgresql/data
+      # 首次初始化创建运行时最小权限账号 webdb_app_runtime（WEB-40 runtime/migration 分离）
+      - ./init/webdb-meta:/docker-entrypoint-initdb.d:ro
     healthcheck:
       # 强制 --host=127.0.0.1 走 TCP：PG 首次初始化期间临时服务器仅监听 Unix socket，
       # 避免 api-migrate 依赖的 TCP 5432 尚未就绪时被误判为 healthy（与 demo-pg 一致）。
@@ -172,6 +179,35 @@ services:
       - webdb-backend
 
   # ============================================================
+  # one-shot 运行时账号 bootstrap — 确保 webdb_app_runtime 存在
+  # 升级/已有 webdb-meta-data 卷时 /docker-entrypoint-initdb.d 不会重跑，
+  # 本服务幂等创建运行时角色/密码/授权（复用 init 脚本，POSTGRES_HOST 远程连接）；
+  # 任一失败则 api 不启动（fail-closed，CodeRabbit P1 升级场景前向修复）。
+  # ============================================================
+  api-bootstrap:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_HOST: webdb-meta
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: webdb
+      POSTGRES_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      POSTGRES_DB: webdb_meta
+      WEBDB_APP_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
+      # 本地演示显式启用 insecure-demo（Codex）：允许默认 change_me 演示密码。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
+    volumes:
+      - ./init/webdb-meta/01-create-runtime-user.sh:/01-create-runtime-user.sh:ro
+    entrypoint: ["bash", "/01-create-runtime-user.sh"]
+    depends_on:
+      webdb-meta:
+        condition: service_healthy
+      api-migrate:
+        condition: service_completed_successfully
+    restart: "no"
+    networks:
+      - webdb-backend
+
+  # ============================================================
   # API 服务 — 唯一可连接目标数据库的组件
   # dev target: golang:1.26-bookworm（含 shell）
   # ============================================================
@@ -184,13 +220,23 @@ services:
       API_PORT: "8080"
       META_DB_HOST: webdb-meta
       META_DB_PORT: "5432"
-      # 运行时连接使用非超级用户 webdb_app_runtime（PR37 检定：生产 API 不得用超管 webdb）；
-      # 迁移需 DDL 权限，用独立的 META_MIGRATE_USER（管理员 webdb）。
+      # 运行时连接使用非超级用户 webdb_app_runtime（PR37 检定：生产 API 不得用超管 webdb）。
+      # 迁移管理员凭据 META_MIGRATE_* 仅注入 api-migrate；API 进程不持有 DDL 凭据（CodeRabbit P1）。
       META_DB_USER: webdb_app_runtime
       META_DB_PASSWORD: ${WEBDB_APP_PASSWORD:-change_me}
       META_DB_NAME: webdb_meta
-      META_MIGRATE_USER: webdb
-      META_MIGRATE_PASSWORD: ${META_DB_PASSWORD:-change_me}
+      # 元数据库连接池有界配置（Owner 批准，2026-08）：缺失/非法/idle>open 时 API 拒绝启动（fail-closed）。
+      # 支持从 deploy/compose/.env 或运行环境覆盖：未设置时回退默认 10 / 2 / 30m。
+      META_DB_MAX_OPEN_CONNS: ${META_DB_MAX_OPEN_CONNS:-10}
+      META_DB_MAX_IDLE_CONNS: ${META_DB_MAX_IDLE_CONNS:-2}
+      META_DB_CONN_MAX_LIFETIME: ${META_DB_CONN_MAX_LIFETIME:-30m}
+      # 可信演示 Principal（D01b）：必须与 demo-seed 权威 UUID 一致；
+      # 缺失/非法时 API 拒绝启动（fail-closed），浏览器不自报身份。
+      DEMO_PRINCIPAL_WORKSPACE_ID: ${DEMO_PRINCIPAL_WORKSPACE_ID:-f1160d75-26f7-46e0-b3e0-570ea65c232e}
+      DEMO_PRINCIPAL_USER_ID: ${DEMO_PRINCIPAL_USER_ID:-73e8c8f0-83e4-4096-8400-15ca15073d6b}
+      # 仅本地演示环境显式启用 TLS disable 的本地演示连接（WebDB 安全约束 #4）：
+      # 默认关闭；非演示/生产不得设置。
+      ALLOW_INSECURE_LOCAL_DEMO: "true"
       DEMO_PG_HOST: demo-pg
       DEMO_PG_PORT: "5432"
       DEMO_PG_USER: demo_reader
@@ -217,6 +263,8 @@ services:
         condition: service_completed_successfully
       demo-seed:
         condition: service_completed_successfully
+      api-bootstrap:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
@@ -226,6 +274,9 @@ services:
     networks:
       - webdb-frontend
       - webdb-backend
+    # 必须覆盖 API 的 75s 请求排空和最多 10s 的 Pipeline/AdapterManager 关闭；
+    # 90s 保留 5s 调度余量，避免 SIGKILL 截断 detached 审计或目标库连接释放。
+    stop_grace_period: 90s
     restart: unless-stopped
 
   # ============================================================

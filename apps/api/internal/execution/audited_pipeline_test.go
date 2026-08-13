@@ -16,17 +16,22 @@ import (
 // ---- mocks（审计感知管线）---------------------------------------------------
 
 type fakeMetadataTx struct {
-	createdExecs []*metadata.Execution
-	updatedExecs []*metadata.Execution
-	auditEvents  []*metadata.AuditEvent
-	failUpdate   error
-	failAudit    error
-	failCommit   error
-	committed    bool
-	rolledBack   bool
+	createdExecs          []*metadata.Execution
+	updatedExecs          []*metadata.Execution
+	auditEvents           []*metadata.AuditEvent
+	rejectCanceledContext bool
+	failUpdate            error
+	failAudit             error
+	failCommit            error
+	committed             bool
+	rolledBack            bool
+	store                 *fakeTxStore // 语义化 failUpdateN 计数（CodeRabbit 新 #4）
 }
 
-func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Execution) error {
+func (t *fakeMetadataTx) CreateExecution(ctx context.Context, e *metadata.Execution) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	e.ID = uuid.New()
 	now := time.Now()
 	e.StartedAt = now
@@ -35,7 +40,18 @@ func (t *fakeMetadataTx) CreateExecution(_ context.Context, e *metadata.Executio
 	return nil
 }
 
-func (t *fakeMetadataTx) UpdateExecution(_ context.Context, _ uuid.UUID, e *metadata.Execution) error {
+func (t *fakeMetadataTx) UpdateExecution(ctx context.Context, _ uuid.UUID, e *metadata.Execution) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// failUpdateN：按 UpdateExecution 调用次数注入失败（语义定位而非事务序号，
+	// 增删非更新事务不会漂移注入点，CodeRabbit 新 #4）。
+	if t.store != nil && t.store.failUpdateN > 0 {
+		t.store.updateCount++
+		if t.store.updateCount == t.store.failUpdateN {
+			return t.store.failUpdate
+		}
+	}
 	if t.failUpdate != nil {
 		return t.failUpdate
 	}
@@ -43,7 +59,10 @@ func (t *fakeMetadataTx) UpdateExecution(_ context.Context, _ uuid.UUID, e *meta
 	return nil
 }
 
-func (t *fakeMetadataTx) AppendAudit(_ context.Context, e *metadata.AuditEvent) error {
+func (t *fakeMetadataTx) AppendAudit(ctx context.Context, e *metadata.AuditEvent) error {
+	if t.rejectCanceledContext && ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if t.failAudit != nil {
 		return t.failAudit
 	}
@@ -62,16 +81,22 @@ func (t *fakeMetadataTx) Commit() error {
 func (t *fakeMetadataTx) Rollback() error { t.rolledBack = true; return nil }
 
 type fakeTxStore struct {
-	txs            []*fakeMetadataTx
-	failBegin      error
-	failAudit      error
-	failUpdate     error
-	failCommit     error
-	failCommitTxID int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
-	failUpdateTxID int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
+	txs                   []*fakeMetadataTx
+	rejectCanceledContext bool
+	failBegin             error
+	failAudit             error
+	failUpdate            error
+	failCommit            error
+	failCommitTxID        int // 从 1 开始：仅第 N 个事务的 Commit 失败（区分阶段 B 与失败分支/D-0）
+	failUpdateTxID        int // 从 1 开始：仅第 N 个事务的 UpdateExecution 失败
+	failUpdateN           int // 从 1 开始：仅第 N 次 UpdateExecution 调用失败（语义定位，按调用计数而非事务序号，CodeRabbit 新 #4）
+	updateCount           int // 已执行的 UpdateExecution 调用次数
 }
 
-func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
+func (f *fakeTxStore) Begin(ctx context.Context) (metadata.MetadataTx, error) {
+	if f.rejectCanceledContext && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	if f.failBegin != nil {
 		return nil, f.failBegin
 	}
@@ -86,7 +111,7 @@ func (f *fakeTxStore) Begin(context.Context) (metadata.MetadataTx, error) {
 	if f.failUpdate != nil && (f.failUpdateTxID == 0 || f.failUpdateTxID == idx) {
 		fu = f.failUpdate
 	}
-	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc}
+	tx := &fakeMetadataTx{failAudit: f.failAudit, failUpdate: fu, failCommit: fc, rejectCanceledContext: f.rejectCanceledContext, store: f}
 	f.txs = append(f.txs, tx)
 	return tx, nil
 }
@@ -405,8 +430,8 @@ func TestAuditedExecute_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionTimeout {
-		t.Fatalf("error code = %q, want execution_timeout", result.ErrorCode)
+	if result.ErrorCode != ErrQueryTimeout {
+		t.Fatalf("error code = %q, want query_timeout", result.ErrorCode)
 	}
 	if result.AdapterCalled != true {
 		t.Fatal("adapter should have been called")
@@ -452,8 +477,8 @@ func TestAuditedExecute_Cancelled(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionCancelled {
-		t.Fatalf("error code = %q, want execution_cancelled", result.ErrorCode)
+	if result.ErrorCode != ErrQueryCancelled {
+		t.Fatalf("error code = %q, want query_cancelled", result.ErrorCode)
 	}
 
 	updates := txStore.allUpdatedExecs()
@@ -491,8 +516,8 @@ func TestAuditedExecute_CancelledContextStillPersists(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if result.ErrorCode != ErrExecutionCancelled {
-		t.Fatalf("error code = %q, want execution_cancelled", result.ErrorCode)
+	if result.ErrorCode != ErrQueryCancelled {
+		t.Fatalf("error code = %q, want query_cancelled", result.ErrorCode)
 	}
 
 	updates := txStore.allUpdatedExecs()
@@ -1024,5 +1049,44 @@ func TestAuditedExecute_AlarmFailureDoesNotPanic(t *testing.T) {
 	}
 	if result.Result != nil {
 		t.Fatal("audit failure must not return query result")
+	}
+}
+
+// TestExecutePolicyPanicFinalizesPending 验证首页 PolicyByConnection panic 后
+// （Codex P1）：统一 panic finalizer 终结 pending Execution（failed）+ 追加失败
+// AuditEvent，panic 向上传播。
+func TestExecutePolicyPanicFinalizesPending(t *testing.T) {
+	principal, conn, policy, resolver, client, txStore, auditStore, alarm := auditedPipelineInputs()
+	polReader := &fakePolicyReader{policy: policy, panicPolicy: true}
+	pipeline := auditedPipeline(
+		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		polReader,
+		auditedMember(principal),
+		resolver, client, txStore, auditStore, alarm, realClock(),
+	)
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("PolicyByConnection panic 应向上传播")
+			}
+		}()
+		_, _ = pipeline.Execute(context.Background(), ExecuteRequest{
+			Principal: principal, ConnectionID: conn.ID, SQL: "SELECT 1", Engine: EnginePostgreSQL,
+		})
+	}()
+
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+	events := txStore.allAuditEvents()
+	if len(events) == 0 {
+		t.Fatal("audit event must be appended")
+	}
+	if ev := events[len(events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
 	}
 }

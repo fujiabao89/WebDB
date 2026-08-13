@@ -19,15 +19,25 @@ type StableErrorCode string
 func (e StableErrorCode) Error() string { return string(e) }
 
 const (
-	ErrInvalidScope                StableErrorCode = "invalid_scope"
-	ErrForbidden                   StableErrorCode = "forbidden"
-	ErrConnectionNotFound          StableErrorCode = "connection_not_found"
-	ErrPolicyNotConfigured         StableErrorCode = "policy_not_configured"
-	ErrReadNotAllowed              StableErrorCode = "read_not_allowed"
-	ErrInternalError               StableErrorCode = "internal_error"
-	ErrUnsupportedEngine           StableErrorCode = "unsupported_engine"
-	ErrRateLimited                 StableErrorCode = "rate_limited"
-	ErrConnectionBusy              StableErrorCode = "connection_busy"
+	ErrInvalidScope          StableErrorCode = "invalid_scope"
+	ErrUnauthorized          StableErrorCode = "unauthorized"
+	ErrForbidden             StableErrorCode = "forbidden"
+	ErrConnectionNotFound    StableErrorCode = "connection_not_found"
+	ErrPolicyNotConfigured   StableErrorCode = "policy_not_configured"
+	ErrReadNotAllowed        StableErrorCode = "read_not_allowed"
+	ErrInternalError         StableErrorCode = "internal_error"
+	ErrUnsupportedEngine     StableErrorCode = "unsupported_engine"
+	ErrRateLimited           StableErrorCode = "rate_limited"
+	ErrConnectionBusy        StableErrorCode = "connection_busy"
+	ErrConnectionUnavailable StableErrorCode = "connection_unavailable"
+	ErrDatabaseError         StableErrorCode = "database_error"
+	ErrResultTooLarge        StableErrorCode = "result_too_large"
+	// ErrQueryTimeout / ErrQueryCancelled 为公共词汇（D15f 已批准）：
+	// 公共 API 只使用这两个词；内部 execution 终态 error_code 也写入新词汇。
+	ErrQueryTimeout   StableErrorCode = "query_timeout"
+	ErrQueryCancelled StableErrorCode = "query_cancelled"
+	// ErrExecutionTimeout / ErrExecutionCancelled 为历史兼容词汇（D15f）：
+	// 存量记录保持兼容读取，P0 不执行破坏性历史重写。
 	ErrExecutionTimeout            StableErrorCode = "execution_timeout"
 	ErrExecutionCancelled          StableErrorCode = "execution_cancelled"
 	ErrUnsupportedQuery            StableErrorCode = "unsupported_query"
@@ -37,6 +47,8 @@ const (
 	// ErrAuditFailed 审计写入失败（ADR-017 §6）：执行前 fail-closed 不调用 Adapter；
 	// 执行后不返回结果但 execution 已记录为 completed。禁止自动重试。
 	ErrAuditFailed StableErrorCode = "audit_failed"
+	// ErrStatementNotAllowed 语句类型不允许或含未绑定原生位置占位符（P0-06A §8.1）。
+	ErrStatementNotAllowed StableErrorCode = "statement_not_allowed"
 )
 
 // Engine 数据库引擎。

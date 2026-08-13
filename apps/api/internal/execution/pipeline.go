@@ -30,6 +30,7 @@ type Pipeline struct {
 	resolver  credentials.CredentialResolver
 	adapter   AdapterClient
 	mysqlMode sqlpolicy.MySQLLexerMode
+	tlsMode   adapter.TLSMode // 目标库连接 TLS 模式（默认 TLSRequire，生产安全）
 
 	txs               metadata.TxStore
 	audit             metadata.AuditEventStore
@@ -101,6 +102,9 @@ type PipelineConfig struct {
 	Resolver    credentials.CredentialResolver
 	Adapter     AdapterClient
 	MySQLMode   sqlpolicy.MySQLLexerMode
+	// TLSMode 目标库连接 TLS 模式。默认 TLSRequire（生产安全）；本地演示环境由
+	// 调用方按 ALLOW_INSECURE_LOCAL_DEMO 显式传入 TLSDisable（非客户端输入）。
+	TLSMode adapter.TLSMode
 
 	// WEB-23：审计感知管线。Tx 与 Audit 需同时配置；nil 时保持无审计旧行为。
 	Tx                metadata.TxStore
@@ -142,6 +146,11 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		reg = pagination.New(pagination.DefaultConfig())
 		ownRegistry = true
 	}
+	// TLS 模式安全默认：未配置（零值）时回退 TLSRequire，绝不因客户端/缺省宽松。
+	tlsMode := cfg.TLSMode
+	if tlsMode == "" {
+		tlsMode = adapter.TLSRequire
+	}
 	return &Pipeline{
 		store:             cfg.Store,
 		policyStore:       cfg.PolicyStore,
@@ -149,6 +158,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		resolver:          cfg.Resolver,
 		adapter:           cfg.Adapter,
 		mysqlMode:         cfg.MySQLMode,
+		tlsMode:           tlsMode,
 		txs:               cfg.Tx,
 		audit:             cfg.Audit,
 		alarm:             alarm,
@@ -183,6 +193,8 @@ type ExecuteRequest struct {
 
 // ExecuteResult 执行结果。
 // NextPageToken 仅在需要分页、唯一性证明有效且确有后续页时发放（ADR-014/015）。
+// AuditEventID/AuditState/Outcome 为审计 receipt（P0-06A §11.2 D14）：
+// AuditEventID 仅在 AuditEvent 已持久化并取得 event.ID 后回填。
 type ExecuteResult struct {
 	Decision           sqlpolicy.PolicyDecision
 	CredentialResolved bool
@@ -192,6 +204,14 @@ type ExecuteResult struct {
 	TraceID            string
 	ExecutionID        *uuid.UUID
 	NextPageToken      *string
+	AuditEventID       *uuid.UUID
+	AuditState         string
+	Outcome            metadata.AuditOutcome
+	// Engine 服务端权威引擎（wire_type 派生用；不来自客户端）。
+	Engine Engine
+	// PageSize 服务端实际分页上限（P0-06A §8.2 meta.page.page_size 语义：
+	// 分页上限而非当前页实际行数，CodeRabbit #16）。
+	PageSize int
 }
 
 // Execute 按顺序执行：Connection → Policy → Resolver → Adapter，
@@ -234,6 +254,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 
 	serverEngine := Engine(conn.Engine)
+	result.Engine = serverEngine
 	if req.Engine != "" && req.Engine != serverEngine {
 		result.ErrorCode = ErrUnsupportedEngine
 		return result, fmt.Errorf("%w", ErrUnsupportedEngine)
@@ -241,6 +262,18 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 
 	// 阶段 C: SQL Policy（使用服务端权威 Engine）。
 	decision, code := EvaluateSQL(serverEngine, req.SQL, p.mysqlMode)
+	// 占位符检测（P0-06A §8.1）：方言感知 token 级判定，含未绑定原生位置占位符
+	// （PG $N / MySQL ?）一律拒绝 statement_not_allowed，Adapter 0 次访问。
+	// 放行 PG JSONB ?/?|/?& 与字符串/注释内符号。
+	// fail-closed（CodeRabbit #21）：未知方言或未闭合词法结构返回 error 时同样按
+	// statement_not_allowed 拒绝，不得静默按"无占位符"放行。
+	if decision.Allowed {
+		found, pErr := sqlpolicy.HasUnboundPlaceholder(sqlpolicy.Dialect(serverEngine), req.SQL)
+		if pErr != nil || found {
+			decision = sqlpolicy.PolicyDecision{Allowed: false, ReasonCode: sqlpolicy.ReasonNotAllowed}
+			code = ErrStatementNotAllowed
+		}
+	}
 	result.Decision = decision
 	statementHash := decision.Classification.StatementHash
 	if statementHash == "" {
@@ -293,6 +326,21 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	// finding 2：pending execution 创建后立即提交并释放事务，
 	// 不跨越 PolicyByConnection / ResolveCredential，避免长事务占用连接。
 	result.ExecutionID = &exec.ID
+
+	// pending 提交后立即注册统一 panic finalizer（Codex P1）：覆盖 PolicyByConnection、
+	// ResolveCredential、configRevision、running 更新及 adapter 阶段任意 panic——
+	// 终结 pending/running Execution（failed + internal_error）+ 追加失败 AuditEvent，
+	// 再 re-panic 由 HTTP middleware 返回 500。mtx 在阶段 B 已声明；running 更新
+	// 事务（阶段 D-0）未提交时 Rollback，已提交则无害 no-op。
+	defer func() {
+		if rec := recover(); rec != nil {
+			if mtx != nil {
+				_ = mtx.Rollback()
+			}
+			p.finalizePanic(ctx, conn, exec, traceID, p.clock())
+			panic(rec)
+		}
+	}()
 
 	// 阶段 C 拒绝：Execution=failed + Audit(sql.execute, denied)，Adapter 调用 0 次。
 	if !decision.Allowed {
@@ -402,10 +450,12 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	}
 	exec.Status = metadata.ExecStatusRunning
 	if err := mtx.UpdateExecution(ctx, conn.WorkspaceID, exec); err != nil {
-		mtx.Rollback()
+		_ = mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 	if err := mtx.Commit(); err != nil {
+		// Commit 失败：事务可能仍活跃，显式回滚避免连接/审计状态残留（Codex P1）。
+		_ = mtx.Rollback()
 		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
 	}
 
@@ -420,7 +470,7 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 		User:           payload.User,
 		Password:       payload.Password,
 		Database:       conn.Database,
-		TLS:            adapter.TLSRequire,
+		TLS:            p.tlsMode,
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(policy.StatementTimeoutMs)*time.Millisecond)
@@ -461,6 +511,8 @@ func (p *Pipeline) Execute(ctx context.Context, req ExecuteRequest) (*ExecuteRes
 	if effectivePageSize > effectiveMaxRows {
 		effectivePageSize = effectiveMaxRows
 	}
+	// 服务端实际分页上限（P0-06A §8.2 meta.page.page_size 语义，CodeRabbit #16）。
+	result.PageSize = effectivePageSize
 	requiresPagination := effectiveMaxRows > effectivePageSize
 
 	var sortPlan queryplan.VerifiedSortPlan
@@ -658,7 +710,10 @@ type NextPageRequest struct {
 func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*ExecuteResult, error) {
 	result := &ExecuteResult{}
 	if p == nil || p.registry == nil || p.store == nil || p.policyStore == nil ||
-		p.members == nil || p.resolver == nil || p.adapter == nil {
+		p.members == nil || p.resolver == nil || p.adapter == nil ||
+		// 与 Execute 一致的 fail-closed：生产 Pipeline 必须同时配置 Tx 与 Audit，
+		// 否则续页独立 Execution 无法持久化终态或审计写入缺失（CodeRabbit #9）。
+		p.txs == nil || p.audit == nil {
 		result.ErrorCode = ErrInternalError
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
@@ -713,6 +768,9 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		result.ErrorCode = ErrInvalidPageToken
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
+	result.Engine = Engine(conn.Engine)
+	// 服务端实际分页上限来自续页 state（P0-06A §8.2 meta.page.page_size 语义，CodeRabbit #16）。
+	result.PageSize = state.PageSize
 
 	// 重新授权：策略（AllowRead/MaxRows/timeout/policy version）。
 	policy, err := p.policyStore.PolicyByConnection(ctx, conn.WorkspaceID, conn.ID)
@@ -743,11 +801,52 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		effectiveTimeout = state.TimeoutMs
 	}
 
+	// 续页 Execution 在重新解析凭证前持久化：凭证失败本身也必须留下 failed
+	// Execution 和 E14-E16 审计，且仍不访问目标数据库。
+	exec, traceID, now, err := p.beginContinuationExecution(ctx, req, state, conn)
+	if err != nil {
+		claim.Abort()
+		result.ErrorCode = ErrAuditFailed
+		return p.auditFailed(ctx, result, "", conn.WorkspaceID, ErrAuditFailed)
+	}
+	result.ExecutionID = &exec.ID
+	result.TraceID = traceID
+
+	// begin 后立即注册统一 panic finalizer（CodeRabbit P1）：覆盖预检
+	//（configRevision/Get/pool generation/LoadTableMetadata/schema/nextPlan）与
+	// NextPage 任意 panic——终结 running Execution（failed + 内部错误）+ 追加失败
+	// AuditEvent，再 re-panic 由 HTTP middleware 返回 500；审计失败仅记录告警。
+	// handle 的释放由 Get 后的 defer（released 标志）处理，不在此重复。
+	defer func() {
+		if rec := recover(); rec != nil {
+			claim.Abort()
+			result.ErrorCode = ErrInternalError
+			if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, fmt.Errorf("pipeline panic: %v", rec)); aErr != nil {
+				metadata.EmitAlarm(p.alarm, ctx, SecurityAlertEvent{
+					TraceID: traceID, WorkspaceID: conn.WorkspaceID,
+					Code: string(ErrInternalError), OccurredAt: p.clock(),
+				})
+			}
+			panic(rec)
+		}
+	}()
+
 	// 凭证（重新解析，不信任 token 中的任何旧凭据）。
 	payload, err := p.resolver.ResolveCredential(ctx, conn.WorkspaceID, conn.SecretRef, conn.SecretVersion)
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = mapCredentialError(err)
+		credErr := err
+		// 客户端断开后仍需完成 credential failure 的 Execution/E14-E16 审计。
+		// 使用独立、有界 context，避免将已取消 request context 传给元数据事务。
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+		defer cancelAudit()
+		if r, e := p.failExecutionWith(auditCtx, exec, result, conn, traceID, now,
+			func(mtx metadata.MetadataTx) error {
+				return p.recordCredentialFailure(auditCtx, mtx, exec, result, conn, traceID, now, credErr)
+			}, result.ErrorCode); e != nil {
+			return r, e
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 
@@ -755,6 +854,10 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInternalError
+		// 匹配 adapter.Get 失败路径：exec 已创建，须终结为 failed + 审计（Codex）。
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInternalError)
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	cfg := adapter.ConnectConfig{
@@ -767,7 +870,7 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		User:           payload.User,
 		Password:       payload.Password,
 		Database:       conn.Database,
-		TLS:            adapter.TLSRequire,
+		TLS:            p.tlsMode,
 	}
 	execCtx, cancel := context.WithTimeout(ctx, time.Duration(effectiveTimeout)*time.Millisecond)
 	defer cancel()
@@ -775,6 +878,9 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = mapAdapterError(err)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+		}
 		return result, fmt.Errorf("%w", result.ErrorCode)
 	}
 	released := false
@@ -784,19 +890,27 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		}
 	}()
 
-	// pool generation 变化 → token 失效。
+	// pool generation 变化 → token 失效（已访问目标库前的元数据校验，终态 + 审计）。
 	if handle.PoolGeneration() != state.PoolGeneration {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	// schema generation 重新校验：重新加载可信元数据并与 state 对比。
+	// 失败路径 finalize（Codex P1）：LoadTableMetadata 已访问目标库，须终结该页
+	// Execution + AuditEvent（失败终态），不得只 Abort token。
 	meta, err := handle.LoadTableMetadata(execCtx, state.TableSchema, state.TableName)
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 	snap, err := queryplan.NewSchemaSnapshot(
 		state.ConnectionID,
@@ -807,7 +921,10 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil || snap.SchemaGeneration != state.SchemaGeneration {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	// 构造不可伪造的 VerifiedNextPagePlan（SQL/Args 来自 state，不来自客户端）。
@@ -818,7 +935,10 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 	if err != nil {
 		claim.Abort()
 		result.ErrorCode = ErrInvalidPageToken
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, ErrInvalidPageToken)
+		}
+		return result, fmt.Errorf("%w", ErrInvalidPageToken)
 	}
 
 	result.AdapterCalled = true
@@ -830,12 +950,27 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		handle.Release()
 		released = true
 		claim.Abort()
-		result.ErrorCode = mapAdapterError(err)
-		return result, fmt.Errorf("%w", result.ErrorCode)
+		origCode := mapAdapterError(err)
+		result.ErrorCode = origCode
+		// D11（P0-06A §9.4）：失败页也创建独立 Execution + AuditEvent。审计持久化
+		// 失败必须 fail-closed（ADR-017 / §11.2）：返回 audit_failed、触发告警、
+		// 不静默声称 query_cancelled 已完整审计，也不遗留已提交的 pending Execution
+		// 而无终态（Greptile P1 / CodeRabbit #10）。
+		if aErr := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, err); aErr != nil {
+			return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, origCode)
+		}
+		return result, fmt.Errorf("%w", origCode)
 	}
 	handle.Release()
 	released = true
 	result.Result = queryResult
+
+	// D11（P0-06A §9.4）：每个物理页创建独立 Execution，并在返回页面前持久化
+	// AuditEvent。审计失败 → audit_failed（$SECURITY_ALERT），扣留结果，旧 token 不恢复。
+	if err := p.finalizeContinuationExecution(ctx, exec, result, conn, traceID, now, state, nil); err != nil {
+		claim.Abort()
+		return p.auditFailed(ctx, result, traceID, conn.WorkspaceID, result.ErrorCode)
+	}
 
 	// Rotate/Complete：旧 token 永不恢复。
 	if queryResult.HasMore && queryResult.TotalReturned < effectiveMaxRows {
@@ -880,6 +1015,76 @@ func (p *Pipeline) ExecuteNextPage(ctx context.Context, req NextPageRequest) (*E
 		}
 	}
 	return result, nil
+}
+
+// beginContinuationExecution 在 handle.NextPage 访问目标库前持久化续页 Execution
+// （pending→running，Codex P1）：元数据不可用时目标库不被未审计访问；进程退出时有
+// 记录；started_at/duration 含查询时间。返回 exec/traceID/now 供后续 finalize 复用。
+func (p *Pipeline) beginContinuationExecution(
+	ctx context.Context,
+	req NextPageRequest,
+	state *pagination.ContinuationState,
+	conn *metadata.Connection,
+) (*metadata.Execution, string, time.Time, error) {
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+	traceID := p.newTrace()
+	now := p.clock()
+	mtx, err := p.txs.Begin(auditCtx)
+	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	exec := &metadata.Execution{
+		WorkspaceID:   conn.WorkspaceID,
+		ConnectionID:  conn.ID,
+		ActorID:       req.Principal.UserID,
+		StatementHash: state.StatementHash,
+		Status:        metadata.ExecStatusRunning,
+		TraceID:       traceID,
+		StartedAt:     now,
+	}
+	if err := mtx.CreateExecution(auditCtx, exec); err != nil {
+		mtx.Rollback()
+		return nil, "", time.Time{}, err
+	}
+	if err := mtx.Commit(); err != nil {
+		return nil, "", time.Time{}, err
+	}
+	return exec, traceID, now, nil
+}
+
+// finalizeContinuationExecution 为续页终结 Execution 并持久化 AuditEvent（D11，P0-06A §9.4）。
+// Execution 已由 beginContinuationExecution 在访问目标库前创建（running）；
+// 本方法按 queryErr 决定终态（failed/succeeded）并写审计。任何审计失败返回错误
+// （调用方返回 audit_failed 并扣留结果；token 不恢复）。
+func (p *Pipeline) finalizeContinuationExecution(
+	ctx context.Context,
+	exec *metadata.Execution,
+	result *ExecuteResult,
+	conn *metadata.Connection,
+	traceID string,
+	now time.Time,
+	state *pagination.ContinuationState,
+	queryErr error,
+) error {
+	// 独立有界审计 context：客户端断开（transport abort）后 request ctx 已取消，
+	// 必须用 WithoutCancel + auditWriteTimeout 终结 Execution 并写审计（D13 义务 3/4）。
+	auditCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+	// 按 queryErr 设置 ErrorCode（若调用方已设如 invalid_page_token 则保留），
+	// 交 recordPostExecution 决定终态。
+	if queryErr != nil {
+		if result.ErrorCode == "" {
+			result.ErrorCode = mapAdapterError(queryErr)
+		}
+		if err := p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash); err != nil {
+			return fmt.Errorf("%w: failed page audit persistence failed (original: %s)", err, result.ErrorCode)
+		}
+		return nil
+	}
+	// queryErr nil：调用方可能已设 ErrorCode（如 invalid_page_token 失败终态），
+	// 未设时视为成功（recordPostExecution 按 result.ErrorCode 判定 succeeded）。
+	return p.recordPostExecution(auditCtx, exec, result, conn, traceID, now, state.StatementHash)
 }
 
 // ---- 审计与 execution 生命周期辅助（ADR-017）----------------------------------
@@ -1016,7 +1221,14 @@ func (p *Pipeline) recordPreExecution(
 	if err != nil {
 		return err
 	}
-	return mtx.AppendAudit(ctx, event)
+	if err := mtx.AppendAudit(ctx, event); err != nil {
+		return err
+	}
+	// H：执行前失败路径也回填审计 receipt（state=denied/failed）。
+	result.AuditEventID = &event.ID
+	result.Outcome = outcome
+	result.AuditState = auditStateForOutcome(outcome)
+	return nil
 }
 
 // recordCredentialFailure 记录凭证解析失败：E14-E16 + $SECURITY_ALERT，Adapter 调用 0 次。
@@ -1132,22 +1344,24 @@ func (p *Pipeline) recordPostExecution(
 	}
 
 	switch result.ErrorCode {
-	case ErrExecutionCancelled:
-		// E13 cancelled：矩阵不含 environment。
+	case ErrExecutionCancelled, ErrQueryCancelled:
+		// E13 cancelled：矩阵不含 environment。兼容新旧词汇（D15f）。
 		status = metadata.ExecStatusCancelled
 		outcome = metadata.OutcomeCancelled
 		md.ErrorCode = strPtr("query_cancelled")
-	case ErrExecutionTimeout:
-		// E12 timeout：矩阵不含 environment。
+	case ErrExecutionTimeout, ErrQueryTimeout:
+		// E12 timeout：矩阵不含 environment。兼容新旧词汇（D15f）。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeFailed
 		md.ErrorCode = strPtr("query_timeout")
 	case ErrUnsupportedQuery:
 		// unsupported_query：需要分页但缺少/无法验证唯一性证明，执行前拒绝
 		// （PAGE-01：Execution failed，Audit denied）。
+		// denied 结果不得携带 error_code（validateAuditRequired 互斥），
+		// 且 sql.execute denied 必填 reason_code → 用 ReasonCode 表达拒绝原因。
 		status = metadata.ExecStatusFailed
 		outcome = metadata.OutcomeDenied
-		md.ErrorCode = strPtr(string(result.ErrorCode))
+		md.ReasonCode = strPtr(string(result.ErrorCode))
 		md.Environment = strPtr(string(conn.Environment))
 	case "":
 		// E10 succeeded：矩阵要求 environment。
@@ -1217,7 +1431,73 @@ func (p *Pipeline) recordPostExecution(
 	if err != nil {
 		return err
 	}
-	return p.audit.AppendAudit(auditCtx, event)
+	if err := p.audit.AppendAudit(auditCtx, event); err != nil {
+		return err
+	}
+	// H：审计事件持久化并取得 event.ID 后回填 receipt（state=recorded/终态）。
+	// state=recorded 只能在 AuditEvent 已持久化后返回。
+	result.AuditEventID = &event.ID
+	result.Outcome = outcome
+	result.AuditState = auditStateForOutcome(outcome)
+	return nil
+}
+
+// finalizePanic 在 adapter/执行阶段 panic 时终结 execution（failed + internal_error）
+// 并追加失败审计（Codex P1 #5）。HTTP 层 RecoverMiddleware 无 execution ID 无法终结，
+// 本方法在 Execute 的 panic recovery 中调用。
+// 使用独立有界 context（WithoutCancel + auditWriteTimeout），确保客户端取消/长查询
+// 不阻断终态持久化；任一失败仅记录安全告警（已尽力），不再次 panic。
+func (p *Pipeline) finalizePanic(ctx context.Context, conn *metadata.Connection, exec *metadata.Execution, traceID string, now time.Time) {
+	code := string(ErrInternalError)
+	exec.Status = metadata.ExecStatusFailed
+	exec.ErrorCode = &code
+	finished := now
+	exec.FinishedAt = &finished
+	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), p.auditWriteTimeout)
+	defer cancel()
+	alarm := func() {
+		metadata.EmitAlarm(p.alarm, fctx, SecurityAlertEvent{TraceID: traceID, WorkspaceID: conn.WorkspaceID, Code: code, OccurredAt: now})
+	}
+	mtx, err := p.txs.Begin(fctx)
+	if err != nil {
+		alarm()
+		return
+	}
+	if err := mtx.UpdateExecution(fctx, conn.WorkspaceID, exec); err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	md := metadata.AuditMetadata{
+		StatementHash: &exec.StatementHash,
+		ErrorCode:     strPtr(code),
+		Engine:        strPtr(string(conn.Engine)),
+	}
+	event, err := newAuditEvent(conn.WorkspaceID, metadata.ActorTypeUser, &exec.ActorID, &conn.ID, &exec.ID,
+		metadata.ActionSQLExecute, "execution", exec.ID.String(), metadata.OutcomeFailed, md, traceID, now)
+	if err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	if err := mtx.AppendAudit(fctx, event); err != nil {
+		_ = mtx.Rollback()
+		alarm()
+		return
+	}
+	if err := mtx.Commit(); err != nil {
+		alarm()
+	}
+}
+
+// auditStateForOutcome 把审计 outcome 映射为公共 receipt 的 state（P0-06A §11.2）。
+func auditStateForOutcome(outcome metadata.AuditOutcome) string {
+	switch outcome {
+	case metadata.OutcomeSucceeded:
+		return "recorded"
+	default:
+		return string(outcome) // denied / failed / cancelled
+	}
 }
 
 func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
@@ -1231,40 +1511,40 @@ func connectionConfigRevision(conn *metadata.Connection) (int64, error) {
 	return revision, nil
 }
 
-// mapMembershipError 映射成员资格查询错误到稳定错误码。
+// mapMembershipError 映射成员资格查询错误到稳定错误码（新写入公共词汇）。
 func mapMembershipError(err error) StableErrorCode {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrForbidden
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
 
-// mapConnectionError 映射连接查询错误到稳定错误码。
+// mapConnectionError 映射连接查询错误到稳定错误码（新写入公共词汇）。
 func mapConnectionError(err error) StableErrorCode {
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrConnectionNotFound
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
 
 func mapPolicyStoreError(err error) StableErrorCode {
 	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
+		return ErrQueryTimeout
 	}
 	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }
@@ -1328,15 +1608,11 @@ func mapPaginationError(err error) StableErrorCode {
 	return ErrInternalError
 }
 
-// mapAdapterError 映射 Adapter 错误到稳定错误码。
+// mapAdapterError 映射 Adapter 错误到稳定错误码（I：补齐已批准码，禁止折叠为
+// internal_error；凭证/pool/config 类内部故障折叠为 connection_unavailable，D15a）。
+// 先按 Adapter 稳定码映射，再退化 context 语义，避免带 cause 的错误链
+// （如池耗尽包装 deadline）被 context 判定抢先掩盖真实语义（对齐 browse）。
 func mapAdapterError(err error) StableErrorCode {
-	if errors.Is(err, context.DeadlineExceeded) {
-		return ErrExecutionTimeout
-	}
-	if errors.Is(err, context.Canceled) {
-		return ErrExecutionCancelled
-	}
-
 	var adapterErr *adapter.AdapterError
 	if errors.As(err, &adapterErr) {
 		switch adapterErr.Code {
@@ -1345,16 +1621,39 @@ func mapAdapterError(err error) StableErrorCode {
 		case adapter.ErrConnPoolExhausted:
 			return ErrConnectionBusy
 		case adapter.ErrQueryTimeout:
-			return ErrExecutionTimeout
+			return ErrQueryTimeout
 		case adapter.ErrQueryCanceled:
-			return ErrExecutionCancelled
+			return ErrQueryCancelled
 		case adapter.ErrUnsupportedQuery:
 			return ErrUnsupportedQuery
 		case adapter.ErrConfigConflict:
 			return ErrConnectionConfigConflict
 		case adapter.ErrInvalidPageToken:
 			return ErrInvalidPageToken
+		case adapter.ErrResultTooLarge:
+			return ErrResultTooLarge
+		case adapter.ErrPaginationCapacity:
+			return ErrPaginationCapacityExhausted
+		case adapter.ErrConnectionFailed, adapter.ErrStaleConfig, adapter.ErrPoolClosed,
+			adapter.ErrInvalidConfig, adapter.ErrUnsupportedEngine:
+			return ErrConnectionUnavailable
+		case adapter.ErrDatabaseError:
+			// 目标库 rows.Err()/rows.Scan 会把取消/超时包装进 cause（WrapDatabaseError
+			// 保留 cause 链）。先识别 context 语义，再退化通用 database_error。
+			if errors.Is(err, context.DeadlineExceeded) {
+				return ErrQueryTimeout
+			}
+			if errors.Is(err, context.Canceled) {
+				return ErrQueryCancelled
+			}
+			return ErrDatabaseError
 		}
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ErrQueryTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return ErrQueryCancelled
 	}
 	return ErrInternalError
 }

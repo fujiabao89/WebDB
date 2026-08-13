@@ -60,6 +60,7 @@ docker compose -f deploy/compose/docker-compose.yml down
 - SQL 安全策略默认拒绝无法可靠解析的语句，并要求单语句、方言 AST 判定、超时、行数上限和取消能力。
 - 仓库不得提交真实凭证、`.env`、真实用户数据、导出文件或生产日志；演示数据全部为合成数据。
 - 当前 Compose 面向本地开发，端口仅绑定 `127.0.0.1`，不能直接作为生产部署配置。
+- 元数据库连接池仅接受显式环境配置（`META_DB_MAX_OPEN_CONNS`/`META_DB_MAX_IDLE_CONNS`/`META_DB_CONN_MAX_LIFETIME`，Owner 批准 2026-08：10/2/30m）；缺失、非法或 idle > open 时 API 拒绝启动（fail-closed），不回退到 database/sql 无界默认。
 
 ## 开发验证
 

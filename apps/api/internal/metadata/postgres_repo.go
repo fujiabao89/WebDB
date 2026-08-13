@@ -679,6 +679,8 @@ var stableReasonCodes = map[string]bool{
 	"allowed": true, "sql_parse_error": true, "multiple_statements": true,
 	"statement_not_allowed": true, "unsupported_statement": true, "empty_sql": true,
 	"executable_comment_detected": true, "policy_not_configured": true, "read_not_allowed": true,
+	// unsupported_query：需要分页但缺少/无法验证唯一性证明（P0-06A §12.1，拒绝路径的 reason_code）。
+	"unsupported_query": true,
 }
 
 // stableErrorCodes 精确白名单验证稳定错误码（P0-04 + P0-05 §8.4 + execution/adapter 扩展）。

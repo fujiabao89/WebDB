@@ -15,8 +15,9 @@ import (
 )
 
 // paginationSetup 构造启用分页的 Pipeline 与 fakes。
-func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeAdapterClient, *fakeResolver) {
-	t.Helper()
+// paginationFixture 构造分页测试的公共 fixture（principal/conn/policy/resolver/client）。
+// paginationSetup 与 paginationAuditSetup 共用，避免复制漂移（CodeRabbit 复审）。
+func paginationFixture() (AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeResolver, *fakeAdapterClient) {
 	principal := AuthenticatedPrincipal{UserID: uuid.New(), WorkspaceID: uuid.New()}
 	conn := &metadata.Connection{
 		ID:            uuid.New(),
@@ -57,6 +58,12 @@ func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata
 		currentSchema: "public",
 	}
 	client := &fakeAdapterClient{handle: handle}
+	return principal, conn, policy, resolver, client
+}
+
+func paginationSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *metadata.ConnectionPolicy, *fakeAdapterClient, *fakeResolver) {
+	t.Helper()
+	principal, conn, policy, resolver, client := paginationFixture()
 	pipeline := testPipeline(
 		&fakeConnectionReader{connections: []*metadata.Connection{conn}},
 		&fakePolicyReader{policy: policy},
@@ -373,4 +380,206 @@ func TestNextPageAdapterErrorAbortsToken(t *testing.T) {
 		t.Fatalf("post-failure code = %q, want invalid_page_token", r3.ErrorCode)
 	}
 	_ = r2
+}
+
+// paginationAuditSetup 类似 paginationSetup，但返回可断言的 fakeTxStore/fakeAuditStore
+// （供续页失败终态审计断言，Codex P1）。
+func paginationAuditSetup(t *testing.T) (*Pipeline, AuthenticatedPrincipal, *metadata.Connection, *fakeTxStore, *fakeAuditStore, *fakeAdapterClient) {
+	t.Helper()
+	principal, conn, policy, resolver, client := paginationFixture()
+	txStore := &fakeTxStore{}
+	auditStore := &fakeAuditStore{}
+	alarm := &fakeAlarm{}
+	pipeline := NewPipeline(PipelineConfig{
+		Store:       &fakeConnectionReader{connections: []*metadata.Connection{conn}},
+		PolicyStore: &fakePolicyReader{policy: policy},
+		Members: &fakeMemberReader{member: &metadata.WorkspaceMember{
+			WorkspaceID: principal.WorkspaceID, UserID: principal.UserID, Role: metadata.RoleViewer}},
+		Resolver: resolver,
+		Adapter:  client,
+		Tx:       txStore,
+		Audit:    auditStore,
+		Alarm:    alarm,
+	})
+	return pipeline, principal, conn, txStore, auditStore, client
+}
+
+// TestNextPageLoadTableMetadataFailureFinalizes 验证续页在 LoadTableMetadata 访问
+// 目标库后失败时（Codex P1/D11）：Execution 已创建且为 failed 终态、AuditEvent 已追加、
+// token 不可复用、不返回结果或新 token。
+func TestNextPageLoadTableMetadataFailureFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, auditStore, client := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	// 注入 LoadTableMetadata 失败（续页目标库访问后失败）。
+	client.handle.metaErr = errors.New("injected schema load failure")
+
+	r2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	if err == nil || r2.ErrorCode != ErrInvalidPageToken {
+		t.Fatalf("ExecuteNextPage err=%v code=%q, want invalid_page_token", err, r2.ErrorCode)
+	}
+	if r2.Result != nil {
+		t.Fatal("failed page must not return result")
+	}
+	if r2.NextPageToken != nil {
+		t.Fatal("failed page must not return new token")
+	}
+	// 失败路径不得调用 Adapter.NextPage（目标库执行 0 次；LoadTableMetadata 失败在
+	// 执行前收敛，CodeRabbit）。
+	if client.handle.nextCalls != 0 {
+		t.Fatalf("Adapter.NextPage calls = %d, want 0（失败路径不得访问目标库执行）", client.handle.nextCalls)
+	}
+
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("continuation execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+
+	if len(auditStore.events) == 0 {
+		t.Fatal("continuation audit event must be appended")
+	}
+	if ev := auditStore.events[len(auditStore.events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
+	}
+
+	// token 不可复用（claim 后失败不恢复）。
+	if _, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken}); err == nil {
+		t.Fatal("replay after failure should be rejected")
+	}
+}
+
+// TestNextPageCredentialFailureFinalizes verifies that re-authentication
+// failures are fail-closed: they consume the continuation, create a failed
+// execution, and append the credential audit event even after client cancel.
+func TestNextPageCredentialFailureFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, _, client := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	resolver, ok := pipeline.resolver.(*fakeResolver)
+	if !ok {
+		t.Fatalf("resolver type = %T, want *fakeResolver", pipeline.resolver)
+	}
+	resolver.err = credentials.ErrCredentialRetired
+	txStore.rejectCanceledContext = true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r2, err := pipeline.ExecuteNextPage(ctx, NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	if err == nil || r2.ErrorCode != StableErrorCode(credentials.ErrCredentialRetired) {
+		t.Fatalf("ExecuteNextPage err=%v code=%q, want credential_retired", err, r2.ErrorCode)
+	}
+	if r2.Result != nil || r2.NextPageToken != nil {
+		t.Fatal("credential failure must not return a result or continuation token")
+	}
+	if client.handle.nextCalls != 0 {
+		t.Fatalf("Adapter.NextPage calls = %d, want 0", client.handle.nextCalls)
+	}
+
+	updates := txStore.allUpdatedExecs()
+	if len(updates) == 0 || updates[len(updates)-1].Status != metadata.ExecStatusFailed {
+		t.Fatal("credential failure must finalize its continuation execution as failed")
+	}
+	events := txStore.allAuditEvents()
+	if len(events) == 0 {
+		t.Fatal("credential failure must append an audit event")
+	}
+	last := events[len(events)-1]
+	if last.Action != metadata.ActionCredentialLookup || last.Outcome != metadata.OutcomeFailed || last.ActorType != metadata.ActorTypeSystem || last.ExecutionID != nil {
+		t.Fatalf("credential audit = %#v, want failed system credential.lookup without execution ID", last)
+	}
+
+	if _, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken}); err == nil {
+		t.Fatal("replay after credential failure should be rejected")
+	}
+}
+
+// TestNextPageLoadTableMetadataPanicFinalizes 验证续页预检 LoadTableMetadata panic 后
+// （CodeRabbit P1）：统一 panic finalizer 终结 Execution（failed）+ 追加失败 AuditEvent，
+// token 不可复用。
+func TestNextPageLoadTableMetadataPanicFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, auditStore, client := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	// 注入 LoadTableMetadata panic（预检阶段）。
+	client.handle.panicMeta = true
+
+	func() {
+		defer func() {
+			if rec := recover(); rec == nil {
+				t.Fatal("LoadTableMetadata panic 应向上传播")
+			}
+		}()
+		_, _ = pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	}()
+
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("continuation execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+	if len(auditStore.events) == 0 {
+		t.Fatal("continuation audit event must be appended")
+	}
+	if ev := auditStore.events[len(auditStore.events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
+	}
+	if _, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken}); err == nil {
+		t.Fatal("replay after panic should be rejected")
+	}
+}
+
+// TestNextPageConfigRevisionFailureFinalizes 验证续页 configRevision 失败后（CodeRabbit
+// P1）：Execution 已创建且为 failed 终态、失败 AuditEvent 已追加。
+func TestNextPageConfigRevisionFailureFinalizes(t *testing.T) {
+	pipeline, principal, conn, txStore, auditStore, _ := paginationAuditSetup(t)
+	r1, err := pipeline.Execute(context.Background(), firstPageRequest(principal, conn.ID))
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if r1.NextPageToken == nil {
+		t.Fatal("first page should issue continuation token")
+	}
+
+	// connectionConfigRevision 失败：conn.UpdatedAt 设为零值。
+	conn.UpdatedAt = time.Time{}
+
+	r2, err := pipeline.ExecuteNextPage(context.Background(), NextPageRequest{Principal: principal, Token: *r1.NextPageToken})
+	if err == nil || r2.ErrorCode != ErrInternalError {
+		t.Fatalf("ExecuteNextPage err=%v code=%q, want internal_error", err, r2.ErrorCode)
+	}
+	execs := txStore.allUpdatedExecs()
+	if len(execs) == 0 {
+		t.Fatal("continuation execution must be created")
+	}
+	if last := execs[len(execs)-1]; last.Status != metadata.ExecStatusFailed {
+		t.Fatalf("execution status = %q, want failed", last.Status)
+	}
+	if len(auditStore.events) == 0 {
+		t.Fatal("continuation audit event must be appended")
+	}
+	if ev := auditStore.events[len(auditStore.events)-1]; ev.Outcome != metadata.OutcomeFailed {
+		t.Fatalf("audit outcome = %q, want failed", ev.Outcome)
+	}
 }
