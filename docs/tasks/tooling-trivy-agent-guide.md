@@ -242,6 +242,8 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 | `docker compose ... config --images` + 精确引用断言 | `0` | 确认 `postgres:16-alpine` 与 digest-pinned MySQL 均为当前 Compose 第三方运行时镜像 |
 | GitHub Actions `Trivy security baseline` [run 31686191786](https://github.com/fujiabao89/WebDB/actions/runs/31686191786) | `success` | PR #51：Repository secret gate、repository vuln/config/license、API/Web prod image 三个 PR job 全部成功；runtime image job 按设计仅在 main/schedule/manual 运行，因此本次 PR event 为 skipped |
 | GitHub Actions `PR policy` [run 31686494619](https://github.com/fujiabao89/WebDB/actions/runs/31686494619) | `success` | PR 标题、分支、Linear ID 与模板必填章节契约通过 |
+| 审查修复 GitHub Actions `Trivy security baseline` [run 31690062232](https://github.com/fujiabao89/WebDB/actions/runs/31690062232) | `success` | commit `495bd0da25171b809ce67ab3b5b5c85f5c62565d`：精确 canary JSON 断言、license 摘要、prod image vulnerability/misconfiguration 摘要均在真实 runner 成功；抽查日志可见 `kind/license`、`kind/vulnerability`、`kind/misconfiguration` 白名单 JSON，未输出 Secret 内容 |
+| 审查修复 GitHub Actions `CI` [run 31690061963](https://github.com/fujiabao89/WebDB/actions/runs/31690061963) | `success` | Repository safety、Contracts、API、Web 全部成功 |
 
 ### 独立审查修复（2026-08-13）
 
@@ -249,7 +251,7 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 - 修改行为前运行 review 契约检查，exit `1`，原始缺失项为 machine-readable canary report、精确 `github-pat`/Markdown target 断言、image vulnerability/misconfiguration 摘要；实现后同一检查 exit `0`、`review_contract=PASS`。
 - Canary Action 改为输出 `${{ runner.temp }}/secret-canary.json`；后续步骤同时要求 Action outcome 为 `failure`，且 JSON 可解析并包含精确 `.trivy-canary/markdown-secret-canary.md` target 与 `github-pat` RuleID。报告缺失、格式错误或 finding 不匹配均由 `jq -e` 使 job 失败；EXIT trap 只清理该报告、fixture 和空目录；清理后的相同 Action 扫描仍必须成功。
 - License 摘要只输出 allow-listed `artifact/package/license/category/severity/confidence` 紧凑 JSON；prod image 摘要只输出 vulnerability 与 misconfiguration 的 target、ID、package/title、版本、severity/status。两处均不读取或输出 `.Secrets`、匹配代码、合成 token 或任意未列入白名单的字段，原始 JSON 随后仍精确删除且不上传 artifact。
-- 本节修复推送后的真实 GitHub Actions 与独立复审结论尚待补充；在此之前两条 review thread 保持未解决，实施 Agent 不自行回复、resolve、批准或合并。
+- 修复提交的真实 Trivy/CI run 均为 `success`；两条原 review thread 仍等待未参与本次修复的 Reviewer 复审，实施 Agent 不自行回复、resolve、批准或合并。
 
 ### 阶段 A 发现与人工分诊
 
@@ -262,7 +264,7 @@ PR 必须有一次真实 GitHub Actions 完整运行证据。Secret 原文、合
 
 ### 待补证据与前向处理
 
-- PR [#51](https://github.com/fujiabao89/WebDB/pull/51) 已转为 Ready；独立 Codex review 已产出两项 P1，当前修复等待真实 CI 与未参与实现者复审。实施 Agent 不得用自审替代该门槛，也不自行批准或合并。
+- PR [#51](https://github.com/fujiabao89/WebDB/pull/51) 已转为 Ready；独立 Codex review 的两项 P1 已由 commit `495bd0da25171b809ce67ab3b5b5c85f5c62565d` 修复并通过真实 Trivy/CI，当前仅等待未参与修复的 Reviewer 复审。实施 Agent 不得用自审替代该门槛，也不自行批准或合并。
 - 已创建关联整改 Task `WEB-45`，由 Owner 在 `2026-08-18`（阶段 A 第 5 天）前复核漏洞/镜像/misconfiguration 基线；required check、阶段 B 门禁、依赖或基础镜像升级均在独立管理/修复 Task 中处理。
 - 回滚仅删除 `.github/workflows/trivy.yml`、`trivy.yaml`、`trivy-secret.yaml` 及本节交接记录；如未来发现真实 Secret，必须先轮换/撤销凭证，删除扫描器不能恢复安全性。
 
