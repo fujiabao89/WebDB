@@ -23,8 +23,42 @@ npm run dev
 npm run lint
 npm run typecheck
 npm test
-npm run test:e2e
 npm run build
 ```
 
-`npm test` 运行 Vitest 组件与状态测试；`npm run test:e2e` 运行 Playwright 浏览器测试。浏览器测试仅使用合成 Mock 数据。
+`npm test` 继续运行 Vitest 组件与状态测试，未被 Playwright 替换。
+
+### Playwright
+
+`@playwright/test` 精确锁定为 `1.62.1`，仅是 Apache-2.0 的开发/测试依赖。生产 nginx 镜像只复制 Vite 的 `dist` 产物，因此该依赖不进入生产运行时镜像或浏览器 bundle。
+
+真实 Compose 健康冒烟由仓库根目录显式启动五服务环境，Playwright 不通过 `webServer.command` 管理 Compose：
+
+```bash
+docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+cd apps/web
+npm ci
+npx playwright install chromium
+npm run test:e2e:smoke
+cd ../..
+docker compose -f deploy/compose/docker-compose.yml down
+```
+
+默认 `PLAYWRIGHT_BASE_URL` 是 `http://127.0.0.1:3000`，可在受控环境覆盖。`npm run test:e2e` 保留 WEB-37 的隔离合成 Mock/视觉测试，并通过一次性本地 Vite fixture 运行；该脚本显式排除 `@smoke`，不会冒充真实 Compose。`e2e/health.spec.ts` 不使用路由 Mock，由 `npm run test:e2e:smoke` 在真实 Compose 上验证 Web 页面和浏览器同源 `/api/health` 代理。`npm run test:e2e:ui` 提供已启动 Compose 的本地 UI 调试入口。运行结束后的 `playwright-report/` 与 `test-results/` 已由仓库 `.gitignore` 排除。
+
+独立 GitHub Actions workflow 使用 GitHub-hosted Ubuntu、Node 22、单 worker 和一次 CI 重试。失败时仅在递归解包检查通过后保留 report/trace 7 天；检查覆盖普通附件、嵌套 zip/`trace.zip` 及 HTML 的 base64 内嵌资源，并只匹配本次 job 生成的合成敏感值与唯一 canary。
+
+### WEB-39 后续扩展（本任务不实现）
+
+当前 scaffold 只证明 Web 可访问、Web → API 健康代理正常、浏览器未请求数据库端口。WEB-39 仍需补齐：
+
+1. PostgreSQL 连接 → Schema → 只读查询 → 下一页 → audit receipt。
+2. MySQL 同一主流程，以及 MySQL 可执行注释拒绝。
+3. 连接/Schema DTO 不泄露 host、port、secret ref/version、created_by、workspace_id 等内部字段。
+4. 页面、URL、网络、local/session storage 与 trace 不含数据库凭证、KEK、连接串或 token 内部状态。
+5. DML、DDL、多语句和危险 SQL 由服务端拒绝，UI 只显示稳定脱敏错误。
+6. 分页 token 篡改、重放、过期，以及撤权/策略或 generation 变化后的失效。
+7. 审计失败时扣留新结果并清理旧结果。
+8. 超时、取消、429、迟到响应与旧结果处理的 UI/HTTP 契约；服务端另以集成/故障注入证据证明资源归还。
+9. 隐藏或明确禁用非 P0 入口。
+10. 在固定 Chromium/Ubuntu 环境补充少量批准的视觉基线。

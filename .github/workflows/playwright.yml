@@ -1,0 +1,142 @@
+name: Playwright Compose Smoke
+
+on:
+  pull_request:
+    paths:
+      - "apps/web/**"
+      - "apps/api/**"
+      - "packages/contracts/**"
+      - "deploy/compose/**"
+      - ".github/workflows/playwright.yml"
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - "apps/api/**"
+      - "packages/contracts/**"
+      - "deploy/compose/**"
+      - ".github/workflows/playwright.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: playwright-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Chromium / Compose smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: webdb-playwright
+      PLAYWRIGHT_BASE_URL: http://127.0.0.1:3000
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+
+      - name: Install Web dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Install Chromium
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+
+      - name: Prepare synthetic Compose credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          values_file="$RUNNER_TEMP/webdb-playwright-sensitive-values"
+          : > "$values_file"
+          chmod 600 "$values_file"
+
+          write_hex_value() {
+            local name="$1"
+            local value
+            value="$(openssl rand -hex 24)"
+            printf '%s=%s\n' "$name" "$value" >> "$GITHUB_ENV"
+            printf '%s\n' "$value" >> "$values_file"
+          }
+
+          write_hex_value META_DB_PASSWORD
+          write_hex_value WEBDB_APP_PASSWORD
+          write_hex_value DEMO_PG_PASSWORD
+          write_hex_value DEMO_PG_READER_PASSWORD
+          write_hex_value DEMO_MYSQL_ROOT_PASSWORD
+          write_hex_value DEMO_MYSQL_READER_PASSWORD
+
+          kek="$(openssl rand -base64 32 | tr -d '\r\n')"
+          printf 'WEBDB_KEK_V1=%s\n' "$kek" >> "$GITHUB_ENV"
+          printf '%s\n' "$kek" >> "$values_file"
+          printf '%s\n' "webdb-artifact-canary-$(openssl rand -hex 24)" >> "$values_file"
+          printf 'WEBDB_SENSITIVE_VALUES_FILE=%s\n' "$values_file" >> "$GITHUB_ENV"
+
+      - name: Verify artifact safety gate
+        run: node apps/web/e2e/fixtures/verify-artifact-scanner.mjs
+
+      - name: Validate Compose configuration
+        run: docker compose -f deploy/compose/docker-compose.yml config --quiet
+
+      - name: Start Compose
+        run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+
+      - name: Run smoke test
+        working-directory: apps/web
+        run: npm run test:e2e:smoke
+
+      - name: Collect bounded Compose logs
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          log_file="$RUNNER_TEMP/webdb-playwright-compose.log"
+          docker compose -f deploy/compose/docker-compose.yml logs --no-color --tail 200 api web > "$log_file" 2>&1
+          scan_result="$(node apps/web/e2e/fixtures/scan-playwright-artifacts.mjs \
+            --values-file "$WEBDB_SENSITIVE_VALUES_FILE" "$log_file")"
+          if [[ "$scan_result" != "safe_to_upload=true" ]]; then
+            printf 'compose_logs_safe=false\n'
+            exit 1
+          fi
+          sed -n '1,400p' "$log_file"
+
+      - name: Inspect Playwright artifacts
+        id: artifact_scan
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          scan_result="$(node apps/web/e2e/fixtures/scan-playwright-artifacts.mjs \
+            --values-file "$WEBDB_SENSITIVE_VALUES_FILE" \
+            apps/web/playwright-report apps/web/test-results)"
+          if [[ "$scan_result" != "safe_to_upload=true" && "$scan_result" != "safe_to_upload=false" ]]; then
+            scan_result="safe_to_upload=false"
+          fi
+          printf '%s\n' "$scan_result"
+          printf '%s\n' "$scan_result" >> "$GITHUB_OUTPUT"
+
+      - name: Reject unsafe Playwright artifacts
+        if: failure() && steps.artifact_scan.outputs.safe_to_upload != 'true'
+        run: exit 1
+
+      - name: Upload safe failure artifacts
+        if: failure() && steps.artifact_scan.outputs.safe_to_upload == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            apps/web/playwright-report/
+            apps/web/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Stop Compose
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml down

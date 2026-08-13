@@ -11,7 +11,9 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "node e2e/fixtures/run-synthetic-e2e.mjs",
+    "test:e2e:smoke": "playwright test --grep @smoke",
+    "test:e2e:ui": "playwright test --ui"
   },
   "dependencies": {
     "monaco-editor": "^0.56.0",
@@ -19,7 +21,7 @@
     "react-dom": "^19.2.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
+    "@playwright/test": "1.62.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.3",
     "@types/react": "^19.2.0",
