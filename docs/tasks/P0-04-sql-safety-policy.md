@@ -29,7 +29,7 @@
 | MySQL ECM 可执行注释 AST 前检测拒绝 | `ecm_lexer.go` 确定性状态机（O(n)/O(1)），`/*!...*/` 在 parser 前检测 |
 | PG 危险函数检测 | `dangerousPGFuncs` 13 个函数（setval/nextval/lo_*/lowrite/lo_truncate/lo_truncate64），`fcBaseName` 忽略 schema 限定 |
 | MySQL `:=` 赋值检测 | 递归覆盖 TargetList/WHERE/HAVING/GROUP BY/ORDER BY/FROM/JOIN ON/FuncCallExpr.Args/CaseExpr/派生表/嵌套 JOIN |
-| `ANSI_QUOTES` / `NoBackslashEscapes` fail-closed | `policy.go` 检测非默认 mode 后返回 `ReasonParseError` |
+| `ANSI_QUOTES` / `NoBackslashEscapes` fail-closed | `policy.go` 检测非默认 mode 后返回 `ReasonParseError`；WEB-44 增加 Adapter 同 session `@@SESSION.sql_mode` 逐次验证，未知/不支持/读取失败时在用户 SQL 前拒绝并销毁连接 |
 | 方言 AST 未知/解析失败默认拒绝 | `ReasonUnsupported` / `ReasonParseError`，不使用字符串前缀匹配 |
 | ECM 或拒绝时 Adapter 调用次数为 0 | `execution/service.go`: `EvaluateSQL` 仅 `Allowed=true` 时返回空 error code |
 | SQL 策略错误有稳定错误码 | `StableErrorCode` 映射 SQL 策略拒绝原因: `sql_parse_error` / `multiple_statements` / `statement_not_allowed` / `unsupported_statement` / `empty_sql` / `executable_comment_detected`；超时和取消由 Adapter 层的 `query_timeout` / `query_cancelled` 处理，最大行数通过 keyset 分页限制 |
@@ -41,7 +41,7 @@
 
 - 不支持 DML/DDL。
 - 不注册公开 HTTP 业务路由；ExecutionService 仅供内部 Go 调用。
-- 不把 SQL 安全判断下放到客户端；`MySQLLexerMode` 从服务端可信连接配置派生。
+- 不把 SQL 安全判断下放到客户端；`MySQLLexerMode` 从即将执行用户 SQL 的服务端可信 session 派生并逐次验证（WEB-44）。
 - 不依赖字符串前缀或正则作为 AST 安全边界。
 - `docs/tasks/evidence/P0-04-round3/harness/` 是依赖与设计验证证据，不是生产实现。
 
@@ -74,7 +74,7 @@ Fuzz 测试、退出码、许可证复核等完整证据见 [`docs/tasks/evidenc
 | 风险 | 缓解措施 | 后续任务 |
 | --- | --- | --- |
 | `SELECT func()` 副作用（用户自定义 `SECURITY DEFINER`） | AST 仅按名单匹配，不覆盖自定义函数 | P0-05 执行层加只读事务 |
-| Omni MySQL parser 不支持 mode-aware 解析 | `ANSI_QUOTES` / `NoBackslashEscapes` 时 fail-closed 拒绝 | Omni 支持后移除 |
+| Omni MySQL parser 不支持 mode-aware 解析 | Adapter 每次从同一池化 session 读取 `@@SESSION.sql_mode`；`ANSI_QUOTES` / `NoBackslashEscapes`、其他不支持/未知 mode 或读取失败时在用户 SQL 前 fail-closed | Omni 支持相应 mode 后另立任务评估放宽 |
 | 函数名大小写绕过 | `strings.ToLower` 归一化 | — |
 
 ## 回滚

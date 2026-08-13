@@ -19,7 +19,10 @@ type fakeMySQLDriver struct {
 	rollbackErr     error
 	autocommitErr   error
 	autocommitValue int64 // 默认 1（autocommit on）
+	sessionMode     string
+	sessionModeErr  error
 	queryErr        error // 目标只读查询注入错误（取消/超时等）
+	targetQueries   int
 	conns           []*fakeMySQLDriverConn
 }
 
@@ -50,6 +53,12 @@ func (c *fakeMySQLDriverConn) Begin() (driver.Tx, error) {
 }
 
 func (c *fakeMySQLDriverConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "@@SESSION.sql_mode") {
+		if c.d.sessionModeErr != nil {
+			return nil, c.d.sessionModeErr
+		}
+		return &fakeMySQLRows{cols: []string{"@@SESSION.sql_mode"}, rows: [][]driver.Value{{c.d.sessionMode}}}, nil
+	}
 	if strings.Contains(query, "@@autocommit") {
 		if c.d.autocommitErr != nil {
 			return nil, c.d.autocommitErr
@@ -57,6 +66,7 @@ func (c *fakeMySQLDriverConn) QueryContext(_ context.Context, query string, _ []
 		return &fakeMySQLRows{cols: []string{"@@autocommit"}, rows: [][]driver.Value{{c.d.autocommitValue}}}, nil
 	}
 	// 目标只读查询：可注入错误（取消/超时），否则返回单行 id=1。
+	c.d.targetQueries++
 	if c.d.queryErr != nil {
 		return nil, c.d.queryErr
 	}
@@ -174,10 +184,59 @@ func (c *beginFailMySQLConn) Prepare(string) (driver.Stmt, error) { return nil, 
 func (c *beginFailMySQLConn) Close() error                        { c.closed = true; return nil }
 func (c *beginFailMySQLConn) Begin() (driver.Tx, error)           { return nil, errors.New("n/a") }
 func (c *beginFailMySQLConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "@@SESSION.sql_mode") {
+		return &fakeMySQLRows{cols: []string{"@@SESSION.sql_mode"}, rows: [][]driver.Value{{""}}}, nil
+	}
 	if strings.Contains(query, "@@autocommit") {
 		return &fakeMySQLRows{cols: []string{"@@autocommit"}, rows: [][]driver.Value{{int64(1)}}}, nil
 	}
 	return &fakeMySQLRows{cols: []string{"id"}, rows: [][]driver.Value{{int64(1)}}}, nil
+}
+
+// TestExecMySQLSessionModeRejectedFailsClosed 验证实际 session mode 与 policy
+// 支持模式不一致或未知时，必须在目标 SQL 到达 QueryContext 前拒绝并销毁该连接。
+func TestExecMySQLSessionModeRejectedFailsClosed(t *testing.T) {
+	for _, mode := range []string{"ANSI_QUOTES", "NO_BACKSLASH_ESCAPES", "FUTURE_LEXER_MODE"} {
+		t.Run(mode, func(t *testing.T) {
+			fd := &fakeMySQLDriver{autocommitValue: 1, sessionMode: mode}
+			handle := fakeMySQLHandle(fd)
+			_, err := handle.execQuery(context.Background(), "SELECT 'test\\' /*!50000' FROM t", nil, 2, 1, 0, 100)
+			var ae *AdapterError
+			if !errors.As(err, &ae) || ae.Code != ErrConnectionFailed {
+				t.Fatalf("err = %v, want AdapterError{Code: connection_failed}", err)
+			}
+			if fd.targetQueries != 0 {
+				t.Fatalf("targetQueries = %d, want 0（mode 不一致时不得执行目标 SQL）", fd.targetQueries)
+			}
+			if len(fd.conns) == 0 || !fd.conns[0].closed {
+				t.Fatal("mode 不一致后连接必须被销毁，不得归还池复用")
+			}
+		})
+	}
+}
+
+// TestExecMySQLSessionModeReadFailureFailsClosed 验证可信 session mode 无法读取时
+// fail-closed，且公共错误不泄露驱动原始信息。
+func TestExecMySQLSessionModeReadFailureFailsClosed(t *testing.T) {
+	fd := &fakeMySQLDriver{
+		autocommitValue: 1,
+		sessionModeErr:  errors.New("raw sql_mode error: secret connection detail"),
+	}
+	handle := fakeMySQLHandle(fd)
+	_, err := handle.execQuery(context.Background(), "SELECT id FROM t", nil, 2, 1, 0, 100)
+	var ae *AdapterError
+	if !errors.As(err, &ae) || ae.Code != ErrConnectionFailed {
+		t.Fatalf("err = %v, want AdapterError{Code: connection_failed}", err)
+	}
+	if strings.Contains(ae.Message, "secret connection detail") {
+		t.Fatalf("折叠 message 不得泄露驱动原始错误: %q", ae.Message)
+	}
+	if fd.targetQueries != 0 {
+		t.Fatalf("targetQueries = %d, want 0（mode 未知时不得执行目标 SQL）", fd.targetQueries)
+	}
+	if len(fd.conns) == 0 || !fd.conns[0].closed {
+		t.Fatal("mode 读取失败后连接必须被销毁")
+	}
 }
 func (c *beginFailMySQLConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
 	if strings.Contains(query, "START TRANSACTION READ ONLY") {

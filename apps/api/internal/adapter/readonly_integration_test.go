@@ -156,6 +156,53 @@ func TestReadOnlyBoundary_MySQL_Success(t *testing.T) {
 	}
 }
 
+// TestReadOnlyBoundary_MySQL_NonDefaultSQLModeRejectedBeforeQuery 在真实 MySQL
+// session 上设置两种会改变词法边界的 mode，再把该连接归还池。下一次执行必须在
+// 同一池化连接上重新读取 mode，并在危险 ECM SQL 到达目标 QueryContext 前拒绝。
+func TestReadOnlyBoundary_MySQL_NonDefaultSQLModeRejectedBeforeQuery(t *testing.T) {
+	for _, mode := range []string{"NO_BACKSLASH_ESCAPES", "ANSI_QUOTES"} {
+		t.Run(mode, func(t *testing.T) {
+			m := NewAdapterManager(ManagerOptions{AllowInsecureLocalDemo: true})
+			defer m.Close(context.Background())
+			cfg := myCfg()
+			cfg.ConnectionID = "mysql-mode-" + mode
+			cfg.MaxOpen = 1
+			cfg.MaxIdle = 1
+			h := mustGet(t, m, cfg)
+			defer h.Release()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			defer cancel()
+			conn, err := h.entry.sqlDB.Conn(ctx)
+			if err != nil {
+				t.Fatalf("conn: %v", err)
+			}
+			if _, err := conn.ExecContext(ctx, "SET SESSION sql_mode = ?", mode); err != nil {
+				conn.Close()
+				t.Fatalf("set session sql_mode: %v", err)
+			}
+			// MaxOpen=1/MaxIdle=1 保证下一次 h.Query 复用刚设置 mode 的 session。
+			if err := conn.Close(); err != nil {
+				t.Fatalf("return conn to pool: %v", err)
+			}
+
+			_, err = h.Query(ctx, FirstPageRequest{
+				Scope:    UserWorkspaceScope{UserID: "u1", WorkspaceID: "ws1"},
+				SQL:      "SELECT 'test\\' /*!50000' FROM t",
+				PageSize: 1,
+				MaxRows:  1,
+			})
+			var ae *AdapterError
+			if !errors.As(err, &ae) || ae.Code != ErrConnectionFailed {
+				t.Fatalf("err = %v, want AdapterError{Code: connection_failed}", err)
+			}
+			if ae.Message != "mysql session sql_mode unsupported" {
+				t.Fatalf("message = %q, want mode gate rejection before target query", ae.Message)
+			}
+		})
+	}
+}
+
 // TestReadOnlyBoundary_MySQL_ManualTransactionRejected 验证 MySQL 连接为手动
 // 事务模式（autocommit=0，可能有未提交事务）时 beginReadOnlyMySQL fail-closed，
 // 且错误折叠为 connection_unavailable。

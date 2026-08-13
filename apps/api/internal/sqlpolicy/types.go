@@ -8,6 +8,11 @@
 // ADR-007: 方言 AST 解析，未知即拒绝。
 package sqlpolicy
 
+import (
+	"errors"
+	"strings"
+)
+
 // Dialect 方言标识 —— 从服务端 Connection.Engine 派生，不接受客户端输入。
 type Dialect string
 
@@ -93,4 +98,59 @@ type PolicyDecision struct {
 type MySQLLexerMode struct {
 	NoBackslashEscapes bool
 	ANSIQuotes         bool
+}
+
+// SupportedMySQLLexerMode 返回当前 Omni AST 与 ECM lexer 共同支持的唯一
+// MySQL 词法模式。生产执行层必须在同一条目标 session 上验证该模式后才执行 SQL。
+func SupportedMySQLLexerMode() MySQLLexerMode {
+	return MySQLLexerMode{}
+}
+
+// MySQLLexerModeFromSession 将可信目标 session 返回的 @@SESSION.sql_mode
+// 投影为影响 SQL 解析的模式。仅允许 MySQL 8.0+ 中已知不会改变解析语义的 mode；
+// 未知、格式异常或当前 parser 不支持的其他语法 mode 一律返回错误，以便调用方
+// fail-closed。ANSI_QUOTES 与 NO_BACKSLASH_ESCAPES 返回明确的 mode，由调用方与
+// SupportedMySQLLexerMode 比较。
+func MySQLLexerModeFromSession(raw string) (MySQLLexerMode, error) {
+	var mode MySQLLexerMode
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return mode, nil
+	}
+
+	for _, part := range strings.Split(raw, ",") {
+		name := strings.ToUpper(strings.TrimSpace(part))
+		if name == "" {
+			return MySQLLexerMode{}, errors.New("mysql session sql_mode contains an empty token")
+		}
+		switch name {
+		case "ANSI_QUOTES":
+			mode.ANSIQuotes = true
+		case "NO_BACKSLASH_ESCAPES":
+			mode.NoBackslashEscapes = true
+		case "ANSI":
+			// ANSI is a combination mode that includes ANSI_QUOTES.
+			mode.ANSIQuotes = true
+		case "ALLOW_INVALID_DATES",
+			"ERROR_FOR_DIVISION_BY_ZERO",
+			"NO_AUTO_VALUE_ON_ZERO",
+			"NO_DIR_IN_CREATE",
+			"NO_ENGINE_SUBSTITUTION",
+			"NO_UNSIGNED_SUBTRACTION",
+			"NO_ZERO_DATE",
+			"NO_ZERO_IN_DATE",
+			"ONLY_FULL_GROUP_BY",
+			"PAD_CHAR_TO_FULL_LENGTH",
+			"STRICT_ALL_TABLES",
+			"STRICT_TRANS_TABLES",
+			"TIME_TRUNCATE_FRACTIONAL",
+			"TRADITIONAL":
+			// 已知不会改变 lexer/AST 解析语义的 MySQL 8.0+ mode。
+		case "HIGH_NOT_PRECEDENCE", "IGNORE_SPACE", "PIPES_AS_CONCAT", "REAL_AS_FLOAT":
+			return MySQLLexerMode{}, errors.New("mysql session uses an unsupported syntax mode")
+		default:
+			return MySQLLexerMode{}, errors.New("mysql session uses an unknown sql_mode")
+		}
+	}
+	return mode, nil
 }
