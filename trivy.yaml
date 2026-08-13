@@ -1,0 +1,53 @@
+# Shared Trivy v0.73.0 policy for CI and local reproduction.
+# Phase A explicitly disables findings ignore-file loading.
+timeout: 15m0s
+format: table
+exit-code: 0
+ignorefile: null
+list-all-pkgs: true
+report: all
+severity:
+  - UNKNOWN
+  - LOW
+  - MEDIUM
+  - HIGH
+  - CRITICAL
+
+scan:
+  scanners:
+    - vuln
+    - misconfig
+    - secret
+    - license
+  skip-dirs:
+    # These are unmapped gitlinks, not WebDB source in the checkout.
+    - ecc
+    - superpowers
+    # Generated output and dependency caches are outside the review surface.
+    - "**/.cache"
+    - "**/node_modules"
+    - "**/dist"
+    - "**/build"
+    - "**/coverage"
+    - "**/test-results"
+    - "**/playwright-report"
+  skip-files: []
+
+pkg:
+  # License inventory is limited to production dependencies in phase A.
+  include-dev-deps: false
+
+license:
+  # Package metadata only; do not classify arbitrary source/document text.
+  full: false
+
+secret:
+  config: trivy-secret.yaml
+
+image:
+  # Image config scanning is separate from the ordinary --scanners option.
+  image-config-scanners:
+    - misconfig
+    - secret
+  source:
+    - docker

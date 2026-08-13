@@ -1,0 +1,415 @@
+name: Trivy security baseline
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "23 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: trivy-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  repo-secret-gate:
+    name: Repository secret gate
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Scan current checkout for secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          exit-code: "1"
+
+      - name: Create an untracked Markdown secret canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          canary_dir=.trivy-canary
+          canary_file="$canary_dir/markdown-secret-canary.md"
+          mkdir "$canary_dir"
+          token_prefix_a=gh
+          token_prefix_b=p_
+          token_body=$(printf '0123456789%.0s' {1..4})
+          printf 'Synthetic scanner canary: %s%s%.36s\n' \
+            "$token_prefix_a" "$token_prefix_b" "$token_body" > "$canary_file"
+
+      - name: Prove Markdown canary blocks with the production Action inputs
+        id: markdown_canary
+        # This is the only intentional expected-failure step. The following
+        # assertions require this scan to fail and the cleanup rescan to pass.
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          exit-code: "1"
+
+      - name: Assert the canary failed and remove only its files
+        env:
+          CANARY_OUTCOME: ${{ steps.markdown_canary.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          canary_dir=.trivy-canary
+          canary_file="$canary_dir/markdown-secret-canary.md"
+          if [[ "$CANARY_OUTCOME" != failure ]]; then
+            rm -f -- "$canary_file"
+            if [[ -d "$canary_dir" ]]; then
+              rmdir -- "$canary_dir" 2>/dev/null
+            fi
+            echo "Markdown secret canary did not trigger the gate" >&2
+            exit 1
+          fi
+          rm -- "$canary_file"
+          rmdir -- "$canary_dir"
+
+      - name: Prove the same scan passes after exact canary cleanup
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          exit-code: "1"
+
+  repo-security-baseline:
+    name: Repository vulnerability, configuration and license baseline
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go from the module declaration
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: apps/api/go.mod
+          cache-dependency-path: apps/api/go.sum
+
+      - name: Populate the read-only Go module cache
+        shell: bash
+        run: go -C apps/api mod download
+
+      - name: Report API Go vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: apps/api/go.mod
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+      - name: Report Web npm vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: apps/web/package-lock.json
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+      - name: Report Contracts npm vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: packages/contracts/package-lock.json
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+      - name: Report Dockerfile and supported configuration findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: .
+          scanners: misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          exit-code: "0"
+
+      - name: Capture API Go production license report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: apps/api/go.mod
+          scanners: license
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/license-api.json
+          exit-code: "0"
+
+      - name: Capture Web npm production license report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: apps/web/package-lock.json
+          scanners: license
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/license-web.json
+          exit-code: "0"
+
+      - name: Capture Contracts npm production license report
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: packages/contracts/package-lock.json
+          scanners: license
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/license-contracts.json
+          exit-code: "0"
+
+      - name: Assert all license targets and known production dependencies
+        env:
+          API_REPORT: ${{ runner.temp }}/license-api.json
+          WEB_REPORT: ${{ runner.temp }}/license-web.json
+          CONTRACTS_REPORT: ${{ runner.temp }}/license-contracts.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.ArtifactName == "apps/api/go.mod"' "$API_REPORT" >/dev/null
+          jq -e '.ArtifactName == "apps/web/package-lock.json"' "$WEB_REPORT" >/dev/null
+          jq -e '.ArtifactName == "packages/contracts/package-lock.json"' "$CONTRACTS_REPORT" >/dev/null
+          jq -e 'any(.Results[]?.Licenses[]?; .PkgName == "github.com/google/uuid")' "$API_REPORT" >/dev/null
+          jq -e 'any(.Results[]?.Licenses[]?; .PkgName == "react")' "$WEB_REPORT" >/dev/null
+          for report in "$API_REPORT" "$WEB_REPORT" "$CONTRACTS_REPORT"; do
+            jq -r '[.ArtifactName, ([.Results[]?.Licenses[]?] | length)] | @tsv' "$report"
+          done
+          rm -- "$API_REPORT" "$WEB_REPORT" "$CONTRACTS_REPORT"
+
+      - name: Create a temporary Dockerfile misconfiguration fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir .trivy-misconfig-canary
+          printf 'FROM alpine:latest\n' > .trivy-misconfig-canary/Dockerfile
+
+      - name: Scan the temporary Dockerfile fixture
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: fs
+          scan-ref: .trivy-misconfig-canary
+          scanners: misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/misconfig-canary.json
+          exit-code: "0"
+
+      - name: Assert the misconfiguration path ran and clean its fixture
+        env:
+          REPORT: ${{ runner.temp }}/misconfig-canary.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e 'any(.Results[]?; .Class == "config" and .Type == "dockerfile")' "$REPORT" >/dev/null
+          rm -- "$REPORT" .trivy-misconfig-canary/Dockerfile
+          rmdir -- .trivy-misconfig-canary
+
+      - name: Prove report mode does not swallow scanner errors
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          trivy fs --config .trivy-config-that-does-not-exist.yaml \
+            --scanners vuln --exit-code 0 apps/api/go.mod >/dev/null 2>&1
+          scanner_rc=$?
+          set -e
+          if [[ "$scanner_rc" -eq 0 ]]; then
+            echo "Scanner error was incorrectly converted to success" >&2
+            exit 1
+          fi
+          echo "Invalid explicit config failed as required (exit $scanner_rc)"
+
+      - name: Assert phase A has no findings ignore file
+        shell: bash
+        run: |
+          set -euo pipefail
+          if find . -path './.git' -prune -o \
+              \( -name '.trivyignore' -o -name '.trivyignore.yaml' \) -print -quit | grep -q .; then
+            echo "Phase A must not contain a Trivy findings ignore file" >&2
+            exit 1
+          fi
+
+  prod-image-baseline:
+    name: API and Web production image baseline
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out current revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build API prod image with a non-pushed image-config canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          token_prefix_a=gh
+          token_prefix_b=p_
+          token_body=$(printf '0123456789%.0s' {1..4})
+          image_config_canary="${token_prefix_a}${token_prefix_b}${token_body:0:36}"
+          docker build --target prod \
+            --label "org.webdb.trivy-image-config-canary=$image_config_canary" \
+            -t "webdb-api:trivy-${GITHUB_SHA}" apps/api
+          unset image_config_canary token_body
+
+      - name: Build Web prod image with a non-pushed image-config canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          token_prefix_a=gh
+          token_prefix_b=p_
+          token_body=$(printf '0123456789%.0s' {1..4})
+          image_config_canary="${token_prefix_a}${token_prefix_b}${token_body:0:36}"
+          docker build --target prod \
+            --label "org.webdb.trivy-image-config-canary=$image_config_canary" \
+            -t "webdb-web:trivy-${GITHUB_SHA}" apps/web
+          unset image_config_canary token_body
+
+      - name: Scan API prod image and image config
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: image
+          image-ref: webdb-api:trivy-${{ github.sha }}
+          scanners: vuln,secret,misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/image-api.json
+          exit-code: "0"
+
+      - name: Scan Web prod image and image config
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: image
+          image-ref: webdb-web:trivy-${{ github.sha }}
+          scanners: vuln,secret,misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: json
+          output: ${{ runner.temp }}/image-web.json
+          exit-code: "0"
+
+      - name: Assert both prod targets and their image-config scan types
+        env:
+          API_IMAGE: webdb-api:trivy-${{ github.sha }}
+          WEB_IMAGE: webdb-web:trivy-${{ github.sha }}
+          API_REPORT: ${{ runner.temp }}/image-api.json
+          WEB_REPORT: ${{ runner.temp }}/image-web.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          assert_image_report() {
+            local image=$1
+            local report=$2
+            jq -e --arg image "$image" '.ArtifactName == $image' "$report" >/dev/null
+            jq -e --arg image "$image" \
+              'any(.Results[]?; .Target == $image and .Class == "secret")' "$report" >/dev/null
+            jq -e --arg image "$image" \
+              'any(.Results[]?; .Target == $image and .Class == "config" and .Type == "dockerfile")' \
+              "$report" >/dev/null
+            jq -r --arg image "$image" \
+              '[ $image, ([.Results[]? | select(.Class == "secret")] | length), ([.Results[]? | select(.Class == "config" and .Type == "dockerfile")] | length) ] | @tsv' \
+              "$report"
+          }
+          assert_image_report "$API_IMAGE" "$API_REPORT"
+          assert_image_report "$WEB_IMAGE" "$WEB_REPORT"
+          rm -- "$API_REPORT" "$WEB_REPORT"
+
+  runtime-image-baseline:
+    name: Runtime image baseline (${{ matrix.name }})
+    if: >-
+      ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: postgres
+            image: "postgres:16-alpine"
+          - name: mysql
+            image: "mysql:8.4@sha256:c831a0f11348d402b43d77453e17d770be2eef356615a2823fe0f5a0d6c8b9af"
+    steps:
+      - name: Check out current revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify the image is still referenced by Compose
+        env:
+          IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose -f deploy/compose/docker-compose.yml config --images | grep -Fx -- "$IMAGE"
+
+      - name: Pull and record the resolved runtime image
+        env:
+          IMAGE: ${{ matrix.image }}
+          IMAGE_NAME: ${{ matrix.name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "$IMAGE"
+          image_id=$(docker image inspect --format '{{.Id}}' "$IMAGE")
+          repo_digests=$(docker image inspect --format '{{join .RepoDigests ", "}}' "$IMAGE")
+          {
+            echo "### Runtime image: $IMAGE_NAME"
+            echo
+            echo "- Requested reference: \`$IMAGE\`"
+            echo "- Image ID: \`$image_id\`"
+            echo "- RepoDigest(s): \`${repo_digests:-<none>}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report runtime image findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: "v0.73.0"
+          trivy-config: trivy.yaml
+          scan-type: image
+          image-ref: ${{ matrix.image }}
+          scanners: vuln,secret,misconfig
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          format: table
+          exit-code: "0"
