@@ -470,7 +470,11 @@ func TestNextPageCredentialFailureFinalizes(t *testing.T) {
 		t.Fatal("first page should issue continuation token")
 	}
 
-	pipeline.resolver.(*fakeResolver).err = credentials.ErrCredentialRetired
+	resolver, ok := pipeline.resolver.(*fakeResolver)
+	if !ok {
+		t.Fatalf("resolver type = %T, want *fakeResolver", pipeline.resolver)
+	}
+	resolver.err = credentials.ErrCredentialRetired
 	txStore.rejectCanceledContext = true
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

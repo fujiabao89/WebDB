@@ -159,14 +159,37 @@ func TestWireCellTypes(t *testing.T) {
 }
 
 // TestWireCellPostgreSQLTime verifies that the native pgx TIME representation
-// is emitted using the approved HH:MM:SS[.ffffff] wire format.
+// is emitted using the approved HH:MM:SS[.ffffff] wire format, including the
+// 24:00:00 value which time.Time cannot retain.
 func TestWireCellPostgreSQLTime(t *testing.T) {
-	got, _, err := wireCell("time", pgtype.Time{Microseconds: 45_296_123_456, Valid: true})
-	if err != nil {
-		t.Fatalf("wireCell(pgtype.Time): %v", err)
+	const microsPerDay = 24 * 60 * 60 * 1_000_000
+	cases := []struct {
+		name    string
+		in      pgtype.Time
+		want    any
+		wantErr bool
+	}{
+		{name: "ordinary", in: pgtype.Time{Microseconds: 45_296_123_456, Valid: true}, want: "12:34:56.123456"},
+		{name: "null", in: pgtype.Time{}, want: nil},
+		{name: "end of day", in: pgtype.Time{Microseconds: microsPerDay, Valid: true}, want: "24:00:00.000000"},
+		{name: "past end of day", in: pgtype.Time{Microseconds: microsPerDay + 1, Valid: true}, wantErr: true},
 	}
-	if got != "12:34:56.123456" {
-		t.Fatalf("wireCell(pgtype.Time) = %v, want 12:34:56.123456", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, err := wireCell("time", tc.in)
+			if tc.wantErr {
+				if !isCode(err, ErrDatabaseError) {
+					t.Fatalf("wireCell(pgtype.Time) error = %v, want database_error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("wireCell(pgtype.Time): %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("wireCell(pgtype.Time) = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 

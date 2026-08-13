@@ -111,8 +111,14 @@ func TestServerWriteTimeoutAllowsDetachedAuditFinalization(t *testing.T) {
 	defer srv.Close()
 	go func() { _ = srv.Serve(ln) }()
 
+	reqCtx, cancelReq := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelReq()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+ln.Addr().String()+"/", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
 	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get("http://" + ln.Addr().String() + "/")
+	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed after detached audit finalization: %v", err)
 	}
