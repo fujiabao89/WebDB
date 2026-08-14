@@ -141,11 +141,13 @@ func runServe() error {
 		Members:     store,
 		Resolver:    lm,
 		Adapter:     execution.NewAdapterClient(manager),
-		MySQLMode:   sqlpolicy.MySQLLexerMode{},
-		TLSMode:     tlsMode,
-		Tx:          store,
-		Audit:       store,
-		Alarm:       alarm,
+		// Adapter 在同一目标 session 上逐次验证实际 @@SESSION.sql_mode；此处与
+		// Adapter 共用唯一受支持值，避免生产策略依赖未验证的零值字面量。
+		MySQLMode: sqlpolicy.SupportedMySQLLexerMode(),
+		TLSMode:   tlsMode,
+		Tx:        store,
+		Audit:     store,
+		Alarm:     alarm,
 		// 与 HTTP 写出/关停预算共用同一显式值，避免 Pipeline 默认值变更后
 		// server 的外层 deadline 早于脱离请求 context 的审计收尾。
 		AuditWriteTimeout: auditFinalizationBudget,

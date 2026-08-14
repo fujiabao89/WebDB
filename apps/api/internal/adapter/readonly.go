@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/fujiabao89/webdb/internal/sqlpolicy"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -50,7 +51,10 @@ func endReadOnlyPG(ctx context.Context, conn *pgxpool.Conn) error {
 	return err
 }
 
-// beginReadOnlyMySQL 开启并验证 MySQL 只读事务。
+// beginReadOnlyMySQL 验证 MySQL session 解析模式并开启只读事务。
+// 首先从即将执行用户 SQL 的同一条 *sql.Conn 读取 @@SESSION.sql_mode；读取失败、
+// 未知/不支持的语法 mode 或与 SQL policy 支持模式不一致时 fail-closed。该检查在
+// 每次池连接复用后执行，不信任 DSN、全局配置或其他 session 的状态。
 // 检测 @@autocommit：非 1（连接被设为手动事务模式，可能有未提交事务）→
 // fail-closed 拒绝，避免 START TRANSACTION 隐式提交调用方事务。
 // database/sql 连接池在归还时清理未完成事务，正常池连接 autocommit=1。
@@ -58,6 +62,9 @@ func endReadOnlyPG(ctx context.Context, conn *pgxpool.Conn) error {
 // （@@transaction_read_only 只反映会话默认值，实测 START READ ONLY 后仍为 0），
 // 语句成功即确认只读语义（MySQL 保证 READ ONLY 事务拒绝数据修改语句）。
 func beginReadOnlyMySQL(ctx context.Context, conn *sql.Conn) error {
+	if err := verifyMySQLSessionMode(ctx, conn); err != nil {
+		return err
+	}
 	// 检查 @@autocommit（手动事务模式拒绝）。注：Codex P1 建议加查 @@session.in_transaction
 	// 以覆盖"autocommit=1 但已有显式 START TRANSACTION"的活动事务场景；但实测
 	// MySQL 8.4.10（本仓库演示镜像）无 in_transaction 系统变量（Unknown system variable），
@@ -74,6 +81,24 @@ func beginReadOnlyMySQL(ctx context.Context, conn *sql.Conn) error {
 	}
 	if _, err := conn.ExecContext(ctx, "START TRANSACTION READ ONLY"); err != nil {
 		return wrapReadOnly("begin read-only transaction", err)
+	}
+	return nil
+}
+
+// verifyMySQLSessionMode 从可信目标 session 派生实际词法 mode，并确认它与
+// sqlpolicy 使用的唯一受支持模式一致。错误信息固定脱敏；原始驱动错误仅保留在
+// error chain 中，不进入公共响应。
+func verifyMySQLSessionMode(ctx context.Context, conn *sql.Conn) error {
+	var raw string
+	if err := conn.QueryRowContext(ctx, "SELECT @@SESSION.sql_mode").Scan(&raw); err != nil {
+		return newError(ErrConnectionFailed, "mysql session sql_mode verification failed", err)
+	}
+	actual, err := sqlpolicy.MySQLLexerModeFromSession(raw)
+	if err != nil {
+		return newError(ErrConnectionFailed, "mysql session sql_mode unsupported", err)
+	}
+	if actual != sqlpolicy.SupportedMySQLLexerMode() {
+		return newError(ErrConnectionFailed, "mysql session sql_mode unsupported", nil)
 	}
 	return nil
 }

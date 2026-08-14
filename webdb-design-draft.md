@@ -228,6 +228,7 @@ sequenceDiagram
 
 - 单语句执行；拒绝或显式拆分多语句请求，避免 `SELECT; DROP ...` 绕过检查。
 - PostgreSQL 与 MySQL 分别使用对应方言解析器判断语句类型和策略；不强行限制为两者共同 SQL 子集。无法可靠解析或判定的语句默认拒绝；字符串前缀匹配只能作辅助提示，不能作安全边界。
+- MySQL 的词法/session mode 必须来自即将执行用户 SQL 的同一条可信连接。当前 parser 只支持不含 `ANSI_QUOTES`、`NO_BACKSLASH_ESCAPES` 及其他未支持语法 mode 的会话；Adapter 每次复用池连接后、在只读事务和用户 SQL 前读取并验证 `@@SESSION.sql_mode`，未知、不支持、读取失败或与 policy 不一致时默认拒绝并销毁连接。
 - 每次执行设置连接级超时、最大扫描 / 返回行数和取消能力；查询取消应映射到数据库侧取消。
 - 默认只允许 `SELECT` / `EXPLAIN`；`INSERT` / `UPDATE` / `DELETE` / DDL 走单独策略与审批路径。
 - 所有 SQL 都以目标库的最小权限服务账号执行；WebDB 的 RBAC 不能越过数据库原生权限。
