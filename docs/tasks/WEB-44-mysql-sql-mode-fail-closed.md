@@ -40,6 +40,8 @@
 ## 验证命令与原始结果
 
 ```text
+cd apps/api
+
 go test ./internal/sqlpolicy ./internal/adapter ./internal/execution ./cmd/server -count=1
 ok github.com/fujiabao89/webdb/internal/sqlpolicy 0.984s
 ok github.com/fujiabao89/webdb/internal/adapter 0.724s

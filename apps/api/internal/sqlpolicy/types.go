@@ -113,9 +113,12 @@ func SupportedMySQLLexerMode() MySQLLexerMode {
 // SupportedMySQLLexerMode 比较。
 func MySQLLexerModeFromSession(raw string) (MySQLLexerMode, error) {
 	var mode MySQLLexerMode
-	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return mode, nil
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return MySQLLexerMode{}, errors.New("mysql session sql_mode contains an empty token")
 	}
 
 	for _, part := range strings.Split(raw, ",") {
