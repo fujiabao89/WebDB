@@ -71,6 +71,48 @@ describe("P0 workbench", () => {
     expect(screen.queryByText(sensitiveResponseCanary)).toBeNull();
   });
 
+  it("sends page_size 500 and no order_by for the default run request (bounded single page)", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const [, request] = execute.mock.calls[0] as unknown as [
+      string,
+      { connection_id: string; sql: string; page_size: number; order_by?: unknown },
+    ];
+    expect(request.connection_id).toBe("pg");
+    expect(request.page_size).toBe(500);
+    expect(request.order_by).toBeUndefined();
+  });
+
+  it("sends page_size 100 and order_by when an explicit sort column is provided", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 100, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.type(screen.getByRole("textbox", { name: /排序列/ }), "id");
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const [, request] = execute.mock.calls[0] as unknown as [
+      string,
+      { connection_id: string; sql: string; page_size: number; order_by?: Array<{ column: string; order: string; nulls_last: boolean }> },
+    ];
+    expect(request.page_size).toBe(100);
+    expect(request.order_by).toEqual([{ column: "id", order: "ASC", nulls_last: false }]);
+  });
+
   it("announces Retry-After and keeps the SQL available after a 429", async () => {
     const rateLimited: WebDbApi = { ...api, execute: vi.fn().mockRejectedValue(new ApiError("rate_limited", 429, "rate_limited", 12)) };
     render(<App api={rateLimited} workspaceId="workspace-1" />);

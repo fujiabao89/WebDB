@@ -287,6 +287,11 @@ services:
       context: ../../apps/web
       dockerfile: Dockerfile
       target: dev
+    environment:
+      # 前端需在工作区路径中使用与可信 Principal 一致的固定演示工作区 ID（D01b）。
+      # 服务端仍校验路径 {workspace_id} == Principal.WorkspaceID，浏览器不自报身份；
+      # 值必须与 demo-seed/api 的 DEMO_PRINCIPAL_WORKSPACE_ID 一致，漂移即 fail-closed。
+      VITE_WEBDB_WORKSPACE_ID: ${DEMO_PRINCIPAL_WORKSPACE_ID:-f1160d75-26f7-46e0-b3e0-570ea65c232e}
     ports:
       - "127.0.0.1:3000:5173"
     depends_on:

@@ -131,5 +131,16 @@ INSERT INTO webdb_type_matrix (id, c_char, c_varchar, c_text, c_longtext,
         FALSE, b'00000001', '2025-01-02', '2025-01-02 03:04:05', '2025-01-02 03:04:05', '03:04:05',
         '', X'', X'0102FF',
         'tiny 2', 'medium 2', X'0A0B', X'010203', 'red', 'b');
+
+-- WEB-39 分页边界合成 fixture（确定性、幂等：600 行，主键 id 供 order_by 分页验证）
+CREATE TABLE IF NOT EXISTS demo_pagination (
+    id   INT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+INSERT INTO demo_pagination (name)
+WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 600)
+SELECT CONCAT('row-', n) FROM seq
+WHERE NOT EXISTS (SELECT 1 FROM demo_pagination);
 EOSQL
 ) || exit $?

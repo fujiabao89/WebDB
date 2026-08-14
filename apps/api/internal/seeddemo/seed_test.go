@@ -108,6 +108,7 @@ type seedFake struct {
 	members    map[string]*metadata.WorkspaceMember
 	conns      map[uuid.UUID]*metadata.Connection
 	policies   map[uuid.UUID]*metadata.ConnectionPolicy
+	envelopes  map[uuid.UUID]*metadata.CredentialEnvelope
 
 	createConnCalls   int
 	createPolicyCalls int
@@ -123,6 +124,7 @@ func newSeedFake() *seedFake {
 		members:    map[string]*metadata.WorkspaceMember{},
 		conns:      map[uuid.UUID]*metadata.Connection{},
 		policies:   map[uuid.UUID]*metadata.ConnectionPolicy{},
+		envelopes:  map[uuid.UUID]*metadata.CredentialEnvelope{},
 		cred:       newFakeCredService(),
 	}
 }
@@ -150,6 +152,9 @@ func (f *seedFake) WorkspaceByID(_ context.Context, id uuid.UUID) (*metadata.Wor
 }
 
 func (f *seedFake) createWorkspaceWithID(_ context.Context, ws *metadata.Workspace) error {
+	if _, ok := f.workspaces[ws.ID]; ok {
+		return nil // DO NOTHING（与生产 ON CONFLICT DO NOTHING 一致）
+	}
 	now := time.Now().UTC()
 	ws.CreatedAt = now
 	ws.UpdatedAt = now
@@ -166,6 +171,9 @@ func (f *seedFake) UserByID(_ context.Context, id uuid.UUID) (*metadata.User, er
 }
 
 func (f *seedFake) createUserWithID(_ context.Context, u *metadata.User) error {
+	if _, ok := f.users[u.ID]; ok {
+		return nil // DO NOTHING
+	}
 	now := time.Now().UTC()
 	u.CreatedAt = now
 	u.UpdatedAt = now
@@ -188,6 +196,38 @@ func (f *seedFake) addMemberIfAbsent(_ context.Context, m *metadata.WorkspaceMem
 	m.CreatedAt = time.Now().UTC()
 	f.members[memberKey(m.WorkspaceID, m.UserID)] = m
 	return nil
+}
+
+func (f *seedFake) createEnvelopeWithID(_ context.Context, env *metadata.CredentialEnvelope) error {
+	if _, ok := f.envelopes[env.SecretRef]; ok {
+		return nil // DO NOTHING
+	}
+	f.envelopes[env.SecretRef] = env
+	return nil
+}
+
+func (f *seedFake) createConnectionWithID(_ context.Context, conn *metadata.Connection) error {
+	if _, ok := f.conns[conn.ID]; ok {
+		return nil // DO NOTHING
+	}
+	f.conns[conn.ID] = conn
+	return nil
+}
+
+func (f *seedFake) connectionByID(_ context.Context, wsID, id uuid.UUID) (*metadata.Connection, error) {
+	c, ok := f.conns[id]
+	if !ok || c.WorkspaceID != wsID {
+		return nil, sql.ErrNoRows
+	}
+	return c, nil
+}
+
+func (f *seedFake) envelopeByRef(_ context.Context, wsID, secretRef uuid.UUID, version int) (*metadata.CredentialEnvelope, error) {
+	e, ok := f.envelopes[secretRef]
+	if !ok || e.WorkspaceID != wsID || e.Version != version {
+		return nil, sql.ErrNoRows
+	}
+	return e, nil
 }
 
 // connectionCreator
@@ -277,6 +317,21 @@ func preseedConsistent(t *testing.T, f *seedFake, cfg Config) {
 			StatementTimeoutMs: policyStatementTimeoutMs, MaxRows: policyMaxRows,
 		}
 	}
+	preseedForeignFixture(f)
+}
+
+// preseedForeignFixture 预置第二合成租户（与 foreign_fixture.go 期望一致），
+// 供二次运行 no-op 测试与漂移 fail-closed 测试复用。
+func preseedForeignFixture(f *seedFake) {
+	fws := mustParseUUID(DemoForeignWorkspaceID)
+	fuser := mustParseUUID(DemoForeignUserID)
+	fconn := mustParseUUID(DemoForeignConnectionID)
+	fsecret := mustParseUUID(demoForeignSecretRef)
+	f.workspaces[fws] = &metadata.Workspace{ID: fws, Name: "Foreign Workspace", Settings: json.RawMessage("{}")}
+	f.users[fuser] = &metadata.User{ID: fuser, Email: "foreign@example.local", PasswordHash: demoPasswordHash, Status: metadata.UserStatusActive}
+	f.members[memberKey(fws, fuser)] = &metadata.WorkspaceMember{WorkspaceID: fws, UserID: fuser, Role: metadata.RoleOwner}
+	f.envelopes[fsecret] = &metadata.CredentialEnvelope{WorkspaceID: fws, SecretRef: fsecret, Version: 1, Ciphertext: []byte{0}, DataNonce: []byte{0}, WrappedDEK: []byte{0}, WrapNonce: []byte{0}, EnvelopeSuite: "AES256GCM-v1", KEKVersion: 1}
+	f.conns[fconn] = &metadata.Connection{ID: fconn, WorkspaceID: fws, Name: "foreign (PostgreSQL)", Engine: metadata.EnginePostgreSQL, Host: "foreign-demo-pg", Port: 5432, Database: "foreign_db", Environment: metadata.EnvDevelopment, SecretRef: fsecret, SecretVersion: 1, CreatedBy: fuser}
 }
 
 // ---- 测试：演示开关门控 --------------------------------------------------------
@@ -423,8 +478,8 @@ func TestRun_freshCreates(t *testing.T) {
 	if err := Run(ctx, cfg, deps); err != nil {
 		t.Fatalf("首次 seed 不应报错: %v", err)
 	}
-	if len(f.workspaces) != 1 || len(f.users) != 1 || len(f.members) != 1 {
-		t.Fatalf("身份数据数量错误: ws=%d user=%d member=%d", len(f.workspaces), len(f.users), len(f.members))
+	if len(f.workspaces) != 2 || len(f.users) != 2 || len(f.members) != 2 {
+		t.Fatalf("身份数据数量错误（演示 + foreign 租户）: ws=%d user=%d member=%d", len(f.workspaces), len(f.users), len(f.members))
 	}
 	if f.users[cfg.UserID].Status != metadata.UserStatusActive {
 		t.Fatalf("demo user 必须为 active，实际 %s", f.users[cfg.UserID].Status)
@@ -432,8 +487,11 @@ func TestRun_freshCreates(t *testing.T) {
 	if f.members[memberKey(cfg.WorkspaceID, cfg.UserID)].Role != metadata.RoleOwner {
 		t.Fatalf("demo member 必须为 owner")
 	}
-	if len(f.conns) != 2 {
-		t.Fatalf("应创建两个连接，实际 %d", len(f.conns))
+	if len(f.conns) != 3 {
+		t.Fatalf("应创建两个演示连接 + 一个 foreign 连接，实际 %d", len(f.conns))
+	}
+	if fc, ok := f.conns[mustParseUUID(DemoForeignConnectionID)]; !ok || fc.WorkspaceID != mustParseUUID(DemoForeignWorkspaceID) {
+		t.Fatalf("foreign 连接应存在且属于第二 workspace，实际 %+v", fc)
 	}
 	if len(f.policies) != 2 {
 		t.Fatalf("应创建两个策略，实际 %d", len(f.policies))
@@ -444,10 +502,12 @@ func TestRun_freshCreates(t *testing.T) {
 	if f.cred.createCalls != 2 || f.createConnCalls != 2 || f.createPolicyCalls != 2 {
 		t.Fatalf("创建调用次数异常: cred=%d conn=%d policy=%d", f.cred.createCalls, f.createConnCalls, f.createPolicyCalls)
 	}
-	// 连接的 secret_ref 必须指向实际创建的 envelope
+	// 连接的 secret_ref 必须指向实际创建的 envelope（演示连接在 f.cred.envs，foreign 在 f.envelopes）
 	for _, c := range f.conns {
 		if _, ok := f.cred.envs[c.SecretRef.String()]; !ok {
-			t.Fatalf("连接 %s 引用了不存在的 envelope %s", c.ID, c.SecretRef)
+			if _, ok2 := f.envelopes[c.SecretRef]; !ok2 {
+				t.Fatalf("连接 %s 引用了不存在的 envelope %s", c.ID, c.SecretRef)
+			}
 		}
 	}
 }
@@ -465,6 +525,71 @@ func TestRun_secondRunNoop(t *testing.T) {
 	if f.cred.createCalls != 0 || f.createConnCalls != 0 || f.createPolicyCalls != 0 {
 		t.Fatalf("一致数据应为 no-op，实际新增: cred=%d conn=%d policy=%d", f.cred.createCalls, f.createConnCalls, f.createPolicyCalls)
 	}
+}
+
+func TestRun_foreignFixtureDriftFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	cfg := newTestConfig()
+
+	t.Run("connection host 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.conns[mustParseUUID(DemoForeignConnectionID)].Host = "wrong-host"
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign connection host 漂移应 fail-closed，got %v", err)
+		}
+	})
+
+	t.Run("workspace name 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.workspaces[mustParseUUID(DemoForeignWorkspaceID)].Name = "Other Workspace"
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign workspace name 漂移应 fail-closed，got %v", err)
+		}
+	})
+
+	t.Run("envelope suite 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.envelopes[mustParseUUID(demoForeignSecretRef)].EnvelopeSuite = "OTHER-SUITE"
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign envelope suite 漂移应 fail-closed，got %v", err)
+		}
+	})
+
+	t.Run("envelope ciphertext 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.envelopes[mustParseUUID(demoForeignSecretRef)].Ciphertext = []byte{9, 9}
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign envelope ciphertext 漂移应 fail-closed，got %v", err)
+		}
+	})
+
+	t.Run("connection engine 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.conns[mustParseUUID(DemoForeignConnectionID)].Engine = metadata.EngineMySQL
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign connection engine 漂移应 fail-closed，got %v", err)
+		}
+	})
+
+	t.Run("connection secret_version 漂移", func(t *testing.T) {
+		f := newSeedFake()
+		preseedConsistent(t, f, cfg)
+		f.conns[mustParseUUID(DemoForeignConnectionID)].SecretVersion = 99
+
+		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
+			t.Fatalf("foreign connection secret_version 漂移应 fail-closed，got %v", err)
+		}
+	})
 }
 
 func TestRun_workspaceConflict(t *testing.T) {

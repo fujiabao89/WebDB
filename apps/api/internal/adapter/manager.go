@@ -519,8 +519,10 @@ func (h *PoolHandle) Query(ctx context.Context, req FirstPageRequest) (*QueryRes
 	if err != nil {
 		return nil, err
 	}
-	if singlePage {
-		result.HasMore = false
+	if singlePage && result.readAhead {
+		// P0-04 哨兵契约：单页请求读到 effPage+1 哨兵行（存在第 501 行）时，
+		// 不返回前 500 行、不签发 token，返回 result_too_large。
+		return nil, newError(ErrResultTooLarge, "single page result exceeds limit", nil)
 	}
 	// ADR-015：Adapter 不再生成/保存 continuation token；HasMore 交由服务层决定是否续页。
 	return result, nil
@@ -832,6 +834,10 @@ func finalizeResult(colInfos []ColumnInfo, data [][]any, rc, effPage, cumCount, 
 	}
 	total := cumCount + rc
 	result := &QueryResult{Columns: colInfos, Rows: data, ReturnedRows: rc, TotalReturned: total}
+	// readAhead 记录预读哨兵是否探测到“还有下一行”（私有信号，单页路径据此返回
+	// result_too_large）；公开 HasMore 仍受 total < maxRows 约束，避免累计分页到上限
+	// 时出现 has_more=true 但无 token 的不一致响应。
+	result.readAhead = hasMore
 	if hasMore && total < maxRows {
 		result.HasMore = true
 	}

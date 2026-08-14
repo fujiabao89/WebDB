@@ -112,6 +112,15 @@ INSERT INTO webdb_type_matrix (id, c_text, c_varchar, c_char, c_bytea, c_jsonb, 
         '2025-01-02', '03:04:05', '2025-01-02 03:04:05', '2025-01-02 03:04:05+00', '123e4567-e89b-12d3-a456-426614174000',
         '', '', '\x0102ff');
 
+-- WEB-39 分页边界合成 fixture（确定性、幂等：600 行，主键 id 供 order_by 分页验证）
+CREATE TABLE IF NOT EXISTS demo_pagination (
+    id   SERIAL PRIMARY KEY,
+    name TEXT NOT NULL
+);
+INSERT INTO demo_pagination (name)
+SELECT 'row-' || g FROM generate_series(1, 600) g
+WHERE NOT EXISTS (SELECT 1 FROM demo_pagination);
+
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO demo_reader;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO demo_reader;
 EOSQL

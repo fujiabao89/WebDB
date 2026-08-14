@@ -28,6 +28,12 @@ const (
 	DemoPostgresConnectionID = "d80a86cb-d4e7-4afb-9ab1-8df572ad9c69"
 	// DemoMySQLConnectionID 演示 MySQL 连接固定 UUID。
 	DemoMySQLConnectionID = "37760cae-7ddc-408d-b2b0-4505c3ea2243"
+	// DemoForeignWorkspaceID 第二合成工作区固定 UUID（WEB-39 跨租户隔离 E2E fixture）。
+	DemoForeignWorkspaceID = "aaaaaaa1-0000-4000-8000-000000000001"
+	// DemoForeignUserID 第二合成工作区 owner user 固定 UUID（非演示 Principal）。
+	DemoForeignUserID = "aaaaaaa2-0000-4000-8000-000000000002"
+	// DemoForeignConnectionID 第二合成工作区的 foreign 连接固定 UUID（演示 Principal 不可见）。
+	DemoForeignConnectionID = "aaaaaaa3-0000-4000-8000-000000000003"
 )
 
 // 解析后的固定 UUID（启动时校验 env 与之一致）。
