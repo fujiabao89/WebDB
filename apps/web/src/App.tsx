@@ -329,7 +329,10 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
 
   const invalidateQueryInput = () => {
     dispatch({ type: "queryInputChanged" });
+    runAbort.current?.abort();
     pageAbort.current?.abort();
+    executionInFlight.current = false;
+    pageInFlight.current = false;
   };
   const handleSqlChange = (value: string) => {
     invalidateQueryInput();

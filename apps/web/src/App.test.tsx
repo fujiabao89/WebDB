@@ -203,6 +203,41 @@ describe("P0 workbench", () => {
     expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
   });
 
+  it("ignores an in-flight initial-query response when SQL changes", async () => {
+    let resolveExecute!: (value: unknown) => void;
+    const execute = vi.fn().mockReturnValue(new Promise((resolve) => { resolveExecute = resolve; }));
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    resolveExecute({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["stale-run"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale-run")).toBeNull();
+  });
+
+  it("allows re-running after editing during an in-flight query", async () => {
+    const execute = vi.fn()
+      .mockReturnValueOnce(new Promise(() => undefined))
+      .mockResolvedValue({
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+        meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-2", execution_id: "execution-2", trace_id: "trace-2", outcome: "succeeded" } },
+      });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it("announces Retry-After and keeps the SQL available after a 429", async () => {
     const rateLimited: WebDbApi = { ...api, execute: vi.fn().mockRejectedValue(new ApiError("rate_limited", 429, "rate_limited", 12)) };
     render(<App api={rateLimited} workspaceId="workspace-1" />);
