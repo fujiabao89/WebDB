@@ -327,6 +327,19 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
 
   const applyQueryResponse = (response: QueryResponseDto) => dispatch({ type: "executionSucceeded", result: response.data, page: response.meta.page, audit: response.meta.audit });
 
+  const handleSqlChange = (value: string) => {
+    dispatch({ type: "queryInputChanged" });
+    setSql(value);
+  };
+  const handleSortColumnChange = (value: string) => {
+    dispatch({ type: "queryInputChanged" });
+    setSortColumn(value);
+  };
+  const handleSortOrderChange = (value: "ASC" | "DESC") => {
+    dispatch({ type: "queryInputChanged" });
+    setSortOrder(value);
+  };
+
   const runQuery = () => {
     const connectionId = selectedConnection.current;
     if (!workspaceId || !connectionId || executionInFlight.current || pageInFlight.current) return;
@@ -500,8 +513,8 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
             <strong>未命名查询</strong><span className="policy-note"><span aria-hidden="true">{icon("shield")}</span> 单条只读查询 · 安全策略由服务端裁决</span><span className="toolbar-spacer" />
             <label className="sort-control" title="留空为有界单页（最多 500 行）；填写排序列（如 id）启用服务端分页（每页 100 行），排序唯一性由服务端裁决，前端不推断主键">
               <span>排序列（可选）</span>
-              <input type="text" value={sortColumn} onChange={(event) => setSortColumn(event.target.value)} placeholder="如 id" aria-label="排序列（可选）" />
-              <select value={sortOrder} onChange={(event) => setSortOrder(event.target.value as "ASC" | "DESC")} aria-label="排序方向">
+              <input type="text" value={sortColumn} onChange={(event) => handleSortColumnChange(event.target.value)} placeholder="如 id" aria-label="排序列（可选）" />
+              <select value={sortOrder} onChange={(event) => handleSortOrderChange(event.target.value as "ASC" | "DESC")} aria-label="排序方向">
                 <option value="ASC">ASC 升序</option>
                 <option value="DESC">DESC 降序</option>
               </select>
@@ -513,7 +526,7 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
             </button>
           </section>
           <section className="editor-panel" aria-label="SQL 编辑器">
-            <SqlEditor engine={selected?.engine} value={sql} onChange={setSql} onRun={runQuery} />
+            <SqlEditor engine={selected?.engine} value={sql} onChange={handleSqlChange} onRun={runQuery} />
             <div className="editor-status"><span>{selected?.engine === "mysql" ? "MySQL" : "PostgreSQL"}</span><span>UTF-8</span><span>语法高亮仅用于阅读</span></div>
           </section>
           <section className="output-panel" aria-label="查询输出">
