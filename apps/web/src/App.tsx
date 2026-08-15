@@ -327,16 +327,20 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
 
   const applyQueryResponse = (response: QueryResponseDto) => dispatch({ type: "executionSucceeded", result: response.data, page: response.meta.page, audit: response.meta.audit });
 
-  const handleSqlChange = (value: string) => {
+  const invalidateQueryInput = () => {
     dispatch({ type: "queryInputChanged" });
+    pageAbort.current?.abort();
+  };
+  const handleSqlChange = (value: string) => {
+    invalidateQueryInput();
     setSql(value);
   };
   const handleSortColumnChange = (value: string) => {
-    dispatch({ type: "queryInputChanged" });
+    invalidateQueryInput();
     setSortColumn(value);
   };
   const handleSortOrderChange = (value: "ASC" | "DESC") => {
-    dispatch({ type: "queryInputChanged" });
+    invalidateQueryInput();
     setSortOrder(value);
   };
 
