@@ -26,7 +26,7 @@ func Run(ctx context.Context, cfg Config, deps Deps) error {
 		return err
 	}
 	// 跨租户隔离 fixture（WEB-39）：第二合成租户，供 E2E 验证演示 Principal 不可见 foreign 连接。
-	if err := ensureForeignIsolationFixture(ctx, deps.Identity); err != nil {
+	if err := ensureForeignIsolationFixture(ctx, deps); err != nil {
 		return err
 	}
 	// 全局检测 seed 中断遗留的孤立 active envelope（未被任何连接引用）。

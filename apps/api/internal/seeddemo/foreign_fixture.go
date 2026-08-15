@@ -1,13 +1,13 @@
 package seeddemo
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/fujiabao89/webdb/internal/credentials"
 	"github.com/fujiabao89/webdb/internal/metadata"
 	"github.com/google/uuid"
 )
@@ -17,14 +17,12 @@ import (
 // 幂等创建第二合成租户（workspace/user/member/凭证/连接），用于跨租户隔离 E2E：
 // 演示 Principal 属于第一 workspace，请求该 foreign 连接必须与随机不存在 ID 一样
 // 返回脱敏 connection_not_found，且连接列表不出现该对象。
-// 全部为合成数据；凭证为永不解密的占位 envelope（仅满足 FK 约束），不含真实密钥。
+// 全部为合成数据。凭证经 credentials.LifecycleManager.Create 加密（遵守 ADR-019），
+// 连接仍走受控内部 seed 包的固定 ID 参数化写入（ADR-019 仅禁止直接 INSERT credential_envelopes）。
 //
-// 与 ids.go/Compose 注释一致：固定 ID 冲突 fail-closed。写入采用 ON CONFLICT DO NOTHING
-// 幂等，但**创建后逐项读回校验**——任何字段漂移（name/email/role/suite/host/secret_ref 等）
-// 返回 ErrDemoSeedRefused，不覆盖已有记录。
-
-// demoForeignSecretRef 第二合成工作区 foreign 连接的占位 secret_ref。
-const demoForeignSecretRef = "44444444-4444-4444-8444-444444444444"
+// 凭证 secretRef 由 LifecycleManager 随机生成，无法用固定 ID 的 DO NOTHING 幂等；
+// 因此连接+凭证采用「读回优先」幂等：连接已存在则仅校验，不存在才创建，避免重复
+// seed 累积孤立 envelope。创建后逐项读回校验——任一字段漂移返回 ErrDemoSeedRefused。
 
 const (
 	foreignWorkspaceName = "Foreign Workspace"
@@ -32,24 +30,13 @@ const (
 	foreignConnName      = "foreign (PostgreSQL)"
 	foreignConnHost      = "foreign-demo-pg"
 	foreignConnDatabase  = "foreign_db"
+	// foreign 连接凭证（合成占位：foreign-demo-pg 主机不存在，凭证永不被实际解密/使用）。
+	foreignCredUser     = "foreign_reader"
+	foreignCredPassword = "!foreign-synthetic-password-do-not-use"
 )
 
-// createEnvelopeWithID 幂等插入占位凭证信封（仅满足连接 FK，永不解密）。
-func (s *pgIdentityStore) createEnvelopeWithID(ctx context.Context, env *metadata.CredentialEnvelope) error {
-	const q = `
-		INSERT INTO credential_envelopes
-			(workspace_id, secret_ref, version, ciphertext, data_nonce,
-			 wrapped_dek, wrap_nonce, envelope_suite, kek_version)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-		ON CONFLICT (workspace_id, secret_ref, version) DO NOTHING`
-	_, err := s.db.ExecContext(ctx, q,
-		env.WorkspaceID, env.SecretRef, env.Version,
-		env.Ciphertext, env.DataNonce, env.WrappedDEK, env.WrapNonce,
-		env.EnvelopeSuite, env.KEKVersion)
-	return err
-}
-
 // createConnectionWithID 幂等插入连接行（绕过 owner 门控，仅用于合成隔离 fixture）。
+// 注意：仅 credential_envelopes 受 ADR-019 约束；连接固定 ID 写入属候选方案允许的受控内部 SQL。
 func (s *pgIdentityStore) createConnectionWithID(ctx context.Context, conn *metadata.Connection) error {
 	const q = `
 		INSERT INTO connections
@@ -64,46 +51,73 @@ func (s *pgIdentityStore) createConnectionWithID(ctx context.Context, conn *meta
 	return err
 }
 
-// connectionByID 读回连接（复用 metadata.PGStore 的 workspace 过滤）。
-func (s *pgIdentityStore) connectionByID(ctx context.Context, wsID, id uuid.UUID) (*metadata.Connection, error) {
-	return s.meta.ConnectionByID(ctx, wsID, id)
-}
-
-// envelopeByRef 读回凭证信封。
-func (s *pgIdentityStore) envelopeByRef(ctx context.Context, wsID, secretRef uuid.UUID, version int) (*metadata.CredentialEnvelope, error) {
-	return s.meta.EnvelopeByRef(ctx, wsID, secretRef, version)
-}
-
 // ensureForeignIsolationFixture 幂等创建第二合成租户，创建后读回校验（fail-closed）。
-func ensureForeignIsolationFixture(ctx context.Context, s identityStore) error {
+func ensureForeignIsolationFixture(ctx context.Context, deps Deps) error {
 	fws := mustParseUUID(DemoForeignWorkspaceID)
 	fuser := mustParseUUID(DemoForeignUserID)
 	fconn := mustParseUUID(DemoForeignConnectionID)
-	fsecret := mustParseUUID(demoForeignSecretRef)
 
-	if err := s.createWorkspaceWithID(ctx, &metadata.Workspace{ID: fws, Name: foreignWorkspaceName, Settings: json.RawMessage("{}")}); err != nil {
+	if err := deps.Identity.createWorkspaceWithID(ctx, &metadata.Workspace{ID: fws, Name: foreignWorkspaceName, Settings: json.RawMessage("{}")}); err != nil {
 		return fmt.Errorf("创建 foreign workspace 失败: %w", err)
 	}
-	if err := s.createUserWithID(ctx, &metadata.User{ID: fuser, Email: foreignUserEmail, PasswordHash: demoPasswordHash, Status: metadata.UserStatusActive}); err != nil {
+	if err := deps.Identity.createUserWithID(ctx, &metadata.User{ID: fuser, Email: foreignUserEmail, PasswordHash: demoPasswordHash, Status: metadata.UserStatusActive}); err != nil {
 		return fmt.Errorf("创建 foreign user 失败: %w", err)
 	}
-	if err := s.addMemberIfAbsent(ctx, &metadata.WorkspaceMember{WorkspaceID: fws, UserID: fuser, Role: metadata.RoleOwner}); err != nil {
+	if err := deps.Identity.addMemberIfAbsent(ctx, &metadata.WorkspaceMember{WorkspaceID: fws, UserID: fuser, Role: metadata.RoleOwner}); err != nil {
 		return fmt.Errorf("创建 foreign member 失败: %w", err)
 	}
-	if err := s.createEnvelopeWithID(ctx, &metadata.CredentialEnvelope{
-		WorkspaceID:   fws,
-		SecretRef:     fsecret,
-		Version:       1,
-		Ciphertext:    []byte{0},
-		DataNonce:     []byte{0},
-		WrappedDEK:    []byte{0},
-		WrapNonce:     []byte{0},
-		EnvelopeSuite: "AES256GCM-v1",
-		KEKVersion:    1,
-	}); err != nil {
-		return fmt.Errorf("创建 foreign 凭证 envelope 失败: %w", err)
+
+	// 连接+凭证：读回优先幂等（连接存在则 no-op，不存在才经 LifecycleManager 创建凭证）。
+	if err := ensureForeignConnection(ctx, deps, fws, fuser, fconn); err != nil {
+		return err
 	}
-	if err := s.createConnectionWithID(ctx, &metadata.Connection{
+
+	// 读回校验：任一固定字段漂移 fail-closed，不覆盖已有记录。
+	if ws, err := deps.Identity.WorkspaceByID(ctx, fws); err != nil {
+		return fmt.Errorf("%w: 读回 foreign workspace 失败: %w", ErrDemoSeedRefused, err)
+	} else if ws.Name != foreignWorkspaceName {
+		return fmt.Errorf("%w: foreign workspace name 漂移（got %q want %q）", ErrDemoSeedRefused, ws.Name, foreignWorkspaceName)
+	}
+	if u, err := deps.Identity.UserByID(ctx, fuser); err != nil {
+		return fmt.Errorf("%w: 读回 foreign user 失败: %w", ErrDemoSeedRefused, err)
+	} else if u.Email != foreignUserEmail || u.Status != metadata.UserStatusActive || u.PasswordHash != demoPasswordHash {
+		return fmt.Errorf("%w: foreign user 漂移（email=%q status=%q）", ErrDemoSeedRefused, u.Email, u.Status)
+	}
+	if m, err := deps.Identity.MemberByWorkspaceAndUser(ctx, fws, fuser); err != nil {
+		return fmt.Errorf("%w: 读回 foreign member 失败: %w", ErrDemoSeedRefused, err)
+	} else if m.Role != metadata.RoleOwner {
+		return fmt.Errorf("%w: foreign member role 漂移（got %q）", ErrDemoSeedRefused, m.Role)
+	}
+	if err := verifyForeignConnection(ctx, deps, fws, fuser, fconn); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ensureForeignConnection 读回优先幂等：连接已存在则 no-op（漂移由 verifyForeignConnection
+// 检测），不存在才经 LifecycleManager 创建凭证 + 固定 ID 写入连接。
+func ensureForeignConnection(ctx context.Context, deps Deps, fws, fuser, fconn uuid.UUID) error {
+	_, err := deps.ConnReader.ConnectionByID(ctx, fws, fconn)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, sql.ErrNoRows):
+		return createForeignConnection(ctx, deps, fws, fuser, fconn)
+	default:
+		return fmt.Errorf("%w: 读回 foreign connection 失败: %w", ErrDemoSeedRefused, err)
+	}
+}
+
+// createForeignConnection 经 LifecycleManager 创建凭证 + 固定 ID 写入连接。
+func createForeignConnection(ctx context.Context, deps Deps, fws, fuser, fconn uuid.UUID) error {
+	env, err := deps.Credentials.Create(ctx, fws, fuser, credentials.CredentialPayload{
+		User:     foreignCredUser,
+		Password: foreignCredPassword,
+	})
+	if err != nil {
+		return fmt.Errorf("创建 foreign 凭证失败: %w", err)
+	}
+	conn := &metadata.Connection{
 		ID:            fconn,
 		WorkspaceID:   fws,
 		Name:          foreignConnName,
@@ -112,51 +126,36 @@ func ensureForeignIsolationFixture(ctx context.Context, s identityStore) error {
 		Port:          5432,
 		Database:      foreignConnDatabase,
 		Environment:   metadata.EnvDevelopment,
-		SecretRef:     fsecret,
-		SecretVersion: 1,
+		SecretRef:     env.SecretRef,
+		SecretVersion: env.Version,
 		CreatedBy:     fuser,
-	}); err != nil {
+	}
+	if err := deps.Identity.createConnectionWithID(ctx, conn); err != nil {
 		return fmt.Errorf("创建 foreign connection 失败: %w", err)
 	}
+	return nil
+}
 
-	// 读回校验：任一固定字段漂移 fail-closed，不覆盖已有记录。
-	if ws, err := s.WorkspaceByID(ctx, fws); err != nil {
-		return fmt.Errorf("%w: 读回 foreign workspace 失败", ErrDemoSeedRefused)
-	} else if ws.Name != foreignWorkspaceName {
-		return fmt.Errorf("%w: foreign workspace name 漂移（got %q want %q）", ErrDemoSeedRefused, ws.Name, foreignWorkspaceName)
-	}
-	if u, err := s.UserByID(ctx, fuser); err != nil {
-		return fmt.Errorf("%w: 读回 foreign user 失败", ErrDemoSeedRefused)
-	} else if u.Email != foreignUserEmail || u.Status != metadata.UserStatusActive || u.PasswordHash != demoPasswordHash {
-		return fmt.Errorf("%w: foreign user 漂移（email=%q status=%q）", ErrDemoSeedRefused, u.Email, u.Status)
-	}
-	if m, err := s.MemberByWorkspaceAndUser(ctx, fws, fuser); err != nil {
-		return fmt.Errorf("%w: 读回 foreign member 失败", ErrDemoSeedRefused)
-	} else if m.Role != metadata.RoleOwner {
-		return fmt.Errorf("%w: foreign member role 漂移（got %q）", ErrDemoSeedRefused, m.Role)
-	}
-	env, err := s.envelopeByRef(ctx, fws, fsecret, 1)
+// verifyForeignConnection 读回校验连接不可变字段与凭证可解析性（fail-closed）。
+func verifyForeignConnection(ctx context.Context, deps Deps, fws, fuser, fconn uuid.UUID) error {
+	conn, err := deps.ConnReader.ConnectionByID(ctx, fws, fconn)
 	if err != nil {
-		return fmt.Errorf("%w: 读回 foreign envelope 失败", ErrDemoSeedRefused)
-	}
-	if env.EnvelopeSuite != "AES256GCM-v1" || env.KEKVersion != 1 ||
-		!bytes.Equal(env.Ciphertext, []byte{0}) || !bytes.Equal(env.DataNonce, []byte{0}) ||
-		!bytes.Equal(env.WrappedDEK, []byte{0}) || !bytes.Equal(env.WrapNonce, []byte{0}) {
-		return fmt.Errorf("%w: foreign envelope 漂移（suite=%q kek=%d）", ErrDemoSeedRefused, env.EnvelopeSuite, env.KEKVersion)
-	}
-	conn, err := s.connectionByID(ctx, fws, fconn)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: foreign connection 缺失或不属于第二 workspace", ErrDemoSeedRefused)
-		}
-		return fmt.Errorf("%w: 读回 foreign connection 失败", ErrDemoSeedRefused)
+		return fmt.Errorf("%w: 读回 foreign connection 失败: %w", ErrDemoSeedRefused, err)
 	}
 	if conn.Name != foreignConnName || conn.Engine != metadata.EnginePostgreSQL ||
 		conn.Host != foreignConnHost || conn.Port != 5432 ||
 		conn.Database != foreignConnDatabase || conn.Environment != metadata.EnvDevelopment ||
-		conn.SecretRef != fsecret || conn.SecretVersion != 1 || conn.CreatedBy != fuser {
-		return fmt.Errorf("%w: foreign connection 漂移（name=%q engine=%q host=%q port=%d db=%q env=%q secret_ref=%s secret_version=%d）",
-			ErrDemoSeedRefused, conn.Name, conn.Engine, conn.Host, conn.Port, conn.Database, conn.Environment, conn.SecretRef, conn.SecretVersion)
+		conn.CreatedBy != fuser {
+		return fmt.Errorf("%w: foreign connection 漂移（name=%q engine=%q host=%q port=%d db=%q env=%q created_by=%s）",
+			ErrDemoSeedRefused, conn.Name, conn.Engine, conn.Host, conn.Port, conn.Database, conn.Environment, conn.CreatedBy)
+	}
+	// 凭证可解析（未被退役/篡改/缺失）且与合成 foreign 凭证一致。
+	payload, err := deps.Resolver.ResolveCredential(ctx, fws, conn.SecretRef, conn.SecretVersion)
+	if err != nil {
+		return fmt.Errorf("%w: foreign connection 凭证无法解析（版本不匹配/信封缺失/已退役）", ErrDemoSeedRefused)
+	}
+	if payload.User != foreignCredUser || payload.Password != foreignCredPassword {
+		return fmt.Errorf("%w: foreign connection 凭证与合成期望不一致", ErrDemoSeedRefused)
 	}
 	return nil
 }

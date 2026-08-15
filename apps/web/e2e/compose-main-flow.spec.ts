@@ -76,8 +76,11 @@ test("@smoke PostgreSQL 主流程：连接 → schema → 表 → 列 → 只读
   const page2Body = await page2.json();
   expect(page2Body.data.rows.length).toBe(2);
   expect(page2Body.meta.audit.state).toBe("recorded");
-  // 续页不应重复首页已返回的 id 值
-  expect(page2Body.data.rows.flat()).not.toEqual(expect.arrayContaining(execBody.data.rows.flat()));
+  // 逐行断言第二页每个 id 不在第一页集合中（防部分重复漏检）
+  const page1Ids = new Set(execBody.data.rows.map((r: unknown[]) => String(r[0])));
+  for (const r of page2Body.data.rows as unknown[]) {
+    expect(page1Ids.has(String((r as unknown[])[0]))).toBe(false);
+  }
 });
 
 test("@smoke MySQL 主流程：连接 → schema → 表 → 列 → 只读查询 → 审计回执", async ({ request }) => {
@@ -240,7 +243,7 @@ test("@smoke UI 显式排序下一页：填写排序列启用服务端分页，�
   await page.getByRole("treeitem", { name: PG_NAME }).click();
   await expect(page.getByRole("treeitem", { name: "public" })).toBeVisible();
 
-  // demo_pagination 有 150 行（PK id）；填写排序列 → page_size=100 + order_by id
+  // demo_pagination 有 600 行（PK id）；填写排序列 → page_size=100 + order_by id
   await page.locator(".sql-editor-accessible-input").fill("SELECT id, name FROM demo_pagination");
   await page.getByRole("textbox", { name: /排序列/ }).fill("id");
   await page.getByRole("button", { name: /运行查询/ }).click();

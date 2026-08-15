@@ -138,9 +138,11 @@ CREATE TABLE IF NOT EXISTS demo_pagination (
     name VARCHAR(255) NOT NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 幂等插入：先将会话变量读取为行数，避免 INSERT 内子查询引用目标表触发 MySQL 8.4 ER_UPDATE_TABLE_USED
+SET @seed_rows = (SELECT COUNT(*) FROM demo_pagination);
+
 INSERT INTO demo_pagination (name)
 WITH RECURSIVE seq(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM seq WHERE n < 600)
-SELECT CONCAT('row-', n) FROM seq
-WHERE NOT EXISTS (SELECT 1 FROM demo_pagination);
+SELECT CONCAT('row-', n) FROM seq WHERE @seed_rows = 0;
 EOSQL
 ) || exit $?

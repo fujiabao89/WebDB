@@ -78,10 +78,17 @@ func (c *fakeCredService) Create(_ context.Context, wsID, _ uuid.UUID, payload c
 	return env, nil
 }
 
-func (c *fakeCredService) ResolveCredential(_ context.Context, _ uuid.UUID, secretRef uuid.UUID, _ int) (credentials.CredentialPayload, error) {
-	// 模拟 LifecycleManager.Resolve：retired envelope 拒绝解析（与生产语义一致）。
-	if env, ok := c.envs[secretRef.String()]; ok && env.RetiredAt != nil {
+func (c *fakeCredService) ResolveCredential(_ context.Context, _ uuid.UUID, secretRef uuid.UUID, version int) (credentials.CredentialPayload, error) {
+	// 模拟 LifecycleManager.Resolve：envelope 缺失/退役/版本不匹配均拒绝解析（与生产语义一致）。
+	env, ok := c.envs[secretRef.String()]
+	if !ok {
+		return credentials.CredentialPayload{}, sql.ErrNoRows
+	}
+	if env.RetiredAt != nil {
 		return credentials.CredentialPayload{}, errors.New("credential retired")
+	}
+	if env.Version != version {
+		return credentials.CredentialPayload{}, sql.ErrNoRows
 	}
 	p, ok := c.payloads[secretRef.String()]
 	if !ok {
@@ -108,7 +115,6 @@ type seedFake struct {
 	members    map[string]*metadata.WorkspaceMember
 	conns      map[uuid.UUID]*metadata.Connection
 	policies   map[uuid.UUID]*metadata.ConnectionPolicy
-	envelopes  map[uuid.UUID]*metadata.CredentialEnvelope
 
 	createConnCalls   int
 	createPolicyCalls int
@@ -124,7 +130,6 @@ func newSeedFake() *seedFake {
 		members:    map[string]*metadata.WorkspaceMember{},
 		conns:      map[uuid.UUID]*metadata.Connection{},
 		policies:   map[uuid.UUID]*metadata.ConnectionPolicy{},
-		envelopes:  map[uuid.UUID]*metadata.CredentialEnvelope{},
 		cred:       newFakeCredService(),
 	}
 }
@@ -198,36 +203,12 @@ func (f *seedFake) addMemberIfAbsent(_ context.Context, m *metadata.WorkspaceMem
 	return nil
 }
 
-func (f *seedFake) createEnvelopeWithID(_ context.Context, env *metadata.CredentialEnvelope) error {
-	if _, ok := f.envelopes[env.SecretRef]; ok {
-		return nil // DO NOTHING
-	}
-	f.envelopes[env.SecretRef] = env
-	return nil
-}
-
 func (f *seedFake) createConnectionWithID(_ context.Context, conn *metadata.Connection) error {
 	if _, ok := f.conns[conn.ID]; ok {
 		return nil // DO NOTHING
 	}
 	f.conns[conn.ID] = conn
 	return nil
-}
-
-func (f *seedFake) connectionByID(_ context.Context, wsID, id uuid.UUID) (*metadata.Connection, error) {
-	c, ok := f.conns[id]
-	if !ok || c.WorkspaceID != wsID {
-		return nil, sql.ErrNoRows
-	}
-	return c, nil
-}
-
-func (f *seedFake) envelopeByRef(_ context.Context, wsID, secretRef uuid.UUID, version int) (*metadata.CredentialEnvelope, error) {
-	e, ok := f.envelopes[secretRef]
-	if !ok || e.WorkspaceID != wsID || e.Version != version {
-		return nil, sql.ErrNoRows
-	}
-	return e, nil
 }
 
 // connectionCreator
@@ -326,12 +307,19 @@ func preseedForeignFixture(f *seedFake) {
 	fws := mustParseUUID(DemoForeignWorkspaceID)
 	fuser := mustParseUUID(DemoForeignUserID)
 	fconn := mustParseUUID(DemoForeignConnectionID)
-	fsecret := mustParseUUID(demoForeignSecretRef)
-	f.workspaces[fws] = &metadata.Workspace{ID: fws, Name: "Foreign Workspace", Settings: json.RawMessage("{}")}
-	f.users[fuser] = &metadata.User{ID: fuser, Email: "foreign@example.local", PasswordHash: demoPasswordHash, Status: metadata.UserStatusActive}
+	f.workspaces[fws] = &metadata.Workspace{ID: fws, Name: foreignWorkspaceName, Settings: json.RawMessage("{}")}
+	f.users[fuser] = &metadata.User{ID: fuser, Email: foreignUserEmail, PasswordHash: demoPasswordHash, Status: metadata.UserStatusActive}
 	f.members[memberKey(fws, fuser)] = &metadata.WorkspaceMember{WorkspaceID: fws, UserID: fuser, Role: metadata.RoleOwner}
-	f.envelopes[fsecret] = &metadata.CredentialEnvelope{WorkspaceID: fws, SecretRef: fsecret, Version: 1, Ciphertext: []byte{0}, DataNonce: []byte{0}, WrappedDEK: []byte{0}, WrapNonce: []byte{0}, EnvelopeSuite: "AES256GCM-v1", KEKVersion: 1}
-	f.conns[fconn] = &metadata.Connection{ID: fconn, WorkspaceID: fws, Name: "foreign (PostgreSQL)", Engine: metadata.EnginePostgreSQL, Host: "foreign-demo-pg", Port: 5432, Database: "foreign_db", Environment: metadata.EnvDevelopment, SecretRef: fsecret, SecretVersion: 1, CreatedBy: fuser}
+	env := &metadata.CredentialEnvelope{
+		WorkspaceID:   fws,
+		SecretRef:     uuid.New(),
+		Version:       1,
+		EnvelopeSuite: "AES256GCM-v1",
+		KEKVersion:    1,
+	}
+	f.cred.envs[env.SecretRef.String()] = env
+	f.cred.payloads[env.SecretRef.String()] = credentials.CredentialPayload{User: foreignCredUser, Password: foreignCredPassword}
+	f.conns[fconn] = &metadata.Connection{ID: fconn, WorkspaceID: fws, Name: foreignConnName, Engine: metadata.EnginePostgreSQL, Host: foreignConnHost, Port: 5432, Database: foreignConnDatabase, Environment: metadata.EnvDevelopment, SecretRef: env.SecretRef, SecretVersion: env.Version, CreatedBy: fuser}
 }
 
 // ---- 测试：演示开关门控 --------------------------------------------------------
@@ -496,18 +484,16 @@ func TestRun_freshCreates(t *testing.T) {
 	if len(f.policies) != 2 {
 		t.Fatalf("应创建两个策略，实际 %d", len(f.policies))
 	}
-	if len(f.cred.envs) != 2 {
-		t.Fatalf("应创建两个凭证信封，实际 %d", len(f.cred.envs))
+	if len(f.cred.envs) != 3 {
+		t.Fatalf("应创建三个凭证信封（两演示 + 一 foreign），实际 %d", len(f.cred.envs))
 	}
-	if f.cred.createCalls != 2 || f.createConnCalls != 2 || f.createPolicyCalls != 2 {
+	if f.cred.createCalls != 3 || f.createConnCalls != 2 || f.createPolicyCalls != 2 {
 		t.Fatalf("创建调用次数异常: cred=%d conn=%d policy=%d", f.cred.createCalls, f.createConnCalls, f.createPolicyCalls)
 	}
-	// 连接的 secret_ref 必须指向实际创建的 envelope（演示连接在 f.cred.envs，foreign 在 f.envelopes）
+	// 每个连接的 secret_ref 都必须指向实际创建的信封（全在 f.cred.envs）。
 	for _, c := range f.conns {
 		if _, ok := f.cred.envs[c.SecretRef.String()]; !ok {
-			if _, ok2 := f.envelopes[c.SecretRef]; !ok2 {
-				t.Fatalf("连接 %s 引用了不存在的 envelope %s", c.ID, c.SecretRef)
-			}
+			t.Fatalf("连接 %s 引用了不存在的 envelope %s", c.ID, c.SecretRef)
 		}
 	}
 }
@@ -551,23 +537,26 @@ func TestRun_foreignFixtureDriftFailsClosed(t *testing.T) {
 		}
 	})
 
-	t.Run("envelope suite 漂移", func(t *testing.T) {
+	t.Run("credential payload 漂移", func(t *testing.T) {
 		f := newSeedFake()
 		preseedConsistent(t, f, cfg)
-		f.envelopes[mustParseUUID(demoForeignSecretRef)].EnvelopeSuite = "OTHER-SUITE"
+		secretRef := f.conns[mustParseUUID(DemoForeignConnectionID)].SecretRef
+		f.cred.payloads[secretRef.String()] = credentials.CredentialPayload{User: foreignCredUser, Password: "wrong"}
 
 		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
-			t.Fatalf("foreign envelope suite 漂移应 fail-closed，got %v", err)
+			t.Fatalf("foreign credential payload 漂移应 fail-closed，got %v", err)
 		}
 	})
 
-	t.Run("envelope ciphertext 漂移", func(t *testing.T) {
+	t.Run("credential 退役", func(t *testing.T) {
 		f := newSeedFake()
 		preseedConsistent(t, f, cfg)
-		f.envelopes[mustParseUUID(demoForeignSecretRef)].Ciphertext = []byte{9, 9}
+		secretRef := f.conns[mustParseUUID(DemoForeignConnectionID)].SecretRef
+		now := time.Now().UTC()
+		f.cred.envs[secretRef.String()].RetiredAt = &now
 
 		if err := Run(ctx, cfg, f.fakeDeps()); !errors.Is(err, ErrDemoSeedRefused) {
-			t.Fatalf("foreign envelope ciphertext 漂移应 fail-closed，got %v", err)
+			t.Fatalf("foreign credential 退役应 fail-closed，got %v", err)
 		}
 	})
 
@@ -788,8 +777,8 @@ func TestRun_orphanEnvelopeRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("检测到未绑定连接的 active 凭证信封时应 fail-closed 拒绝")
 	}
-	if f.cred.createCalls != 0 {
-		t.Fatalf("拒绝时应不创建新凭证，实际调用 %d", f.cred.createCalls)
+	if f.cred.createCalls != 1 {
+		t.Fatalf("拒绝时应仅创建 foreign fixture 凭证（1），不创建演示连接凭证，实际 %d", f.cred.createCalls)
 	}
 	if !strings.Contains(err.Error(), "凭证信封") {
 		t.Errorf("错误应描述凭证信封冲突，实际: %v", err)

@@ -2,7 +2,7 @@
 
 > 状态：**进行中**（累计分页契约、F1、order_by 控件、D16 双引擎+越权、C5 黑盒、Windows 视觉基线均已修复/取证；剩余 Linux Chromium/Ubuntu 视觉基线为外部硬阻塞，另 TTL/panic/generation 仅 Go 测试级）
 > 日期：2026-08-14｜分支：`feat/WEB-39-compose-e2e-acceptance`｜基线：`0ccdfdd0689aa94f8da42617f6c032d489f8997b`（upstream/main）
-> worktree：`C:\Users\34026\项目开发3-WEB-39`
+> worktree：`项目开发3-WEB-39`（本仓库的独立 git worktree）
 
 ## 1. 本轮修复（响应 REQUEST CHANGES）
 
