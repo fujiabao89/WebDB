@@ -785,6 +785,30 @@ func TestRun_orphanEnvelopeRejected(t *testing.T) {
 	}
 }
 
+// foreign 工作区的孤立 active envelope 也必须在写入前 fail-closed（与 demo 工作区一致），
+// 避免 foreign 连接创建失败遗留的孤立凭证累积。
+func TestRun_foreignOrphanEnvelopeRejected(t *testing.T) {
+	ctx := context.Background()
+	f := newSeedFake()
+	cfg := newTestConfig()
+	fws := mustParseUUID(DemoForeignWorkspaceID)
+	f.cred.envs["foreign-orphan-1"] = &metadata.CredentialEnvelope{
+		WorkspaceID:   fws,
+		SecretRef:     uuid.New(),
+		Version:       1,
+		EnvelopeSuite: "AES256GCM-v1",
+		KEKVersion:    1,
+	}
+
+	err := Run(ctx, cfg, f.fakeDeps())
+	if !errors.Is(err, ErrDemoSeedRefused) {
+		t.Fatalf("foreign 工作区孤立 envelope 应 fail-closed，got %v", err)
+	}
+	if f.cred.createCalls != 0 {
+		t.Fatalf("拒绝时应不创建任何新凭证（含 foreign），实际 %d", f.cred.createCalls)
+	}
+}
+
 func TestRun_partialFailureLeavesOrphanThenRefuses(t *testing.T) {
 	ctx := context.Background()
 	cfg := newTestConfig()

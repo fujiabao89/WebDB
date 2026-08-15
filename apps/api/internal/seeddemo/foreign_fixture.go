@@ -57,6 +57,12 @@ func ensureForeignIsolationFixture(ctx context.Context, deps Deps) error {
 	fuser := mustParseUUID(DemoForeignUserID)
 	fconn := mustParseUUID(DemoForeignConnectionID)
 
+	// 先拒绝 foreign 工作区的孤立 active envelope（上次 seed 连接创建失败遗留），
+	// 避免重复创建新 envelope 造成累积（与 demo 工作区 rejectOrphanEnvelopes 语义一致）。
+	if err := rejectOrphanEnvelopes(ctx, deps, fws); err != nil {
+		return err
+	}
+
 	if err := deps.Identity.createWorkspaceWithID(ctx, &metadata.Workspace{ID: fws, Name: foreignWorkspaceName, Settings: json.RawMessage("{}")}); err != nil {
 		return fmt.Errorf("创建 foreign workspace 失败: %w", err)
 	}
