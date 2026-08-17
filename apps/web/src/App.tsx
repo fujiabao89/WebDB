@@ -198,6 +198,8 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
   const [expandedSchemas, setExpandedSchemas] = useState<Set<string>>(new Set());
   const [expandedTables, setExpandedTables] = useState<Set<string>>(new Set());
   const [sql, setSql] = useState("SELECT\n  id\nFROM public.users\nORDER BY id\nLIMIT 100;");
+  const [sortColumn, setSortColumn] = useState("");
+  const [sortOrder, setSortOrder] = useState<"ASC" | "DESC">("ASC");
   const connectionAbort = useRef<AbortController | undefined>(undefined);
   const schemaAbort = useRef<AbortController | undefined>(undefined);
   const runAbort = useRef<AbortController | undefined>(undefined);
@@ -325,6 +327,26 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
 
   const applyQueryResponse = (response: QueryResponseDto) => dispatch({ type: "executionSucceeded", result: response.data, page: response.meta.page, audit: response.meta.audit });
 
+  const invalidateQueryInput = () => {
+    dispatch({ type: "queryInputChanged" });
+    runAbort.current?.abort();
+    pageAbort.current?.abort();
+    executionInFlight.current = false;
+    pageInFlight.current = false;
+  };
+  const handleSqlChange = (value: string) => {
+    invalidateQueryInput();
+    setSql(value);
+  };
+  const handleSortColumnChange = (value: string) => {
+    invalidateQueryInput();
+    setSortColumn(value);
+  };
+  const handleSortOrderChange = (value: "ASC" | "DESC") => {
+    invalidateQueryInput();
+    setSortOrder(value);
+  };
+
   const runQuery = () => {
     const connectionId = selectedConnection.current;
     if (!workspaceId || !connectionId || executionInFlight.current || pageInFlight.current) return;
@@ -334,7 +356,9 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
     runAbort.current = controller;
     executionInFlight.current = true;
     dispatch({ type: "runStarted", generation: requestGeneration });
-    void api.execute(workspaceId, { connection_id: connectionId, sql, page_size: 100 }, controller.signal).then(
+    const trimmedSort = sortColumn.trim();
+    const orderBy = trimmedSort ? [{ column: trimmedSort, order: sortOrder, nulls_last: false }] : undefined;
+    void api.execute(workspaceId, { connection_id: connectionId, sql, page_size: orderBy ? 100 : 500, ...(orderBy ? { order_by: orderBy } : {}) }, controller.signal).then(
       (response) => {
         if (!controller.signal.aborted && requestGeneration === generation.current && selectedConnection.current === connectionId) applyQueryResponse(response);
       },
@@ -494,13 +518,22 @@ export function App({ api = defaultApi, workspaceId = import.meta.env.VITE_WEBDB
         <main className="query-workspace">
           <section className="query-toolbar" aria-label="查询工具栏">
             <strong>未命名查询</strong><span className="policy-note"><span aria-hidden="true">{icon("shield")}</span> 单条只读查询 · 安全策略由服务端裁决</span><span className="toolbar-spacer" />
+            <label className="sort-control" title="留空为有界单页（最多 500 行）；填写排序列（如 id）启用服务端分页（每页 100 行），排序唯一性由服务端裁决，前端不推断主键">
+              <span>排序列（可选）</span>
+              <input type="text" value={sortColumn} onChange={(event) => handleSortColumnChange(event.target.value)} placeholder="如 id" aria-label="排序列（可选）" />
+              <select value={sortOrder} onChange={(event) => handleSortOrderChange(event.target.value as "ASC" | "DESC")} aria-label="排序方向">
+                <option value="ASC">ASC 升序</option>
+                <option value="DESC">DESC 降序</option>
+              </select>
+            </label>
+            <span className="toolbar-spacer" />
             <kbd>Ctrl+Enter</kbd>
             <button className={`button ${state.execution.status === "running" ? "button-warning" : "button-primary"}`} type="button" onClick={state.execution.status === "running" ? cancelQuery : runQuery} disabled={!selected || state.execution.status === "loading-next-page"} aria-keyshortcuts="Control+Enter Meta+Enter">
               <span aria-hidden="true">{state.execution.status === "running" ? icon("stop") : icon("play")}</span>{state.execution.status === "running" ? "取消查询" : "运行查询"}
             </button>
           </section>
           <section className="editor-panel" aria-label="SQL 编辑器">
-            <SqlEditor engine={selected?.engine} value={sql} onChange={setSql} onRun={runQuery} />
+            <SqlEditor engine={selected?.engine} value={sql} onChange={handleSqlChange} onRun={runQuery} />
             <div className="editor-status"><span>{selected?.engine === "mysql" ? "MySQL" : "PostgreSQL"}</span><span>UTF-8</span><span>语法高亮仅用于阅读</span></div>
           </section>
           <section className="output-panel" aria-label="查询输出">

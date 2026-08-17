@@ -59,6 +59,12 @@ type QueryResult struct {
 	HasMore       bool         `json:"has_more"`
 	ReturnedRows  int          `json:"returned_rows"`
 	TotalReturned int          `json:"total_returned"`
+
+	// readAhead 是适配器私有、不可序列化的预读哨兵信号，与公开 HasMore 分离：
+	// 单页受限请求据此在读到 effPage+1 哨兵行时返回 result_too_large，
+	// 而公开 HasMore 仍受 total < maxRows 约束，避免累计分页到上限时
+	// 出现 has_more=true 但无 token 的不一致响应。
+	readAhead bool
 }
 
 // ColumnInfo 结果列元数据。

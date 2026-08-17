@@ -36,6 +36,7 @@ export type WorkbenchAction =
   | { type: "schemasFailed"; connectionId: string; generation: number; error: WorkbenchError }
   | { type: "runStarted"; generation: number }
   | { type: "runCancelledLocally" }
+  | { type: "queryInputChanged" }
   | { type: "executionSucceeded"; result: QueryResultDto; page: QueryPageDto; audit: AuditReceiptDto }
   | { type: "nextPageStarted" }
   | { type: "executionFailed"; code: string; message: string; retryAfterSeconds?: number };
@@ -64,6 +65,9 @@ export function workbenchReducer(state: WorkbenchState, action: WorkbenchAction)
       return { ...state, execution: { status: "running" }, error: undefined, result: undefined, audit: undefined, nextPageToken: undefined };
     case "runCancelledLocally":
       return { ...state, execution: { status: "cancelled" }, error: undefined, result: undefined, audit: undefined, nextPageToken: undefined };
+    case "queryInputChanged":
+      // 用户修改 SQL/排序列/排序方向：旧结果与分页 token 不再对应当前输入，清空以阻止"加载下一页"使用过期 token。
+      return { ...state, execution: { status: "idle" }, error: undefined, result: undefined, audit: undefined, nextPageToken: undefined };
     case "nextPageStarted":
       return { ...state, execution: { status: "loading-next-page" }, error: undefined };
     case "executionSucceeded": {

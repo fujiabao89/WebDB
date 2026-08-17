@@ -20,6 +20,7 @@ type identityStore interface {
 	createUserWithID(ctx context.Context, u *metadata.User) error
 	MemberByWorkspaceAndUser(ctx context.Context, wsID, userID uuid.UUID) (*metadata.WorkspaceMember, error)
 	addMemberIfAbsent(ctx context.Context, m *metadata.WorkspaceMember) error
+	createConnectionWithID(ctx context.Context, conn *metadata.Connection) error
 }
 
 // credentialCreator 抽象凭证创建能力（生产实现 credentials.LifecycleManager.Create）。

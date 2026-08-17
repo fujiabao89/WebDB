@@ -43,6 +43,30 @@ const api: WebDbApi = {
   nextPage: vi.fn(),
 };
 
+const paginatedResponse = {
+  data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+  meta: { page: { page_size: 100, has_more: true, next_page_token: "token-1" }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+};
+
+const stalePageResponse = {
+  data: { columns: [{ name: "id", wire_type: "int" }], rows: [["stale-page-2"]], returned_rows: 1, total_returned: 2 },
+  meta: { page: { page_size: 100, has_more: true, next_page_token: "token-2" }, audit: { state: "recorded", audit_event_id: "audit-2", execution_id: "execution-2", trace_id: "trace-2", outcome: "succeeded" } },
+};
+
+async function renderWithInFlightNextPage() {
+  let resolveNextPage!: (value: unknown) => void;
+  const nextPageResponse = new Promise((resolve) => { resolveNextPage = resolve; });
+  const execute = vi.fn().mockResolvedValue(paginatedResponse);
+  const nextPage = vi.fn().mockReturnValue(nextPageResponse);
+  const capturing: WebDbApi = { ...api, execute, nextPage };
+  const user = userEvent.setup();
+  render(<App api={capturing} workspaceId="workspace-1" />);
+  await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+  await user.click(screen.getByRole("button", { name: /运行查询/ }));
+  await user.click(await screen.findByRole("button", { name: /加载下一页/ }));
+  return { resolveNextPage, user };
+}
+
 describe("P0 workbench", () => {
   it("creates Monaco with SQL edits made before its asynchronous module load completes", async () => {
     render(<App api={api} workspaceId="workspace-1" />);
@@ -69,6 +93,149 @@ describe("P0 workbench", () => {
     expect(screen.getByText('{"safe":true}')).toBeTruthy();
     expect(screen.getByText("AQI=")).toBeTruthy();
     expect(screen.queryByText(sensitiveResponseCanary)).toBeNull();
+  });
+
+  it("sends page_size 500 and no order_by for the default run request (bounded single page)", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const [, request] = execute.mock.calls[0] as unknown as [
+      string,
+      { connection_id: string; sql: string; page_size: number; order_by?: unknown },
+    ];
+    expect(request.connection_id).toBe("pg");
+    expect(request.page_size).toBe(500);
+    expect(request.order_by).toBeUndefined();
+  });
+
+  it("sends page_size 100 and order_by when an explicit sort column is provided", async () => {
+    const execute = vi.fn().mockResolvedValue({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 100, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.type(screen.getByRole("textbox", { name: /排序列/ }), "id");
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const [, request] = execute.mock.calls[0] as unknown as [
+      string,
+      { connection_id: string; sql: string; page_size: number; order_by?: Array<{ column: string; order: string; nulls_last: boolean }> },
+    ];
+    expect(request.page_size).toBe(100);
+    expect(request.order_by).toEqual([{ column: "id", order: "ASC", nulls_last: false }]);
+  });
+
+  it("clears pagination when SQL changes after a paginated run", async () => {
+    const execute = vi.fn().mockResolvedValue(paginatedResponse);
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    expect(await screen.findByRole("button", { name: /加载下一页/ })).toBeTruthy();
+
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("clears pagination when the sort column changes after a paginated run", async () => {
+    const execute = vi.fn().mockResolvedValue(paginatedResponse);
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    expect(await screen.findByRole("button", { name: /加载下一页/ })).toBeTruthy();
+
+    await user.type(screen.getByRole("textbox", { name: /排序列/ }), "id");
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("clears pagination when the sort order changes after a paginated run", async () => {
+    const execute = vi.fn().mockResolvedValue(paginatedResponse);
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    expect(await screen.findByRole("button", { name: /加载下一页/ })).toBeTruthy();
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /排序方向/ }), "DESC");
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("ignores an in-flight next-page response when SQL changes", async () => {
+    const { resolveNextPage } = await renderWithInFlightNextPage();
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    resolveNextPage(stalePageResponse);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale-page-2")).toBeNull();
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("ignores an in-flight next-page response when the sort column changes", async () => {
+    const { resolveNextPage, user } = await renderWithInFlightNextPage();
+    await user.type(screen.getByRole("textbox", { name: /排序列/ }), "id");
+    resolveNextPage(stalePageResponse);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale-page-2")).toBeNull();
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("ignores an in-flight next-page response when the sort order changes", async () => {
+    const { resolveNextPage, user } = await renderWithInFlightNextPage();
+    await user.selectOptions(screen.getByRole("combobox", { name: /排序方向/ }), "DESC");
+    resolveNextPage(stalePageResponse);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale-page-2")).toBeNull();
+    expect(screen.queryByRole("button", { name: /加载下一页/ })).toBeNull();
+  });
+
+  it("ignores an in-flight initial-query response when SQL changes", async () => {
+    let resolveExecute!: (value: unknown) => void;
+    const execute = vi.fn().mockReturnValue(new Promise((resolve) => { resolveExecute = resolve; }));
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    resolveExecute({
+      data: { columns: [{ name: "id", wire_type: "int" }], rows: [["stale-run"]], returned_rows: 1, total_returned: 1 },
+      meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-1", execution_id: "execution-1", trace_id: "trace-1", outcome: "succeeded" } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("stale-run")).toBeNull();
+  });
+
+  it("allows re-running after editing during an in-flight query", async () => {
+    const execute = vi.fn()
+      .mockReturnValueOnce(new Promise(() => undefined))
+      .mockResolvedValue({
+        data: { columns: [{ name: "id", wire_type: "int" }], rows: [["1"]], returned_rows: 1, total_returned: 1 },
+        meta: { page: { page_size: 500, has_more: false }, audit: { state: "recorded", audit_event_id: "audit-2", execution_id: "execution-2", trace_id: "trace-2", outcome: "succeeded" } },
+      });
+    const capturing: WebDbApi = { ...api, execute };
+    const user = userEvent.setup();
+    render(<App api={capturing} workspaceId="workspace-1" />);
+    await user.click(await screen.findByRole("treeitem", { name: /Synthetic PostgreSQL/ }));
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    fireEvent.change(screen.getByRole("textbox", { name: /SQL 编辑器/ }), { target: { value: "SELECT 2" } });
+    await user.click(screen.getByRole("button", { name: /运行查询/ }));
+    expect(execute).toHaveBeenCalledTimes(2);
   });
 
   it("announces Retry-After and keeps the SQL available after a 429", async () => {
