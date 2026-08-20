@@ -1,6 +1,6 @@
 # WEB-44：可信 MySQL sql_mode 与 SQL policy fail-closed
 
-> 状态：本地实施与独立审查完成，待提交/PR/CI/合并｜风险：High（P1）｜Owner：shelly allen｜期限：2026-08-15
+> 状态：已合并（PR #52）｜风险：High（P1）｜Owner：shelly allen｜期限：2026-08-15
 
 ## 目标与非目标
 

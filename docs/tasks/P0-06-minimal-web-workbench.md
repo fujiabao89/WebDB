@@ -1,6 +1,6 @@
 # P0-06：最小 Web 工作台
 
-> 状态：Backlog｜风险：Medium｜依赖：P0-01、P0-03、P0-04；集成 P0-02/P0-05｜建议实现者：Claude Code｜独立审查：Codex
+> 状态：Done（WEB-34 Owner Gate 已接受 2026-08-13；WEB-35/36/37/38/39 均已合并）｜风险：Medium｜依赖：P0-01、P0-03、P0-04；集成 P0-02/P0-05｜建议实现者：Claude Code｜独立审查：Codex
 
 ## 目标与范围
 
