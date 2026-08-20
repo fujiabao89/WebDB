@@ -15,12 +15,13 @@ docs/tasks/         P0 任务卡与交接状态
 
 ## 快速启动
 
-需要 Docker Engine 与 Docker Compose v2。先复制本地环境模板；模板仅含 `change_me` 占位值，实际 `.env` 不得提交。
+需要 Docker Engine 与 Docker Compose v2。先复制本地环境模板；数据库密码为 `change_me` 占位值（仅本地演示），`WEBDB_KEK_V1` 必须生成并替换（占位值非法，缺失/非法时 `api`/`web` 不启动）。
 
 Linux / macOS：
 
 ```bash
 cp deploy/compose/env.example deploy/compose/.env
+openssl rand -base64 32   # 将输出粘贴到 .env 的 WEBDB_KEK_V1=（32 字节 base64）
 docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 docker compose -f deploy/compose/docker-compose.yml ps
 ```
@@ -29,6 +30,7 @@ Windows PowerShell：
 
 ```powershell
 Copy-Item deploy/compose/env.example deploy/compose/.env
+# 生成 32 字节 base64 KEK 并粘贴到 .env 的 WEBDB_KEK_V1=；例如在 Git Bash 运行：openssl rand -base64 32
 docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
 docker compose -f deploy/compose/docker-compose.yml ps
 ```
