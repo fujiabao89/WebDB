@@ -1,6 +1,8 @@
 # ADR-016：Admission 预留与 Execution 创建时序
 
 > 状态：已接受｜日期：2026-07-26｜Owner：fujiabao89｜批准日期：2026-07-27
+>
+> **实施状态**：已完成（WEB-35 / P0-06B，PR #48）。Service 层 `rate_limited`/`connection_busy` 终结逻辑已落地于 `internal/execution`（`pipeline.go` 将 `adapter.ErrRateLimited`/`adapter.ErrConnPoolExhausted` 映射为稳定错误码，`executionhttp` 完成 429 与错误码映射）。下文"验证"表中的"待 ADR-016 实施后补充"以撰写时点为准。
 
 ## 背景
 

@@ -49,7 +49,16 @@ cp deploy/compose/env.example deploy/compose/.env
 Copy-Item deploy/compose/env.example deploy/compose/.env
 ```
 
-默认值可满足本地开发。需要自定义时编辑 `.env` 文件。
+复制后**必须生成密钥加密根密钥（KEK）**：`WEBDB_KEK_V1` 的占位值非法（非 32 字节 base64），
+API 严格校验并 fail-closed，缺失/非法时 `api`/`web` 不启动。生成方式（输出 44 字符 base64，
+解码为 32 字节）：
+
+```bash
+openssl rand -base64 32
+```
+
+将输出整行粘贴到 `.env` 的 `WEBDB_KEK_V1=` 后。其余数据库密码占位符 `change_me` 仅适用于
+本地演示（Compose 显式启用 `ALLOW_INSECURE_LOCAL_DEMO=true`）。需要自定义时编辑 `.env`。
 
 > **元数据库连接池配置**（`META_DB_MAX_OPEN_CONNS` / `META_DB_MAX_IDLE_CONNS` /
 > `META_DB_CONN_MAX_LIFETIME`）：`docker-compose.yml` 使用 `${VAR:-default}` 插值，
@@ -75,15 +84,15 @@ docker compose -f deploy/compose/docker-compose.yml ps
 ```
 
 5 个常驻服务（`webdb-meta`、`demo-pg`、`demo-mysql`、`api`、`web`）均应显示 `healthy`；
-`api-migrate` 与 `demo-seed` 为 one-shot 服务，成功退出后显示 `exited (0)`（这是预期状态，
-不是启动失败）。
+`api-migrate`、`demo-seed` 与 `api-bootstrap` 为 one-shot 服务，成功退出后显示 `exited (0)`
+（这是预期状态，不是启动失败）。
 
 ### 4. 健康检查
 
 ```bash
 # API
 curl http://127.0.0.1:8080/health
-# → {"status":"ok","version":"0.1.0","time":"..."}
+# → {"status":"ok","version":"0.2.0","time":"..."}
 
 # Web
 curl -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/

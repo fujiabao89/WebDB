@@ -96,7 +96,7 @@ docs/
 
 ## 项目目标
 - [一句话产品定位]
-- 核心模块：`apps/web`、`services/api`、`packages/*`（按实际仓库填写）
+- 核心模块：`apps/web`、`apps/api`、`packages/*`（按实际仓库填写）
 
 ## 开始任务前
 1. 阅读 `docs/architecture/README.md`、`docs/engineering/coding-standards.md`。
@@ -145,7 +145,7 @@ docs/
 - 未授权不得合并、发布或变更基础设施权限。
 ```
 
-可在子目录放置更具体的 `AGENTS.md`，例如 `services/api/AGENTS.md` 补充接口与迁移规则，`apps/web/AGENTS.md` 补充 UI、可访问性和 E2E 规则；子规则只能收紧，不应与根规则相矛盾。
+可在子目录放置更具体的 `AGENTS.md`，例如 `apps/api/AGENTS.md` 补充接口与迁移规则，`apps/web/AGENTS.md` 补充 UI、可访问性和 E2E 规则；子规则只能收紧，不应与根规则相矛盾。
 
 ## 6. 标准开发流程
 
