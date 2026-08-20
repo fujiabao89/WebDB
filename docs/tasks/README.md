@@ -13,5 +13,5 @@
 | — | [P0-05 威胁模型](P0-05-threat-model.md) | 已批准 | P0-05A |
 | 3 | [P0-06 最小 Web 工作台](P0-06-minimal-web-workbench.md) | Done | P0-01、P0-03、P0-04；集成 P0-02/P0-05 |
 | 后续 | [P0-03-followup 连接池可观测性与压力测试](P0-03-followup-pool-observability-and-load-test.md) | Ready | P0-03；P0 结束前 |
-| 后续 | [P0-03-followup 查询结果类型规范化](P0-03-followup-result-type-normalization.md) | Ready | P0-03；P0-06 公开结果 API 前 |
-| 后续 | [P0-01-followup 依赖许可证清单](P0-01-followup-license-inventory.md) | Ready | P0-01 |
+| 后续 | [P0-03-followup 查询结果类型规范化](P0-03-followup-result-type-normalization.md) | Done | P0-03；P0-06 公开结果 API 前 |
+| 后续 | [P0-01-followup 依赖许可证清单](P0-01-followup-license-inventory.md) | Done | P0-01 |
