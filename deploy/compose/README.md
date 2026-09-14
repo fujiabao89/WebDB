@@ -53,11 +53,20 @@ Copy-Item deploy/compose/env.example deploy/compose/.env
 API 严格校验并 fail-closed，缺失/非法时 `api`/`web` 不启动。生成方式（输出 44 字符 base64，
 解码为 32 字节）：
 
+**Linux / macOS：**
 ```bash
 openssl rand -base64 32
 ```
 
-将输出整行粘贴到 `.env` 的 `WEBDB_KEK_V1=` 后。其余数据库密码占位符 `change_me` 仅适用于
+**Windows PowerShell（无需 Git Bash / OpenSSL）：**
+```powershell
+$kekBytes = New-Object byte[] 32
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try { $rng.GetBytes($kekBytes) } finally { $rng.Dispose() }
+[Convert]::ToBase64String($kekBytes)
+```
+
+将对应命令的输出整行粘贴到 `.env` 的 `WEBDB_KEK_V1=` 后。其余数据库密码占位符 `change_me` 仅适用于
 本地演示（Compose 显式启用 `ALLOW_INSECURE_LOCAL_DEMO=true`）。需要自定义时编辑 `.env`。
 
 > **元数据库连接池配置**（`META_DB_MAX_OPEN_CONNS` / `META_DB_MAX_IDLE_CONNS` /
