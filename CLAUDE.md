@@ -129,7 +129,7 @@ PR 编号在 PR 创建前不存在。因此，以下步骤必须在 Draft PR 创
      "pr": 0,
      "codex_login": "chatgpt-codex-connector[bot]",
      "max_rounds": 3,
-     "project_root": "C:\\Users\\34026\\项目开发3",
+     "project_root": "C:\\Users\\34026\\Project3",
      "test_commands": []
    }
    ```

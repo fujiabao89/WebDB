@@ -1,6 +1,6 @@
 # P0-03-followup：查询结果类型规范化
 
-> 状态：Ready｜风险：Medium｜依赖：P0-03｜Owner：fujiabao89｜建议实现者：Claude Code｜独立审查：Codex｜Issue：[#15](https://github.com/fujiabao89/WebDB/issues/15)｜完成期限：P0-06 公开结果 API 前
+> 状态：Done（WEB-10，PR #44 已合并）｜风险：Medium｜依赖：P0-03｜Owner：fujiabao89｜建议实现者：Claude Code｜独立审查：Codex｜Issue：[#15](https://github.com/fujiabao89/WebDB/issues/15)｜完成期限：P0-06 公开结果 API 前
 
 ## 目标与范围
 

@@ -2,7 +2,7 @@
 
 > 状态：已接受｜日期：2026-07-26｜Owner：fujiabao89｜批准日期：2026-07-27
 >
-> **实施状态**：本 ADR 描述的是已接受的**目标契约**。当前实现（P0-04, commit `64be9bb`）中，`apps/api/internal/adapter/keyset.go` 仍接收 `[]SortKey` 并依据 `k.Unique` 判断唯一性，`VerifiedSortPlan`、`VerifySortPlan()` 和 `queryplan` 包尚未实现。本文中 fail-closed 的 Schema 元数据验证、"禁止静默回退到客户端 SortKey.Unique"和"客户端提交 Unique=true 不影响验证结果"等均为迁移完成后的目标行为。
+> **实施状态**：已完成（WEB-38 / P0-06C，PR #45）。`internal/queryplan` 包已提供 sealed `VerifiedSortPlan`、`VerifiedNextPagePlan` 与唯一入口 `VerifySortPlan()`，Adapter 在执行前校验。下文关于"尚未实现"的说明为撰写时点（P0-04, commit `64be9bb`）的历史状态，迁移已完成。
 
 ## 背景
 

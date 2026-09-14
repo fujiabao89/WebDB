@@ -2,7 +2,7 @@
 
 > 状态：已接受｜日期：2026-07-26｜Owner：fujiabao89｜批准日期：2026-07-27
 >
-> **实施状态**：本 ADR 描述的是已接受的**目标契约**。当前实现（P0-04, commit `64be9bb`）仍由 Adapter 持有 `ContinuationRegistry`；`PoolHandle.NextPage` 仍接收 `token string`。Service-owned Registry、`VerifiedNextPagePlan` 接口和 claim 后不可恢复等契约待后续迭代迁移。本文中"Adapter 不生成/不解析/不保存 token""NextPage 接收 VerifiedNextPagePlan"等表述均为迁移完成后的目标状态。
+> **实施状态**：已完成（WEB-38 / P0-06C，PR #45）。Service-owned Registry（`internal/pagination`）、`VerifiedNextPagePlan` 与 claim 后不可恢复已实现，`PoolHandle.NextPage` 接收结构化 plan。下文关于"尚未实现"的说明为撰写时点（P0-04, commit `64be9bb`）的历史状态，迁移已完成。
 
 ## 背景
 
